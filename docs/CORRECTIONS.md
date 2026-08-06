@@ -31,3 +31,15 @@ Requested target vendors included Samsung. No Samsung datacenter accelerator has
 benchmarks rich enough to backtest against (mobile Exynos NPU data is too thin). Decision
 (user): start with NVIDIA H100/A100 and AMD MI300X, revisit Samsung once the validation
 harness exists.
+
+## D5 — Flat roofline for v1; multi-level hierarchy deferred to M8 (2026-08-06)
+
+M3 originally specified a hierarchical roofline (separate L1/SRAM, L2, DRAM ceilings, report which
+level binds), and §3.2/§3.3 described Winograd/FFT conv selection and a ws/os/rs loop-order search.
+Decision (user, 2026-08-06): v1 models one compute ridge (TOPS × achieved fraction) and one DRAM
+ridge. The on-chip memory is a single tile buffer whose **capacity** constrains tile sizes — the
+turnaround to HBM, the double-buffering depth, and the memory-vs-compute verdict all flow from
+capacity, not from SRAM bandwidth. SRAM bandwidth is rarely published and rarely binds for
+GEMM-shaped ops (tile AI 10–30 FLOP/byte vs a 100–500 FLOP/byte SRAM ridge). The deferred items are
+preserved as an M8 refinement backlog, landed only on user demand and only if they improve
+validation MAPE over the flat model.

@@ -19,8 +19,8 @@ every assumption it made.
 
 - **Decomposes** a model into a DAG of operations with FLOP and byte counts per memory level
 - **Maps** each operation onto the chip: which compute unit, which tile sizes, what fits in SRAM
-- **Predicts** latency via a hierarchical roofline (L1/L2/DRAM ceilings) plus tail-effect and
-  pipeline-fill utilization modelling
+- **Predicts** latency via a flat roofline (compute ridge vs DRAM ridge; the on-chip SRAM enters
+  as a tile-buffer capacity) plus tail-effect and pipeline-fill utilization modelling
 - **Separates prefill from decode** for LLMs — they are different machines, and the tool shows why
 - **Scales out** across chips: tensor / pipeline / data / expert parallelism with alpha-beta
   collective costs over hierarchical topologies (NVLink intra-node, InfiniBand inter-node)
@@ -102,8 +102,9 @@ docker compose up      # http://localhost:5173
 
 ## The model, briefly
 
-Full derivations in [`docs/MODEL.md`](docs/MODEL.md). The core is a roofline evaluated at every
-level of the memory hierarchy:
+Full derivations in [`docs/MODEL.md`](docs/MODEL.md). The core is a roofline with a compute
+ceiling and a DRAM ceiling; the on-chip SRAM enters as a tile-buffer capacity that constrains
+tiling:
 
 ```
 AI          = FLOPs / bytes_moved_at_level

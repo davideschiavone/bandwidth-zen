@@ -131,7 +131,7 @@ These are known-good behaviours. If a change breaks one, the change is wrong.
   then stop for review before starting the next.
 - **Plan before large changes.** For anything touching more than ~3 files, state the plan first.
 - **Prefer editing over rewriting.** Don't restructure modules that already have passing tests.
-- **Small commits, conventional messages:** `feat(analysis): hierarchical roofline for L2/DRAM`,
+- **Small commits, conventional messages:** `feat(analysis): flat roofline with tiled DRAM traffic`,
   `fix(attention): halve prefill score FLOPs for causal mask`, `docs(model): derive PP bubble`.
 - **Never commit** failing tests, `# type: ignore` without a reason comment, `TODO` without an
   issue reference, generated `types.ts` edited by hand, or profile YAML without a `source_url`.

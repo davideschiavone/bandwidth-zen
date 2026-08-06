@@ -86,13 +86,13 @@ bandwidth-zen/
 │   │   ├── operators/             # pluggable cost models, one file per family
 │   │   │   ├── base.py            # OperatorCostModel ABC + registry decorator
 │   │   │   ├── matmul.py          # GEMM: flops, tiled DRAM traffic, tail-effect utilization
-│   │   │   ├── conv.py            # direct / im2col / Winograd F(2x2,3x3) & F(4x4,3x3)
+│   │   │   ├── conv.py            # direct / im2col (Winograd/FFT deferred to M8)
 │   │   │   ├── attention.py       # vanilla, FlashAttention-2, GQA/MQA, sliding-window, paged KV
 │   │   │   ├── normalization.py   # layernorm, rmsnorm, softmax, batchnorm (fused/unfused)
 │   │   │   ├── elementwise.py     # activations, residual adds, rope
 │   │   │   └── custom.py          # user-supplied {flops, bytes} ops
 │   │   ├── analysis/
-│   │   │   ├── roofline.py        # per-op roofline + hierarchical (multi-level) roofline
+│   │   │   ├── roofline.py        # per-op roofline: compute ridge vs DRAM ridge (hierarchy at M8)
 │   │   │   ├── tiling.py          # tile-size search, reuse distance, DRAM traffic model
 │   │   │   ├── memory.py          # capacity planning: weights, KV cache, activations, fit/spill
 │   │   │   ├── schedule.py        # timeline construction, overlap, list scheduling
@@ -155,9 +155,15 @@ t_op_s        = overlap ? max(t_compute_s, t_memory_s)
 t_op_s        = max(t_op_s, kernel_launch_overhead_s + memory_latency_s)   # floor for tiny ops
 ```
 
-Do a **hierarchical roofline**: evaluate against L1/SRAM, L2, and DRAM ceilings separately and
-report which level binds. `bytes_moved` at each level comes from the tiling model (§3.3), not
-from naive tensor sizes — this is the single biggest fidelity win over a textbook roofline.
+For v1 do a **flat roofline**: one compute ridge (`peak_flops_s × util_eff`) and one memory
+ridge at the DRAM level. The on-chip memory is a single tile buffer whose **real capacity**
+constrains tile sizes (§3.3) — capacity drives the HBM turnaround, the double-buffering depth,
+and the memory-vs-compute verdict. Its bandwidth is assumed sufficient: typical GEMM tile AI is
+10–30 FLOP/byte vs a 100–500 FLOP/byte SRAM ridge, and datasheets rarely publish it anyway.
+`bytes_moved` at DRAM comes from the tiling model (§3.3), not from naive tensor sizes — this is
+the single biggest fidelity win over a textbook roofline. A **hierarchical roofline** (separate
+L1/SRAM, L2, DRAM ceilings, report which level binds) is deferred to M8, on user demand and only
+if it improves validation accuracy.
 
 `util_eff` is **not** a constant. Compute it from:
 - **Tail/quantization effect:** `prod(ceil(dim_i / tile_i) * tile_i) / prod(dim_i)` over the
@@ -203,10 +209,10 @@ materialized to DRAM. Model as: DRAM traffic = Q + K + V + O tiles only, with SR
 flops   = 2 · B · H_out · W_out · C_out · (C_in / groups) · K_h · K_w
 bytes   = weight_bytes + input_act_bytes·reload_factor + output_act_bytes
 ```
-Algorithm selection: **direct** (small channels), **im2col+GEMM** (adds
-`K_h·K_w×` input expansion traffic — model it), **Winograd F(2×2,3×3)** (2.25× FLOP reduction,
-+transform overhead, 3×3 stride-1 only, FP16+ only), **FFT** (large kernels). Pick per-layer by
-minimizing modelled latency and report the choice.
+Algorithm selection (v1: **direct** and **im2col+GEMM** only — the latter adds
+`K_h·K_w×` input expansion traffic; model it. **Winograd F(2×2,3×3)** (2.25× FLOP reduction,
++transform overhead, 3×3 stride-1 only, FP16+ only) and **FFT** (large kernels) are deferred to
+M8.) Pick per-layer by minimizing modelled latency and report the choice.
 
 **Depthwise conv is memory-bound** — AI ≈ `2·K_h·K_w / (2 + bytes_per_elem)`. MobileNet on a big
 systolic array must show terrible utilization. If it doesn't, the model is wrong.
@@ -225,8 +231,9 @@ Search tiles by enumerating powers of two ≥ the systolic dimension, filter by 
 constraint, minimize `max(t_compute, t_dram)`. Cache the search by `(shape, dtype, chip_id)`.
 Report the chosen tile sizes and the resulting **reuse factor** — users want to see this.
 
-Weight-stationary vs output-stationary vs row-stationary dataflow changes which term dominates;
-support `dataflow: ws|os|rs` on the chip profile and pick the loop order accordingly.
+The chip profile declares `dataflow: ws|os|rs`; v1 honours it directly — LLM weights are the
+dominant reused operand (ws), CNN activations (os). A full ws/os/rs trade-off search with per-op
+loop-order modelling to find which operand stays put is deferred to M8.
 
 ### 3.4 Multi-chip: sharding and collectives
 
@@ -326,6 +333,9 @@ interconnect:
   inter_node: {name: IB NDR, bandwidth_bytes_per_s: 5.0e10, latency_s: 5.0e-6, topology: fat_tree}
 cost_usd: 30000
 ```
+**v1 consumption note:** analysis reads only the top on-chip level (tile-buffer capacity) and the
+deepest level (DRAM bandwidth); intermediate levels are schema-only until the hierarchical
+roofline lands at M8.
 
 ### 4.2 Model spec YAML (two flavours: parametric and explicit-layer)
 
@@ -467,7 +477,8 @@ liveness).
 forward FLOPs (batch 1) match the analytic `2·N·S` rule within 2%; Llama-3-8B parameter count =
 8.03 B ±0.5%; KV-cache size for Llama-3-8B @ 8k context, fp16 = 1.0 GB ±2%.
 
-**M3 — Single-chip analysis.** Roofline (hierarchical), tiling search, memory capacity planning,
+**M3 — Single-chip analysis.** Roofline (flat: compute ridge vs DRAM ridge, tile-buffer capacity
+from SRAM; multi-level hierarchy deferred to M8), tiling search, memory capacity planning,
 scheduling/timeline, bottleneck classification, `Report` emission, `bwz run` CLI with a rich
 terminal table.
 *DoD:* Llama-3-8B fp16 decode on H100 predicts ~35–55 tok/s single-stream and is classified
@@ -494,6 +505,14 @@ least 8 (model, chip, config) points from MLPerf Inference and vendor blogs; fit
 constants; energy model; KV-cache chart; assumptions drawer; README screenshots/GIF.
 *DoD:* mean absolute percentage error ≤ 20% on the validation set with ≥ 6 of 8 points inside ±15%;
 every remaining outlier has a written explanation.
+
+**M8 — Refinement backlog (on user demand).** Full-fidelity modelling deferred from M2/M3:
+hierarchical multi-level roofline with per-level byte accounting, full ws/os/rs dataflow
+loop-order search, Winograd/FFT convolution selection, L2 reuse effects for activation-heavy CNNs.
+These land only when users ask for them.
+*DoD:* each refinement ships with golden tests and re-runs `make validate`; a refinement is kept
+only if it improves (or does not regress) MAPE on the published reference set — otherwise the flat
+model remains the default.
 
 ---
 

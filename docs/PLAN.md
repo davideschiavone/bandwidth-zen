@@ -51,7 +51,8 @@ each. Each session ends green (`make lint test`), committed, per CLAUDE.md worki
 - `graph/`: `ops.py`, `builder.py`, `transformer.py` (separate **prefill and decode** graphs),
   `cnn.py`, `dag.py` (topo sort, critical path, liveness).
 - `operators/`: matmul (2·M·N·K, tiled traffic, tail effect), attention (vanilla + FlashAttention-2
-  + GQA; flash changes bytes never FLOPs), conv (direct/im2col; Winograd can wait), norm, elementwise.
+  + GQA; flash changes bytes never FLOPs), conv (direct/im2col only; Winograd/FFT in the
+  refinement backlog), norm, elementwise.
   FLOP/byte formulas exactly per PROMPT.md §3.2, documented in `docs/MODEL.md` as implemented.
 - Golden tests in the same commits: GPT-3 prefill FLOPs ≈ `6·N·D` within 3%; Gemma-4 forward
   FLOPs (batch 1) ≈ `2·N·S` within 2%; Llama-3-8B KV cache @ 8k fp16 = 1.0 GB ±2%.
@@ -60,10 +61,13 @@ each. Each session ends green (`make lint test`), committed, per CLAUDE.md worki
 
 ## Session 4 — M3: single-chip analysis → Report
 
-- `analysis/`: `roofline.py` (hierarchical L1/L2/DRAM), `tiling.py`, `memory.py` (waterfall +
-  feasibility with cheapest fixes), `schedule.py`, `bottleneck.py`. All constants in
-  `calibration.py` with source comments (start with documented defaults, e.g. ~0.8–0.9 achievable
-  HBM efficiency — to be fitted in Session 5).
+- `analysis/`: `roofline.py` (flat: compute ridge vs DRAM ridge; the single SRAM tile buffer's real
+  capacity sets the tiling constraint, and double buffering trades against it), `tiling.py`,
+  `memory.py` (waterfall + feasibility with cheapest fixes), `schedule.py`, `bottleneck.py`. All
+  constants in `calibration.py` with source comments (start with documented defaults: ~0.8–0.9
+  achievable HBM efficiency and one ~0.5–0.7 achieved-flops fraction for tensor cores — fitted in
+  Session 5). The multi-level hierarchy, ws/os/rs loop-order search, and Winograd/FFT are not in
+  this session — see the refinement backlog below.
 - `report.py` per PROMPT.md §5 (confidence + assumptions fields mandatory).
 - `bwz run` with rich terminal table (README shows the target output).
 - Property tests (hypothesis): bandwidth↑ never latency↑; INT8 never slower than FP16; monotonic in batch.
@@ -86,6 +90,24 @@ each. Each session ends green (`make lint test`), committed, per CLAUDE.md worki
 
 **Done when:** validation table prints; single-chip LLM decode MAPE ≤ ~20% (README's stated target
 is ±15% for this class); every outlier has a written explanation.
+
+---
+
+## Deferred refinement backlog (M8, on user demand)
+
+Not built in the sessions above; preserved, not deleted. Landed explicitly when a user asks for it,
+and each item is kept only if it improves `make validate` MAPE over the flat model:
+
+- **Hierarchical multi-level roofline** — per-level (L1/SRAM, L2, DRAM) byte accounting and
+  "which level binds" reporting. Needed only if the flat model mispredicts working-set-in-L2 cases
+  (activation-heavy CNNs, small models with big batches).
+- **ws/os/rs loop-order search** — derive which operand stays put per op instead of honouring the
+  profile's declared dataflow.
+- **Winograd F(2×2,3×3) / F(4×4,3×3) and FFT convolution** — FLOP-reduced algorithm selection.
+- **L2 reuse effects** refinement for CNN activations.
+
+Trigger: users need a per-level breakdown, or Session 5 validation shows a systematic error the
+flat model cannot explain.
 
 ---
 
