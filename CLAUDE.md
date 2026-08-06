@@ -1,0 +1,170 @@
+# CLAUDE.md
+
+Operating manual for Claude Code working in this repository. Read this before every task.
+The full build specification lives in `PROMPT.md`; the physics lives in `docs/MODEL.md`.
+
+---
+
+## What this project is
+
+`chipmap` is an **analytical performance model** that predicts how a neural network (transformer LLM
+or CNN) will run on a given chip or multi-chip system: latency, throughput, utilization, memory
+footprint, energy, and — most importantly — **what the limiter is and why**.
+
+It is a fast, explainable estimator (roofline + tiling + collective-cost models), not a simulator
+and not a compiler. Every number must be traceable to a formula and its inputs.
+
+**In scope:** analytical cost models, hardware/model spec schemas, sweep + Pareto exploration,
+visualization, validation against published benchmarks.
+
+**Out of scope:** cycle-accurate simulation, kernel codegen, running real models, training loops
+beyond a memory/FLOP multiplier, auth, databases, multi-tenancy.
+
+---
+
+## Commands
+
+```bash
+make dev            # backend :8000 (uvicorn --reload) + frontend :5173 (vite)
+make test           # pytest + vitest
+make test-fast      # pytest -m "not validation and not slow"
+make lint           # ruff check + mypy --strict + eslint
+make fmt            # ruff format + prettier
+make types          # regenerate frontend/src/api/types.ts from OpenAPI
+make validate       # run the predicted-vs-published validation suite, print the table
+make docker         # docker compose build && up
+```
+
+Single test: `pytest backend/tests/unit/test_roofline.py::test_ridge_point -q`
+Backend only: `cd backend && uv run uvicorn chipmap.api.app:app --reload`
+
+---
+
+## Architecture in one paragraph
+
+`spec/` parses YAML/JSON into validated pydantic objects (`ModelSpec`, `HardwareSpec`,
+`DeploymentSpec`). `graph/` expands a `ModelSpec` into a DAG of `Operation`s. `operators/` attaches
+a cost model to each op, producing FLOPs and per-memory-level byte counts. `analysis/` runs the
+roofline, tiling search, memory planner, scheduler, parallelism rewrites, and collective cost model,
+then classifies bottlenecks and emits a `Report`. `api/` and `cli.py` are thin shells over
+`analyze(model, hardware, deployment) -> Report`. The frontend only ever consumes `Report`.
+
+**The dependency arrow points one way:** `spec → graph → operators → analysis → report → {api, cli}`.
+Nothing in `analysis/` may import from `api/`. Nothing in `graph/` may import from `analysis/`.
+
+---
+
+## Non-negotiable conventions
+
+1. **SI units internally, always.** FLOPs, bytes, bytes/s, seconds, joules, watts. Variable names
+   carry the unit: `bandwidth_bytes_per_s`, `latency_s`, `energy_j`. Human units (GB/s, TFLOP/s, ms)
+   exist only in `units.py` formatters and in YAML the user writes. A bare `bandwidth` or `time`
+   variable is a bug.
+
+2. **All empirical constants live in `chipmap/calibration.py`.** Each one needs a comment with its
+   source (datasheet, paper, or the fitted dataset in `docs/CALIBRATION.md`). An inline `* 0.85`
+   anywhere else must be rejected in review — including by you, on your own code.
+
+3. **The analysis core is pure.** `chipmap/analysis/` and `chipmap/operators/` import no web
+   framework, no file I/O, no global mutable state, no wall-clock reads. Same inputs → identical
+   output. This is what makes sweeps parallelizable and tests reliable.
+
+4. **Every output carries its assumptions.** If you add a modelling shortcut, append a
+   human-readable string to `report.assumptions` at the point where you take the shortcut. Users
+   read this drawer; it is the honesty mechanism of the whole tool.
+
+5. **Matmul FLOPs are `2·M·N·K`.** MACs are `M·N·K`. Never mix the two. Chip profiles specify
+   MACs/cycle; the engine multiplies by 2 exactly once, in `hardware_spec.peak_flops_per_s()`.
+
+6. **Prefill and decode are different machines.** Any transformer code path that doesn't distinguish
+   them is wrong. Prefill is compute-bound with `S` tokens; decode is memory-bound with `S=1` and a
+   growing context. Utilization differs by two orders of magnitude between them.
+
+7. **Physics code ships with its test.** Anything under `analysis/` or `operators/` gets a golden
+   test in the same commit, with the hand-computed expected value written out in the docstring.
+
+8. **Errors are actionable.** A validation failure names the field, the bad value, and the allowed
+   range. An infeasible config returns a `Report` with `feasible: false` and the cheapest fixes —
+   never an exception, never a bare 500.
+
+---
+
+## Where things go
+
+| Adding... | Goes in | Also update |
+|---|---|---|
+| A new operator cost model | `operators/<family>.py`, registered via `@register_op` | `docs/MODEL.md`, unit test |
+| A new chip | `profiles/chips/<id>.yaml` with `source_url` | `tests/unit/test_profiles.py` |
+| A new model | `profiles/models/<id>.yaml` with `source_url` | golden param-count test |
+| A new empirical constant | `calibration.py` only | `docs/CALIBRATION.md` |
+| A new report field | `report.py` | `docs/report.schema.json`, TS types, snapshot tests |
+| A new parallelism strategy | `analysis/parallelism.py` + `collectives.py` | `docs/MODEL.md` |
+| A new UI panel | `frontend/src/components/` | `Dashboard.tsx`, vitest |
+
+---
+
+## Sanity checks — run these mentally before claiming a change works
+
+These are known-good behaviours. If a change breaks one, the change is wrong.
+
+- Llama-3-8B, fp16, batch 1, H100, decode → **memory-bound**, roughly 16 GB of weights moved per
+  token, so ~35–55 tok/s. If you predict 500 tok/s, you've forgotten weight traffic.
+- Same model, batch 128, decode → utilization rises sharply; still memory-bound until batch is large
+  enough that weight traffic amortizes.
+- Llama-3-8B prefill, 2048 tokens → **compute-bound**, utilization 40–70%.
+- ResNet-50, batch 1, H100 → **latency/launch-bound**, single-digit % utilization. Batch 128 → good
+  utilization. A model that shows 80% utilization at batch 1 is broken.
+- MobileNetV3 depthwise layers → **memory-bound**, poor utilization on a large systolic array.
+- GEMM with M=1 on a 128×128 systolic array → utilization ≈ 1/128 from the tail effect. If your
+  utilization model doesn't reproduce this, it isn't modelling the array.
+- FlashAttention changes bytes, never FLOPs.
+- TP=8 across NVLink on a 7B model at batch 1 → comms is a large fraction of the critical path;
+  speedup is well below 8×.
+- Doubling DRAM bandwidth never increases predicted latency. INT8 is never slower than FP16 on
+  hardware that supports both.
+
+---
+
+## Working style in this repo
+
+- **One milestone at a time.** `PROMPT.md` §8 defines them. Finish, test, lint, commit, summarize,
+  then stop for review before starting the next.
+- **Plan before large changes.** For anything touching more than ~3 files, state the plan first.
+- **Prefer editing over rewriting.** Don't restructure modules that already have passing tests.
+- **Small commits, conventional messages:** `feat(analysis): hierarchical roofline for L2/DRAM`,
+  `fix(attention): halve prefill score FLOPs for causal mask`, `docs(model): derive PP bubble`.
+- **Never commit** failing tests, `# type: ignore` without a reason comment, `TODO` without an
+  issue reference, generated `types.ts` edited by hand, or profile YAML without a `source_url`.
+- **Push back on the spec when it's wrong.** `PROMPT.md` and the original design doc contain known
+  errors (see `docs/CORRECTIONS.md`). If a formula looks wrong, say so, explain why, propose the
+  fix, and record the decision — don't silently diverge, and don't implement something you believe
+  to be incorrect.
+- **Don't invent measurements.** Numbers in `docs/CALIBRATION.md` must come from a citable published
+  source. If you don't have one, write "no reference point available" rather than a plausible
+  figure. Fabricated validation data would make the entire project worthless.
+
+---
+
+## Style
+
+**Python 3.11+**: ruff (line length 100), `mypy --strict`, pydantic v2 for all boundary types,
+frozen dataclasses for internal value objects, `from __future__ import annotations`, typed
+`Enum`s not string literals, no `Any` outside `loaders.py`. Docstrings on every public function
+in `analysis/` state the formula and cite `docs/MODEL.md`.
+
+**TypeScript/React**: strict mode, no `any`, functional components with hooks, zustand for the
+config store, Tailwind for layout, D3 for scales/axes and canvas for anything drawing >500 marks,
+`recharts` only for simple charts. API types are generated — never hand-written.
+
+---
+
+## Gotchas discovered so far
+
+- Pydantic v2 coerces `1e12` in YAML to `float` but `1_000_000` to `int`; bandwidth fields must be
+  declared `float` or comparisons silently integer-divide.
+- `ceil` in the tail-effect model must operate on the *padded* dimension, not the tile count, or
+  small-M GEMMs report >100% utilization.
+- The sweep process pool must receive plain dicts, not pydantic objects — pickling validated models
+  across processes is measurably slower than re-validating in the worker.
+- Vite dev server needs `server.proxy['/api'] = 'http://localhost:8000'`; do not hardcode the
+  backend origin in `client.ts`.
