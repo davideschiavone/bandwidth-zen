@@ -3,7 +3,10 @@
 
 BACKEND := cd backend && uv run
 
-.PHONY: dev test test-fast lint fmt types validate docker
+.PHONY: venv dev test test-fast lint fmt types validate docker
+
+venv:
+	cd backend && uv venv --python 3.11 && uv sync --all-groups
 
 dev:
 	@echo "backend-only phase: use 'uv run bwz --help' (API server lands at M4)"

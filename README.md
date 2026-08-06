@@ -40,9 +40,20 @@ for design-space exploration and sanity-checking, then measure on real hardware.
 
 ## Quickstart
 
+**Environment setup (do this first after cloning).** The backend requires Python ≥ 3.11 and is
+managed with [uv](https://docs.astral.sh/uv/) — do not use `python -m venv`; uv downloads its own
+Python 3.11 interpreter if the system one is older:
+
 ```bash
 git clone https://github.com/<you>/bandwidth-zen && cd bandwidth-zen
-make dev          # backend on :8000, UI on :5173
+make venv         # creates backend/.venv (uv venv --python 3.11 + uv sync --all-groups)
+```
+
+Then either prefix commands with `uv run` from `backend/` (recommended — no activation needed),
+or activate classically with `source backend/.venv/bin/activate`.
+
+```bash
+make dev          # backend on :8000, UI on :5173  (no-op until M4 — backend-only phase)
 ```
 
 Or from the CLI:
