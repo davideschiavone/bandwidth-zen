@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.hypothesis/
+dist/
+*.egg-info/
+
+# Node (M4+)
+node_modules/
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+
+# Local agent settings
+.claude/settings.local.json

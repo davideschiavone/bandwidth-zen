@@ -1,0 +1,53 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "bwz"
+version = "0.1.0"
+description = "bandwidth-zen: analytical performance model for neural-network inference"
+readme = "../README.md"
+license = "Apache-2.0"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.7",
+    "pyyaml>=6.0",
+    "typer>=0.12",
+    "rich>=13.0",
+]
+
+[project.scripts]
+bwz = "bwz.cli:app"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "hypothesis>=6.100",
+    "ruff>=0.6",
+    "mypy>=1.11",
+    "types-pyyaml>=6.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["bwz"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+# Docstrings state formulas per CLAUDE.md style ("2·M·N·K", "3.35 × 1e12", "µs").
+allowed-confusables = ["×", "·", "µ", "—", "≈", "≤", "≥"]
+
+[tool.mypy]
+strict = true
+python_version = "3.11"
+files = ["bwz", "tests"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "validation: predicted-vs-published validation suite (slow, network-sourced references)",
+    "slow: long-running tests",
+]
