@@ -7,7 +7,7 @@ The full build specification lives in `PROMPT.md`; the physics lives in `docs/MO
 
 ## What this project is
 
-`chipmap` is an **analytical performance model** that predicts how a neural network (transformer LLM
+`bandwidth-zen` is an **analytical performance model** that predicts how a neural network (transformer LLM
 or CNN) will run on a given chip or multi-chip system: latency, throughput, utilization, memory
 footprint, energy, and — most importantly — **what the limiter is and why**.
 
@@ -36,7 +36,7 @@ make docker         # docker compose build && up
 ```
 
 Single test: `pytest backend/tests/unit/test_roofline.py::test_ridge_point -q`
-Backend only: `cd backend && uv run uvicorn chipmap.api.app:app --reload`
+Backend only: `cd backend && uv run uvicorn bwz.api.app:app --reload`
 
 ---
 
@@ -61,11 +61,11 @@ Nothing in `analysis/` may import from `api/`. Nothing in `graph/` may import fr
    exist only in `units.py` formatters and in YAML the user writes. A bare `bandwidth` or `time`
    variable is a bug.
 
-2. **All empirical constants live in `chipmap/calibration.py`.** Each one needs a comment with its
+2. **All empirical constants live in `bwz/calibration.py`.** Each one needs a comment with its
    source (datasheet, paper, or the fitted dataset in `docs/CALIBRATION.md`). An inline `* 0.85`
    anywhere else must be rejected in review — including by you, on your own code.
 
-3. **The analysis core is pure.** `chipmap/analysis/` and `chipmap/operators/` import no web
+3. **The analysis core is pure.** `bwz/analysis/` and `bwz/operators/` import no web
    framework, no file I/O, no global mutable state, no wall-clock reads. Same inputs → identical
    output. This is what makes sweeps parallelizable and tests reliable.
 

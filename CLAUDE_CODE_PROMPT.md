@@ -1,4 +1,4 @@
-# Claude Code Build Prompt — `chipmap`: LLM/CNN → Chip Performance Estimator
+# Claude Code Build Prompt — `bandwidth-zen`: LLM/CNN → Chip Performance Estimator
 
 > **How to use this file:** put it at the repo root as `PROMPT.md`, open Claude Code in an empty
 > directory, and paste the "Kickoff" block at the bottom. Claude Code should read this file first,
@@ -8,7 +8,7 @@
 
 ## 0. Role and objective
 
-You are building **`chipmap`**, a full-stack analytical performance model that answers one question:
+You are building **`bandwidth-zen`**, a full-stack analytical performance model that answers one question:
 
 > *"Can I run this model on this chip, and if so, how fast — and what is the limiter?"*
 
@@ -32,12 +32,12 @@ model/hardware co-design.
    produced it. Never present a modelled number as measured. The UI must label outputs as
    *estimates*.
 2. **No magic constants.** Every derating factor, efficiency coefficient, or fudge factor lives in
-   `backend/chipmap/calibration.py` with a comment citing its source or the fitted dataset. No
+   `backend/bwz/calibration.py` with a comment citing its source or the fitted dataset. No
    `* 0.85` inline anywhere else.
 3. **Units are explicit.** Suffix every variable: `_flops`, `_bytes`, `_bytes_per_s`, `_s`, `_ns`,
    `_j`. Internally the engine uses **SI base units only** (FLOPs, bytes, bytes/s, seconds, joules).
    Conversion to GB/s, TFLOP/s, ms happens *only* at the serialization boundary.
-4. **Pure core.** `chipmap/analysis/` must be importable without FastAPI, without I/O, without
+4. **Pure core.** `bwz/analysis/` must be importable without FastAPI, without I/O, without
    globals. The engine is a pure function: `(ModelSpec, HardwareSpec, DeploymentSpec) -> Report`.
 5. **Determinism.** Same inputs → byte-identical report (except a `generated_at` timestamp). Sort
    all dict iteration; no set ordering in outputs.
@@ -53,7 +53,7 @@ model/hardware co-design.
 ## 2. Repository layout (create exactly this)
 
 ```
-chipmap/
+bandwidth-zen/
 ├── CLAUDE.md                      # agent operating manual (already provided)
 ├── README.md                      # public docs (already provided)
 ├── PROMPT.md                      # this file
@@ -68,7 +68,7 @@ chipmap/
 │   └── SCHEMA.md                  # YAML/JSON spec reference for models & chips
 ├── backend/
 │   ├── pyproject.toml             # uv / hatchling, py>=3.11, ruff + mypy strict
-│   ├── chipmap/
+│   ├── bwz/
 │   │   ├── __init__.py
 │   │   ├── units.py               # SI helpers, formatting, prefix parsing ("3.35 TB/s")
 │   │   ├── calibration.py         # ALL empirical constants, one place
@@ -102,7 +102,7 @@ chipmap/
 │   │   │   ├── bottleneck.py      # ranking, classification, optimization suggestions
 │   │   │   └── sweep.py           # config space enumeration + Pareto frontier
 │   │   ├── report.py              # Report/LayerResult/Timeline dataclasses → JSON schema
-│   │   ├── cli.py                 # typer: `chipmap run|sweep|validate|list`
+│   │   ├── cli.py                 # typer: `bwz run|sweep|validate|list`
 │   │   └── api/
 │   │       ├── app.py             # FastAPI app + CORS + error handlers
 │   │       ├── routes.py          # endpoints (see §6)
@@ -385,7 +385,7 @@ constraints: {max_latency_s: 0.05, max_power_w: 700, max_memory_bytes: 8.0e10}
 
 ```python
 Report:
-  meta: {chipmap_version, generated_at, model_name, chip_name, config_hash}
+  meta: {bwz_version, generated_at, model_name, chip_name, config_hash}
   feasible: bool
   infeasibility: list[str] | None
   summary:
@@ -458,7 +458,7 @@ pre-commit, CI workflow, `LICENSE`, empty docs. `make test` passes on an empty s
 *DoD:* `make dev` starts backend on :8000 and frontend on :5173; `/api/health` returns 200.
 
 **M1 — Specs and loaders.** Pydantic models, YAML loaders with actionable error messages,
-5 chip profiles + 5 model profiles, `chipmap list` CLI.
+5 chip profiles + 5 model profiles, `bwz list` CLI.
 *DoD:* every shipped profile round-trips YAML→spec→YAML; validation errors name the field and the
 allowed values.
 
@@ -470,7 +470,7 @@ forward FLOPs ≈ 4.1 GFLOPs (batch 1, 224²) within 2%; Llama-3-8B parameter co
 KV-cache size for Llama-3-8B @ 8k context, fp16 = 1.0 GB ±2%.
 
 **M3 — Single-chip analysis.** Roofline (hierarchical), tiling search, memory capacity planning,
-scheduling/timeline, bottleneck classification, `Report` emission, `chipmap run` CLI with a rich
+scheduling/timeline, bottleneck classification, `Report` emission, `bwz run` CLI with a rich
 terminal table.
 *DoD:* Llama-3-8B fp16 decode on H100 predicts ~35–55 tok/s single-stream and is classified
 `DRAM_BW_BOUND`; prefill @2k tokens is classified `COMPUTE_BOUND`; ResNet-50 batch-1 on H100 is
@@ -510,15 +510,15 @@ every remaining outlier has a written explanation.
 - **Snapshot:** full JSON reports for 6 canonical configs, reviewed on diff.
 - **Validation:** `tests/validation/reference_points.yaml` holds published measurements; the test
   asserts MAPE thresholds and prints a table. Mark `@pytest.mark.validation`, run in CI nightly.
-- Coverage gate: ≥ 90% on `chipmap/analysis/` and `chipmap/operators/`.
+- Coverage gate: ≥ 90% on `bwz/analysis/` and `bwz/operators/`.
 
 ---
 
 ## 10. Deliverables checklist
 
 - [ ] Working `make dev` (backend + frontend) and `docker compose up`
-- [ ] `chipmap run --model llama3_8b --chip h100_sxm --batch 1 --input-tokens 2048 --output-tokens 128`
-- [ ] `chipmap sweep --config sweeps/batch_precision.yaml --out results.json`
+- [ ] `bwz run --model llama3_8b --chip h100_sxm --batch 1 --input-tokens 2048 --output-tokens 128`
+- [ ] `bwz sweep --config sweeps/batch_precision.yaml --out results.json`
 - [ ] `docs/MODEL.md` with every formula, derivation, and its limits of validity
 - [ ] `docs/CALIBRATION.md` with the validation table and error analysis
 - [ ] `docs/CORRECTIONS.md` listing every place this build deviates from the original design doc

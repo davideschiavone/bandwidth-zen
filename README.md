@@ -1,8 +1,8 @@
-# chipmap
+# bandwidth-zen
 
 **Can I run this model on this chip — and if so, how fast?**
 
-`chipmap` is an analytical performance model for neural-network inference. Give it a model
+`bandwidth-zen` is an analytical performance model for neural-network inference. Give it a model
 (transformer LLM or CNN) and a chip (or a multi-chip system), and it predicts latency, throughput,
 utilization, memory footprint, and energy — then tells you **what the bottleneck is and what to do
 about it**, with the numbers behind every claim.
@@ -41,14 +41,14 @@ for design-space exploration and sanity-checking, then measure on real hardware.
 ## Quickstart
 
 ```bash
-git clone https://github.com/<you>/chipmap && cd chipmap
+git clone https://github.com/<you>/bandwidth-zen && cd bandwidth-zen
 make dev          # backend on :8000, UI on :5173
 ```
 
 Or from the CLI:
 
 ```bash
-uv run chipmap run \
+uv run bwz run \
   --model llama3_8b --chip h100_sxm \
   --batch 1 --input-tokens 2048 --output-tokens 256 \
   --precision fp16 --attention flash2
@@ -76,7 +76,7 @@ Llama-3-8B  ·  NVIDIA H100 SXM5  ·  fp16  ·  batch 1  ·  2048 in / 256 out
 Sweep and take the Pareto frontier:
 
 ```bash
-uv run chipmap sweep --model llama3_8b --chip h100_sxm \
+uv run bwz sweep --model llama3_8b --chip h100_sxm \
   --knob batch=1,4,16,64,256 --knob precision=fp16,int8 --knob tp=1,2,4,8 \
   --objective latency,throughput --out sweep.json
 ```
@@ -165,7 +165,7 @@ reproduce the table.
 ## Project layout
 
 ```
-backend/chipmap/
+backend/bwz/
   spec/         pydantic schemas + YAML loaders
   graph/        ModelSpec → operation DAG (transformer, CNN builders)
   operators/    per-family cost models (matmul, conv, attention, norm, elementwise)
