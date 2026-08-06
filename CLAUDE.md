@@ -112,7 +112,7 @@ These are known-good behaviours. If a change breaks one, the change is wrong.
 - Same model, batch 128, decode → utilization rises sharply; still memory-bound until batch is large
   enough that weight traffic amortizes.
 - Llama-3-8B prefill, 2048 tokens → **compute-bound**, utilization 40–70%.
-- ResNet-50, batch 1, H100 → **latency/launch-bound**, single-digit % utilization. Batch 128 → good
+- Gemma-4, batch 1, H100 → **latency/launch-bound**, single-digit % utilization. Batch 128 → good
   utilization. A model that shows 80% utilization at batch 1 is broken.
 - MobileNetV3 depthwise layers → **memory-bound**, poor utilization on a large systolic array.
 - GEMM with M=1 on a 128×128 systolic array → utilization ≈ 1/128 from the tail effect. If your

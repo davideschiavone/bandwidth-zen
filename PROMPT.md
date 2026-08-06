@@ -110,8 +110,8 @@ bandwidth-zen/
 │   ├── profiles/
 │   │   ├── chips/                 # h100_sxm.yaml, a100_80gb.yaml, tpu_v4.yaml, mi300x.yaml,
 │   │   │                          # jetson_orin.yaml, generic_npu.yaml, cpu_xeon.yaml
-│   │   └── models/                # gpt2.yaml, llama3_8b.yaml, llama2_70b.yaml, mistral_7b.yaml,
-│   │                              # bert_base.yaml, resnet50.yaml, mobilenetv3.yaml, vit_b16.yaml,
+│   │   └── models/                # gpt3.yaml, llama3_8b.yaml, llama2_70b.yaml, mistral_7b.yaml,
+│   │                              # bert_base.yaml, gemma4.yaml, mobilenetv3.yaml, vit_b16.yaml,
 │   │                              # sd_unet.yaml, mixtral_8x7b.yaml
 │   └── tests/
 │       ├── unit/                  # per-module, golden values
@@ -347,15 +347,13 @@ params:
   tie_embeddings: false
 ```
 ```yaml
-name: ResNet-50
+name: MobileNetV3
 family: cnn
 input: {batch: 1, channels: 3, height: 224, width: 224}
 layers:
-  - {type: conv, name: conv1, out_channels: 64, kernel: [7,7], stride: 2, padding: 3}
-  - {type: batchnorm, name: bn1}
-  - {type: relu}
-  - {type: maxpool, kernel: [3,3], stride: 2}
-  - {type: bottleneck_block, repeat: 3, width: 64, stride: 1}
+  - {type: conv, name: conv1, out_channels: 16, kernel: [3,3], stride: 2, padding: 1}
+  - {type: bottleneck_block, name: block0, repeat: 1, width: 16, stride: 1}
+  - {type: bottleneck_block, name: block1, repeat: 2, width: 24, stride: 2}
   ...
 ```
 Also accept an **explicit op list** (`type: custom, flops:, bytes:, parallel_dims:`) so users can
@@ -465,15 +463,15 @@ allowed values.
 **M2 — Graph + operator costs.** Op/Tensor/ComputeGraph, transformer and CNN builders, matmul /
 conv / attention / norm / elementwise cost models, DAG utilities (topo sort, critical path,
 liveness).
-*DoD:* golden tests — GPT-2 prefill FLOPs match the analytic `6·N·D` rule within 3%; ResNet-50
-forward FLOPs ≈ 4.1 GFLOPs (batch 1, 224²) within 2%; Llama-3-8B parameter count = 8.03 B ±0.5%;
-KV-cache size for Llama-3-8B @ 8k context, fp16 = 1.0 GB ±2%.
+*DoD:* golden tests — GPT-3 prefill FLOPs match the analytic `6·N·D` rule within 3%; Gemma-4
+forward FLOPs (batch 1) match the analytic `2·N·S` rule within 2%; Llama-3-8B parameter count =
+8.03 B ±0.5%; KV-cache size for Llama-3-8B @ 8k context, fp16 = 1.0 GB ±2%.
 
 **M3 — Single-chip analysis.** Roofline (hierarchical), tiling search, memory capacity planning,
 scheduling/timeline, bottleneck classification, `Report` emission, `bwz run` CLI with a rich
 terminal table.
 *DoD:* Llama-3-8B fp16 decode on H100 predicts ~35–55 tok/s single-stream and is classified
-`DRAM_BW_BOUND`; prefill @2k tokens is classified `COMPUTE_BOUND`; ResNet-50 batch-1 on H100 is
+`DRAM_BW_BOUND`; prefill @2k tokens is classified `COMPUTE_BOUND`; Gemma-4 batch-1 on H100 is
 classified `LATENCY_BOUND`/`UNDERUTILIZED`. Snapshot tests for all three.
 
 **M4 — API + minimal UI.** FastAPI endpoints, OpenAPI → TS types, React dashboard with pickers,

@@ -133,7 +133,7 @@ Energy uses a per-operation pJ table (Horowitz-style) and is labelled ±50%.
 **Chips:** NVIDIA H100 SXM / A100 80GB, AMD MI300X, Google TPU v4, Jetson Orin, a generic
 edge NPU, a server CPU baseline. Each profile cites its datasheet in `source_url`.
 
-**Models:** GPT-2, BERT-base, Llama-3-8B, Llama-2-70B, Mistral-7B, Mixtral-8x7B, ResNet-50,
+**Models:** GPT-3, BERT-base, Llama-3-8B, Llama-2-70B, Mistral-7B, Mixtral-8x7B, Gemma-4,
 MobileNetV3, ViT-B/16, Stable Diffusion U-Net.
 
 Add your own — chips and models are plain YAML:

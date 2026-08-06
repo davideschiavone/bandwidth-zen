@@ -41,7 +41,7 @@ each. Each session ends green (`make lint test`), committed, per CLAUDE.md worki
 - Chip profiles with `source_url` from vendor datasheets: `h100_sxm.yaml`, `a100_80gb.yaml`,
   `mi300x.yaml` (calibration targets), plus `jetson_orin.yaml` (edge sanity case).
 - Model profiles with `source_url` from HF configs: `llama3_8b.yaml`, `llama2_70b.yaml`,
-  `mistral_7b.yaml`, `gpt2.yaml`, `resnet50.yaml`.
+  `mistral_7b.yaml`, `gpt3.yaml`, `gemma4.yaml`.
 - `bwz list` CLI; round-trip tests for every profile.
 
 **Done when:** profiles round-trip YAML→spec→YAML; golden test: Llama-3-8B param count = 8.03 B ±0.5%.
@@ -53,8 +53,8 @@ each. Each session ends green (`make lint test`), committed, per CLAUDE.md worki
 - `operators/`: matmul (2·M·N·K, tiled traffic, tail effect), attention (vanilla + FlashAttention-2
   + GQA; flash changes bytes never FLOPs), conv (direct/im2col; Winograd can wait), norm, elementwise.
   FLOP/byte formulas exactly per PROMPT.md §3.2, documented in `docs/MODEL.md` as implemented.
-- Golden tests in the same commits: GPT-2 prefill FLOPs ≈ `6·N·D` within 3%; ResNet-50 ≈ 4.1 GFLOPs
-  ±2%; Llama-3-8B KV cache @ 8k fp16 = 1.0 GB ±2%.
+- Golden tests in the same commits: GPT-3 prefill FLOPs ≈ `6·N·D` within 3%; Gemma-4 forward
+  FLOPs (batch 1) ≈ `2·N·S` within 2%; Llama-3-8B KV cache @ 8k fp16 = 1.0 GB ±2%.
 
 **Done when:** all M2 golden tests pass.
 
@@ -69,7 +69,7 @@ each. Each session ends green (`make lint test`), committed, per CLAUDE.md worki
 - Property tests (hypothesis): bandwidth↑ never latency↑; INT8 never slower than FP16; monotonic in batch.
 
 **Done when:** the CLAUDE.md sanity checks hold — Llama-3-8B fp16 decode on H100 → DRAM_BW_BOUND,
-~35–55 tok/s; prefill @2k → COMPUTE_BOUND; ResNet-50 batch 1 → LATENCY_BOUND. Snapshot tests for all three.
+~35–55 tok/s; prefill @2k → COMPUTE_BOUND; Gemma-4 batch 1 → LATENCY_BOUND. Snapshot tests for all three.
 
 ## Session 5 — Calibration + backtest (early M7 slice)
 
