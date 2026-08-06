@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(source ~/.bianco_env)",
+      "Bash(source /home/schiavon/.bianco_env)"
+    ]
+  }
+}
