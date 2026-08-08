@@ -87,9 +87,18 @@ def parse_or_pass(value: str | float | int, expected_base_unit: str) -> float:
 
     YAML profiles may write ``bandwidth_bytes_per_s: 3.35e12`` or
     ``bandwidth_bytes_per_s: "3.35 TB/s"``; both mean the same thing.
+
+    A bare numeric *string* is also accepted, because YAML 1.1 — which PyYAML
+    implements — only recognises an exponent when it carries an explicit sign.
+    ``3.35e+12`` loads as a float but ``3.35e12`` loads as the string
+    ``"3.35e12"``, and a profile author has no reason to know that. Treating it
+    as a unitless SI value is the only reading that is not a silent bug.
     """
     if isinstance(value, str):
-        return parse_quantity(value, expected_base_unit)
+        try:
+            return float(value)
+        except ValueError:
+            return parse_quantity(value, expected_base_unit)
     return float(value)
 
 

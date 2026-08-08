@@ -1,0 +1,28 @@
+id: gemma3_4b
+name: Gemma-3-4B (text tower)
+family: transformer_decoder
+source_url: https://huggingface.co/google/gemma-3-4b-pt/blob/main/config.json
+params:
+  layers: 34
+  hidden: 2560
+  heads: 8
+  kv_heads: 4
+  head_dim: 256            # note: heads x head_dim = 2048 != hidden = 2560
+  ffn_hidden: 10240
+  ffn_type: geglu
+  vocab: 262208
+  max_context: 131072
+  norm: rmsnorm
+  positional: rope
+  tie_embeddings: true
+  sliding_window: 1024
+  sliding_window_pattern: 6   # one global-attention layer in every six
+notes: >-
+  Text tower only; the 4B checkpoint also carries a ~417 M vision encoder that this profile does
+  not model. Derived parameter count 3.880 G.
+
+  Attention weights per layer come to 15.73 MB, identical to the idealised variant in
+  docs/CORRECTIONS.md D8 that used Q/O at hidden x hidden and K/V at hidden x 512 — because
+  2 x 2560 x (2560 + 512) equals 2 x 2560 x (2048 + 1024). Together with the 78.64 MB GEGLU FFN
+  that gives the 94.4 MB/layer figure the D8 per-op golden asserts, so the real config reproduces
+  it and no idealised profile is needed (this resolves the open question in D9).

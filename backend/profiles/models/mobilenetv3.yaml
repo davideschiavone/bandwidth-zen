@@ -1,0 +1,32 @@
+id: mobilenetv3
+name: MobileNetV3-Large 1.0
+family: cnn
+source_url: https://arxiv.org/abs/1905.02244
+input: {batch: 1, channels: 3, height: 224, width: 224}
+layers:
+  - {type: conv, name: stem, out_channels: 16, kernel: [3, 3], stride: 2, padding: 1, activation: hardswish}
+  - {type: mbconv, name: bneck1,  expand_channels: 16,  out_channels: 16,  kernel: [3, 3], stride: 1, activation: relu}
+  - {type: mbconv, name: bneck2,  expand_channels: 64,  out_channels: 24,  kernel: [3, 3], stride: 2, activation: relu}
+  - {type: mbconv, name: bneck3,  expand_channels: 72,  out_channels: 24,  kernel: [3, 3], stride: 1, activation: relu}
+  - {type: mbconv, name: bneck4,  expand_channels: 72,  out_channels: 40,  kernel: [5, 5], stride: 2, squeeze_excite: true, activation: relu}
+  - {type: mbconv, name: bneck5,  expand_channels: 120, out_channels: 40,  kernel: [5, 5], stride: 1, squeeze_excite: true, activation: relu}
+  - {type: mbconv, name: bneck6,  expand_channels: 120, out_channels: 40,  kernel: [5, 5], stride: 1, squeeze_excite: true, activation: relu}
+  - {type: mbconv, name: bneck7,  expand_channels: 240, out_channels: 80,  kernel: [3, 3], stride: 2, activation: hardswish}
+  - {type: mbconv, name: bneck8,  expand_channels: 200, out_channels: 80,  kernel: [3, 3], stride: 1, activation: hardswish}
+  - {type: mbconv, name: bneck9,  expand_channels: 184, out_channels: 80,  kernel: [3, 3], stride: 1, activation: hardswish}
+  - {type: mbconv, name: bneck10, expand_channels: 184, out_channels: 80,  kernel: [3, 3], stride: 1, activation: hardswish}
+  - {type: mbconv, name: bneck11, expand_channels: 480, out_channels: 112, kernel: [3, 3], stride: 1, squeeze_excite: true, activation: hardswish}
+  - {type: mbconv, name: bneck12, expand_channels: 672, out_channels: 112, kernel: [3, 3], stride: 1, squeeze_excite: true, activation: hardswish}
+  - {type: mbconv, name: bneck13, expand_channels: 672, out_channels: 160, kernel: [5, 5], stride: 2, squeeze_excite: true, activation: hardswish}
+  - {type: mbconv, name: bneck14, expand_channels: 960, out_channels: 160, kernel: [5, 5], stride: 1, squeeze_excite: true, activation: hardswish}
+  - {type: mbconv, name: bneck15, expand_channels: 960, out_channels: 160, kernel: [5, 5], stride: 1, squeeze_excite: true, activation: hardswish}
+  - {type: conv, name: head_conv, out_channels: 960, kernel: [1, 1], stride: 1, activation: hardswish}
+  - {type: pool, name: avgpool, kind: global_avg}
+  - {type: linear, name: fc1, out_features: 1280, activation: hardswish}
+  - {type: linear, name: classifier, out_features: 1000}
+notes: >-
+  Table 1 of the paper (MobileNetV3-Large, width multiplier 1.0). Present so that the CNN branch
+  of the model-spec union is exercised by a real network rather than shipped untested, and because
+  the CLAUDE.md sanity checks name its depthwise layers as the canonical memory-bound case on a
+  large systolic array. Channel propagation, parameter count and FLOPs arrive with the M2 graph
+  builder; this profile is parse-and-round-trip only at M1.

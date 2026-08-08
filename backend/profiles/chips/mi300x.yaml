@@ -1,0 +1,48 @@
+id: mi300x
+name: AMD Instinct MI300X
+vendor: AMD
+source_url: https://www.amd.com/en/products/accelerators/instinct/mi300/mi300x.html
+process_nm: 5
+clock_ghz: 2.1
+
+compute_units:
+  - name: matrix_core
+    count: 304                     # 304 CUs, each with 4 matrix cores
+    ops_per_cycle_per_unit: 1024   # MACs/CU; 304 x 1024 x 2.1e9 x 2 = 1307.4 TFLOP/s FP16
+    supported_dtypes: [fp16, bf16, fp8, int8]
+    dtype_multipliers: {fp16: 1.0, bf16: 1.0, fp8: 2.0, int8: 2.0}
+    structured_sparsity_speedup: 2.0
+    systolic_dims: [16, 16]
+    dataflow: ws
+  - name: vector_alu
+    count: 19456                   # 304 CUs x 64 lanes
+    ops_per_cycle_per_unit: 1
+    supported_dtypes: [fp32, fp16]
+
+memory:
+  - {name: LDS, level: 1, capacity_bytes: 1.9456e7, bandwidth_bytes_per_s: 1.5e14, latency_ns: 30}
+  - {name: InfinityCache, level: 2, capacity_bytes: 2.56e8, bandwidth_bytes_per_s: 1.7e13, latency_ns: 200}
+  - {name: HBM3, level: 3, capacity_bytes: 1.92e11, bandwidth_bytes_per_s: 5.3e12, latency_ns: 600}
+
+async_copy_engines: 4
+tdp_w: 750
+
+interconnect:
+  intra_node:
+    name: Infinity Fabric (xGMI)
+    bandwidth_bytes_per_s: 4.48e11
+    latency_s: 2.0e-6
+    topology: fully_connected
+  inter_node:
+    name: InfiniBand NDR
+    bandwidth_bytes_per_s: 5.0e10
+    latency_s: 5.0e-6
+    topology: fat_tree
+
+estimates:
+  memory: >-
+    LDS and Infinity Cache bandwidths are order-of-magnitude estimates; AMD publishes neither as a
+    sustained figure. Unused in v1 (docs/CORRECTIONS.md D5a). LDS capacity is 64 KB per CU x 304.
+  interconnect: >-
+    448 GB/s unidirectional is half the 896 GB/s aggregate bidirectional across 7 xGMI links at
+    128 GB/s each; AMD quotes the bidirectional aggregate.

@@ -1,0 +1,41 @@
+id: jetson_orin
+name: NVIDIA Jetson AGX Orin 64GB (GPU only)
+vendor: NVIDIA
+source_url: https://www.nvidia.com/en-us/autonomous-machines/embedded-systems/jetson-orin/
+process_nm: 8
+clock_ghz: 1.3
+
+compute_units:
+  - name: tensor_core
+    count: 64                      # 16 SMs x 4 3rd-gen tensor cores
+    ops_per_cycle_per_unit: 256    # MACs; 64 x 256 x 1.3e9 x 2 = 42.6 TFLOP/s FP16 dense
+    supported_dtypes: [fp16, bf16, int8, tf32]
+    dtype_multipliers: {fp16: 1.0, bf16: 1.0, int8: 2.0, tf32: 0.5}
+    structured_sparsity_speedup: 2.0
+    systolic_dims: [16, 16]
+    dataflow: ws
+  - name: cuda_core
+    count: 2048                    # 16 SMs x 128 FP32 lanes
+    ops_per_cycle_per_unit: 1
+    supported_dtypes: [fp32, fp16]
+
+memory:
+  - {name: L1, level: 1, capacity_bytes: 3.072e6, bandwidth_bytes_per_s: 8.0e12, latency_ns: 30}
+  - {name: L2, level: 2, capacity_bytes: 4.0e6, bandwidth_bytes_per_s: 1.0e12, latency_ns: 200}
+  - {name: LPDDR5, level: 3, capacity_bytes: 6.4e10, bandwidth_bytes_per_s: 2.048e11, latency_ns: 400}
+
+async_copy_engines: 2
+tdp_w: 60
+
+estimates:
+  compute_units: >-
+    GPU only. NVIDIA's headline 275 TOPS for AGX Orin 64GB is INT8 *with* 2:4 sparsity and
+    includes the two DLA accelerators (105 TOPS); the GPU alone is 170 TOPS sparse, 85 TOPS dense
+    INT8, which this profile reproduces as 42.6 TFLOP/s FP16 x the 2.0 INT8 multiplier. Modelling
+    DLA offload is out of scope for v1 — a heterogeneous scheduler is not in the milestone plan.
+  memory: >-
+    L1/L2 bandwidths are order-of-magnitude estimates, unused in v1 (docs/CORRECTIONS.md D5a).
+    LPDDR5 is shared between CPU and GPU; the full 204.8 GB/s is rarely available to the GPU alone.
+  tdp_w: >-
+    AGX Orin 64GB is configurable between 15 W and 60 W; 60 W is the maximum-performance mode that
+    the quoted TOPS figures correspond to.

@@ -1,0 +1,53 @@
+id: h100_sxm
+name: NVIDIA H100 SXM5 80GB
+vendor: NVIDIA
+source_url: https://resources.nvidia.com/en-us-hopper-architecture/nvidia-h100-datasheet
+process_nm: 4
+clock_ghz: 1.83
+
+compute_units:
+  - name: tensor_core
+    count: 528                     # 132 SMs x 4 4th-gen tensor cores
+    ops_per_cycle_per_unit: 512    # MACs; x2 -> FLOPs happens in peak_flops_per_s()
+    supported_dtypes: [fp16, bf16, fp8, int8, tf32]
+    dtype_multipliers: {fp16: 1.0, bf16: 1.0, fp8: 2.0, int8: 2.0, tf32: 0.5}
+    structured_sparsity_speedup: 2.0
+    systolic_dims: [16, 16]
+    dataflow: ws
+  - name: cuda_core
+    count: 16896                   # 132 SMs x 128 FP32 lanes
+    ops_per_cycle_per_unit: 1
+    supported_dtypes: [fp32, fp16]
+
+memory:
+  - {name: L1, level: 1, capacity_bytes: 3.3792e7, bandwidth_bytes_per_s: 1.3e14, latency_ns: 30}
+  - {name: L2, level: 2, capacity_bytes: 5.0e7, bandwidth_bytes_per_s: 1.2e13, latency_ns: 200}
+  - {name: HBM3, level: 3, capacity_bytes: 8.0e10, bandwidth_bytes_per_s: 3.35e12, latency_ns: 600}
+
+async_copy_engines: 4
+tdp_w: 700
+
+interconnect:
+  intra_node:
+    name: NVLink 4
+    bandwidth_bytes_per_s: 4.5e11
+    latency_s: 2.0e-6
+    topology: fully_connected
+  inter_node:
+    name: InfiniBand NDR
+    bandwidth_bytes_per_s: 5.0e10
+    latency_s: 5.0e-6
+    topology: fat_tree
+
+estimates:
+  clock_ghz: >-
+    Derived from the datasheet's own 989.4 TFLOP/s FP16 dense figure and the Hopper whitepaper's
+    132 SM x 4 tensor cores x 512 MACs/cycle: 989.4e12 / (528 x 512 x 2) = 1.830 GHz. NVIDIA's
+    published 1.98 GHz boost clock is not the clock the peak figure is quoted at, so using it
+    would overstate peak by 8%. The datasheet peak is the sourced quantity; the clock is derived
+    from it.
+  memory: >-
+    L1 and L2 bandwidths are the illustrative figures from PROMPT.md 4.1, not datasheet values —
+    NVIDIA does not publish either. Unused in v1: the analysis reads capacity from the on-chip
+    levels and bandwidth only from DRAM (docs/CORRECTIONS.md D5a). L1 capacity is 256 KB of
+    combined L1/shared per SM x 132.

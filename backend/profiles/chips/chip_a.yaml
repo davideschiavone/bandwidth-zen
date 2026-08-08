@@ -1,0 +1,41 @@
+id: chip_a
+name: chip_a (edge INT8 NPU, 4-core)
+vendor: unspecified
+hypothetical: true
+clock_ghz: 0.8
+
+# TOPS sanity (docs/CORRECTIONS.md D8):
+#   512 x 512 MACs x 2 OP/MAC x 0.8 GHz / 8 (bit-serial tax) = 52.4 TOPS per core
+#   x 4 cores                                                = 209.6 TOPS SoC
+# The /8 is expressed as the int8 dtype multiplier, so peak_flops_per_s() applies
+# the x2 exactly once (CLAUDE.md #5).
+compute_units:
+  - name: npu_core
+    count: 4
+    ops_per_cycle_per_unit: 262144   # 512 x 512 MACs
+    supported_dtypes: [int8, int4]
+    dtype_multipliers: {int8: 0.125, int4: 0.25}
+    systolic_dims: [512, 512]
+    dataflow: ws
+
+memory:
+  - {name: SRAM, level: 1, capacity_bytes: 5.5e7, bandwidth_bytes_per_s: 1.28e11, latency_ns: 10}
+  - {name: LPDDR4x, level: 2, capacity_bytes: 8.0e9, bandwidth_bytes_per_s: 3.4e10, latency_ns: 150}
+
+async_copy_engines: 2
+
+estimates:
+  hypothetical: >-
+    Supplied by the user as an anonymised edge NPU with no citable datasheet. Not a hypothetical
+    design in the sense chip_b is — it stands for a real class of part — but without a source_url
+    it cannot claim to describe a product (docs/CORRECTIONS.md D7).
+  memory: >-
+    SRAM capacity is 55 MB. The supplied figure of 5210241024 (5.21 GB) is inconsistent with the
+    residencies it was quoted alongside: it would make a 3.9 GB model 100% resident, not 1.4%.
+    55 MB reproduces all three stated residencies (1.4% / 2.7% / 5.5% at 4B / 2B / 1B), all six
+    decode figures, and the KV@4k case, to within 1% (docs/CORRECTIONS.md D8).
+    DRAM bandwidth 34 GB/s is an estimate for a 64-bit LPDDR4x interface at ~4266 MT/s, and is the
+    single dominant uncertainty in every result from this chip. DRAM capacity of 8 GB is a guess.
+    SRAM bandwidth of 128 GB/s is a NoC bisection figure (>1 Tbit/s / 8), NOT an SRAM read
+    bandwidth, and is unused in v1 — SRAM contributes capacity only (docs/CORRECTIONS.md D5a,
+    with the analysis of why in D5b).

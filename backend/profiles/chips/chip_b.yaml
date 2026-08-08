@@ -1,0 +1,36 @@
+id: chip_b
+name: chip_b (hypothetical variant - quarter compute, 1 GB SRAM)
+vendor: unspecified
+hypothetical: true
+derived_from: chip_a
+clock_ghz: 0.8
+
+# A deliberate trade against chip_a: one quarter of the compute, ~18x the on-chip
+# capacity. The point of the head-to-head is that at batch-1 decode the trade is
+# almost free, because nothing in that regime is compute-bound.
+#   512 x 512 MACs x 2 OP/MAC x 0.8 GHz / 8 = 52.4 TOPS SoC
+compute_units:
+  - name: npu_core
+    count: 1
+    ops_per_cycle_per_unit: 262144   # 512 x 512 MACs
+    supported_dtypes: [int8, int4]
+    dtype_multipliers: {int8: 0.125, int4: 0.25}
+    systolic_dims: [512, 512]
+    dataflow: ws
+
+memory:
+  - {name: SRAM, level: 1, capacity_bytes: 1.0e9, bandwidth_bytes_per_s: 1.28e11, latency_ns: 10}
+  - {name: LPDDR4x, level: 2, capacity_bytes: 8.0e9, bandwidth_bytes_per_s: 3.4e10, latency_ns: 150}
+
+async_copy_engines: 2
+
+estimates:
+  hypothetical: >-
+    Not a product. A variant of chip_a with 1/4 the TOPS and 1 GB of SRAM, constructed to probe
+    the compute-versus-capacity trade. Any number produced from this profile describes a design
+    point, not a chip anyone can buy.
+  memory: >-
+    DRAM bandwidth and capacity are inherited from chip_a and carry its uncertainties. SRAM
+    bandwidth is unused in v1 (docs/CORRECTIONS.md D5a); note that a fully-resident model on this
+    chip has no DRAM term at all, which is why its decode figure is set by the fixed per-op
+    latency term rather than by any bandwidth (D5a).

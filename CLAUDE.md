@@ -162,6 +162,10 @@ config store, Tailwind for layout, D3 for scales/axes and canvas for anything dr
 
 - Pydantic v2 coerces `1e12` in YAML to `float` but `1_000_000` to `int`; bandwidth fields must be
   declared `float` or comparisons silently integer-divide.
+- PyYAML implements YAML **1.1**, which only recognises an exponent when it carries a sign:
+  `3.35e12` loads as the *string* `"3.35e12"`, while `3.35e+12` loads as a float. `parse_or_pass`
+  rescues the unsigned form by reading it as a unitless SI value, but profile YAML should still
+  write the signed exponent — that is what the format means.
 - `ceil` in the tail-effect model must operate on the *padded* dimension, not the tile count, or
   small-M GEMMs report >100% utilization.
 - The sweep process pool must receive plain dicts, not pydantic objects — pickling validated models

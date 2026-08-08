@@ -1,0 +1,20 @@
+id: mistral_7b
+name: Mistral-7B-v0.1
+family: transformer_decoder
+source_url: https://huggingface.co/mistralai/Mistral-7B-v0.1/blob/main/config.json
+params:
+  layers: 32
+  hidden: 4096
+  heads: 32
+  kv_heads: 8
+  ffn_hidden: 14336
+  ffn_type: swiglu
+  vocab: 32000
+  max_context: 32768
+  norm: rmsnorm
+  positional: rope
+  tie_embeddings: false
+  sliding_window: 4096
+notes: >-
+  Same block shape as Llama-3-8B with a smaller vocabulary, so the two differ by 0.79 G embedding
+  parameters alone — a useful pair for isolating embedding traffic.

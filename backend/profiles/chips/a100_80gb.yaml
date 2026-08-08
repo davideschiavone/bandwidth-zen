@@ -1,0 +1,45 @@
+id: a100_80gb
+name: NVIDIA A100 SXM4 80GB
+vendor: NVIDIA
+source_url: https://www.nvidia.com/content/dam/en-zz/Solutions/Data-Center/a100/pdf/nvidia-a100-datasheet-us-nvidia-1758950-r4-web.pdf
+process_nm: 7
+clock_ghz: 1.41
+
+compute_units:
+  - name: tensor_core
+    count: 432                     # 108 SMs x 4 3rd-gen tensor cores
+    ops_per_cycle_per_unit: 256    # MACs; 432 x 256 x 1.41e9 x 2 = 312.0 TFLOP/s FP16 dense
+    supported_dtypes: [fp16, bf16, int8, tf32]
+    dtype_multipliers: {fp16: 1.0, bf16: 1.0, int8: 2.0, tf32: 0.5}
+    structured_sparsity_speedup: 2.0
+    systolic_dims: [16, 16]
+    dataflow: ws
+  - name: cuda_core
+    count: 6912                    # 108 SMs x 64 FP32 lanes
+    ops_per_cycle_per_unit: 1
+    supported_dtypes: [fp32, fp16]
+
+memory:
+  - {name: L1, level: 1, capacity_bytes: 2.0736e7, bandwidth_bytes_per_s: 8.0e13, latency_ns: 30}
+  - {name: L2, level: 2, capacity_bytes: 4.0e7, bandwidth_bytes_per_s: 7.0e12, latency_ns: 200}
+  - {name: HBM2e, level: 3, capacity_bytes: 8.0e10, bandwidth_bytes_per_s: 2.039e12, latency_ns: 600}
+
+async_copy_engines: 4
+tdp_w: 400
+
+interconnect:
+  intra_node:
+    name: NVLink 3
+    bandwidth_bytes_per_s: 3.0e11
+    latency_s: 2.0e-6
+    topology: fully_connected
+  inter_node:
+    name: InfiniBand HDR
+    bandwidth_bytes_per_s: 2.5e10
+    latency_s: 5.0e-6
+    topology: fat_tree
+
+estimates:
+  memory: >-
+    L1 and L2 bandwidths are order-of-magnitude estimates; NVIDIA publishes neither. Unused in v1
+    (docs/CORRECTIONS.md D5a). L1 capacity is 192 KB combined L1/shared per SM x 108.

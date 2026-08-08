@@ -44,30 +44,54 @@ GEMM-shaped ops (tile AI 10–30 FLOP/byte vs a 100–500 FLOP/byte SRAM ridge).
 preserved as an M8 refinement backlog, landed only on user demand and only if they improve
 validation MAPE over the flat model.
 
-## D5a — On-chip bandwidth promoted to a second ceiling (2026-08-07)
+## D5a — v1 machine model: DRAM + SRAM-as-capacity + compute (2026-08-07)
 
-Supersedes D5's "on-chip memory contributes capacity only" clause. D5's reasoning — that SRAM
-bandwidth rarely binds — was reached for datacenter parts that stream every weight from HBM. It is
-false for an edge NPU large enough to hold the model on-die: when the resident fraction
-`r = min(1, sram_bytes/W)` reaches 1, DRAM traffic goes to zero and on-chip bandwidth is the *only*
-bandwidth term left.
+Reaffirms and sharpens D5 after the alternative was considered and rejected. Decision
+(user, 2026-08-07): the first model is deliberately the simplest thing that can be right — three
+elements, no more.
 
-v1 therefore models two bandwidth ceilings for weight traffic, per the user's supplied formulas:
+| element | what it contributes | what it does **not** contribute |
+|---|---|---|
+| External memory (DRAM/HBM) | **bandwidth** — the only bandwidth ceiling in v1 | — |
+| On-chip SRAM | **capacity** — sets the resident fraction and the double-buffering headroom | no bandwidth term |
+| Compute engine | **TOPS** — the compute ceiling | — |
+
+SRAM earns its place through capacity in two distinct ways, and both are real:
+
+1. **Residency.** `r = min(1, sram_bytes / W)` is the weight fraction that need not be re-streamed
+   from DRAM each token, so it *removes DRAM traffic*: `t_dram = (1 - r) · W / bw_dram`.
+2. **Double buffering.** Overlapping the next tile's load with the current tile's compute requires
+   room for both. When capacity allows it, phase time is the `max` of the load and compute paths;
+   when it does not, the loads serialize behind compute and it is the `sum`. This is where the
+   "max, never the sum" rule earns its keep instead of being asserted.
 
 ```
-t_dram   = (1 - r) * W / bw_dram
-t_onchip = r * W / bw_onchip
-t_token  = max(t_dram + t_kv, t_onchip, t_compute)     # double-buffered overlap, never a sum
+t_dram    = (1 - r) * W / bw_dram
+t_compute = 2 * params * S / tops          # S = 1 for decode
+t_fixed   = n_ops * per_op_overhead_s
+t_phase   = max(t_dram + t_kv, t_compute) + t_fixed      # double buffering feasible
+          = t_dram + t_kv + t_compute      + t_fixed      # otherwise
+bound     ∈ {DRAM, COMPUTE, LATENCY}
 ```
 
 The rest of D5 stands: one compute ridge, no L1/L2/L3 hierarchy, no loop-order search, no
-Winograd/FFT.
+Winograd/FFT. Chip profiles still carry `bandwidth_bytes_per_s` on every memory level per
+PROMPT.md §4.1 — v1 analysis simply does not read it above the DRAM level, and says so in
+`report.assumptions`.
 
-## D5b — SRAM/NoC split and full-W SRAM accounting deferred (2026-08-07)
+**Consequence for the D8 goldens:** with no on-chip bandwidth term, the supplied
+`chip_b` 1B decode figure of **128 tok/s has no term that produces it** — it was
+`r·W/bw_onchip` and nothing else. Fully resident means `t_dram = 0`, leaving compute
+(38 µs → ~26k tok/s, obviously unphysical) and the fixed per-op term. So that cell is
+**LATENCY-bound**, its value is set by `per_op_overhead_s`, and the 128 tok/s golden is dropped
+rather than reverse-engineered. Every other D8 golden is unaffected: they are all DRAM- or
+compute-bound (see the margin table in D5b).
 
-Two refinements to D5a were identified and **deliberately not taken** (user, 2026-08-07: "skip the
-SRAM BW and keep the model simple"). Recorded here so the simplification is visible in every report
-rather than forgotten:
+## D5b — Why on-chip bandwidth is absent, and what it would take to add it (2026-08-07)
+
+An on-chip bandwidth ceiling (`t_onchip = r·W/bw_onchip`) was proposed, analysed, and **deliberately
+not taken** (user, 2026-08-07: "skip the SRAM BW and keep the model simple"; D5a). The analysis is
+kept because it is the justification for the omission, not merely a rejected alternative:
 
 1. **`bw_onchip` conflates two physical paths.** Local SRAM → PE array (weight feed) never crosses
    the NoC; the NoC carries inter-core activations and reductions. The supplied estimate of
@@ -79,23 +103,24 @@ rather than forgotten:
 2. **Streamed weights also pass through SRAM.** Non-resident weights land in an SRAM staging buffer
    and are then read by the array, so SRAM carries `W` reads + `(1-r)·W` writes, not `r·W`.
 
-Consequence, quantified so the risk is bounded rather than hand-waved. Margin before `t_onchip`
-overtakes the binding term, under the model as implemented:
+Consequence, quantified so the omission is bounded rather than hand-waved. Margin by which the
+binding term beats a hypothetical `t_onchip` at the supplied 128 GB/s:
 
 | config | binding term | margin |
 |---|---|---|
 | chip_a 4B / 2B / 1B decode | DRAM | 260× |
 | chip_b 4B decode | DRAM | 11× |
 | chip_b 2B decode | DRAM | 3.8× |
-| **chip_b 1B decode** | **on-chip** | **binding** |
+| **chip_b 1B decode** | LATENCY (D5a) | on-chip would bind |
 | all prefill TTFT @ S=512, crossover S\* | DRAM / compute | large |
 
-So exactly one cell of the head-to-head matrix is a direct readout of `bw_onchip`, and it is the
-cell whose input is least defensible. Reports must carry this; see the flip-margin requirement in
-`docs/PLAN.md` Session 4. Under the deferred accounting (2) the margins shrink to 1.9× / 1.6× /
-1.26×, which would move several decode figures by ~25% — the refinement is not cosmetic, only
-deferred. Trigger to land it: a published SRAM organization (banks × width × clock) or a measured
-figure for either chip.
+So every result except one is 3.8×–260× away from an on-chip ceiling even at the pessimistic
+128 GB/s: omitting the term costs nothing there. The single exception is the fully-resident
+`chip_b` 1B cell, and that is exactly the cell whose input was least defensible — which is why
+D5a routes it to the latency term instead. Under refinement (2) the margins shrink to
+1.9× / 1.6× / 1.26×, which would move several decode figures by ~25%, so the omission is material
+enough to keep visible via the flip-margin field (`docs/PLAN.md` Session 4). Trigger to revisit: a
+published SRAM organization (banks × width × clock), or a measured figure for either chip.
 
 ## D6 — Per-chip empirical fields live in the profile; defaults in `calibration.py` (2026-08-07)
 

@@ -16,9 +16,9 @@ Decisions taken with the user:
 - **Edge-NPU worked example is additive** (2026-08-07) — a supplied two-chip INT8 comparison
   (`chip_a`, `chip_b`, Gemma-3-4B at 1B/2B/4B) joins the roster at M1 and becomes M3's acceptance
   demo. Milestone structure unchanged. See `docs/CORRECTIONS.md` D8.
-- **On-chip bandwidth is a second ceiling** (2026-08-07) — needed because a fully-resident model
-  has no DRAM term at all. Kept deliberately simple: one declared `bw_onchip`, weight traffic
-  `r·W`, no SRAM/NoC split. See D5a and D5b.
+- **The v1 machine is three elements** (2026-08-07) — external DRAM/HBM provides *bandwidth*,
+  on-chip SRAM provides *capacity only* (residency, and the headroom that makes double buffering
+  possible), the compute engine provides *TOPS*. No on-chip bandwidth term. See D5a and D5b.
 
 The plan follows PROMPT.md milestones M0→M3 plus an early slice of M7 (validation), one session
 each. Each session ends green (`make lint test`), committed, per CLAUDE.md working style.
@@ -86,12 +86,12 @@ later cross-checks against its summed weight tensors.
 
 ## Session 4 — M3: single-chip analysis → Report
 
-- `analysis/`: `roofline.py` (compute ridge, DRAM ridge, and — per D5a — an on-chip ridge;
-  tile-buffer capacity still sets the tiling constraint, and double buffering trades against it),
-  `tiling.py`, `memory.py` (waterfall + feasibility with cheapest fixes, **plus the residency
-  fraction `r = min(1, sram_bytes/W)`** that splits weight traffic between the two ceilings),
-  `schedule.py` (double-buffered overlap: phase time is the `max` of the load paths and compute,
-  never the sum), `bottleneck.py` (four-way label: DRAM / on-chip / compute / latency). All
+- `analysis/`: `roofline.py` (two ridges only — compute and DRAM, per D5a), `tiling.py`,
+  `memory.py` (waterfall + feasibility with cheapest fixes, **plus the residency fraction
+  `r = min(1, sram_bytes/W)`** — SRAM capacity earning its keep by removing DRAM traffic),
+  `schedule.py` (double buffering: `max(load, compute)` when SRAM capacity has room for two tiles,
+  `load + compute` when it does not — so the "max, never the sum" rule is *derived* from capacity
+  rather than asserted), `bottleneck.py` (three-way label: DRAM / COMPUTE / LATENCY). All
   constants in `calibration.py` with source comments (start with documented defaults: ~0.8–0.9
   achievable HBM efficiency and one ~0.5–0.7 achieved-flops fraction for tensor cores — fitted in
   Session 5). The multi-level hierarchy, ws/os/rs loop-order search, and Winograd/FFT are not in
@@ -109,10 +109,13 @@ later cross-checks against its summed weight tensors.
 **Done when:** the CLAUDE.md sanity checks hold — Llama-3-8B fp16 decode on H100 → DRAM_BW_BOUND,
 ~35–55 tok/s; prefill @2k → COMPUTE_BOUND; Gemma-3-4B batch 1 → LATENCY_BOUND. Snapshot tests for
 all three, **plus the D8 acceptance demo**: ridge points 6165 / 1541 ops/byte; residency 1.4% /
-25.6% at 4B; decode 8.8 / 11.7 / 17.5 / 34 / 36 / 128 tok/s; decode 4B with KV@4k ≈ 8.5 tok/s;
+25.6% at 4B; decode 8.8 / 11.7 / 17.5 / 34 / 36 tok/s; decode 4B with KV@4k ≈ 8.5 tok/s;
 TTFT @ S=512 ≈ 113 / 85 ms (4B) and 27.9 / 19.5 ms (1B); per-op layer 94.4 MB, 2.78 ms, 0.90 µs.
 All within ~2%, all as self-consistency goldens in `tests/unit` and an integration snapshot —
 **not** in `tests/validation/`, which is reserved for published reference points (D8).
+The supplied `chip_b` 1B figure of 128 tok/s is **not** among them: it was a readout of the
+on-chip bandwidth term that D5a removes. That cell is LATENCY-bound and its golden is whatever
+`per_op_overhead_s` produces.
 
 ## Session 5 — Calibration + backtest (early M7 slice)
 

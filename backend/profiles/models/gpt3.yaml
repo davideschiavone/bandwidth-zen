@@ -1,0 +1,20 @@
+id: gpt3
+name: GPT-3 175B
+family: transformer_decoder
+source_url: https://arxiv.org/abs/2005.14165
+params:
+  layers: 96
+  hidden: 12288
+  heads: 96
+  ffn_hidden: 49152
+  ffn_type: gelu
+  vocab: 50257
+  max_context: 2048
+  norm: layernorm
+  positional: learned
+  tie_embeddings: true
+notes: >-
+  Table 2.1 of the paper. Derived parameter count 174.6 G against the stated 175 B; the 0.25% gap
+  is the learned positional table (2048 x 12288 = 25.2 M) plus attention and FFN biases, neither
+  of which the parametric schema models. The reference point for the analytic 6*N*D prefill FLOP
+  rule at M2.

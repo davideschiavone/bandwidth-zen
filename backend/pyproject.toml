@@ -31,6 +31,12 @@ dev = [
 [tool.hatch.build.targets.wheel]
 packages = ["bwz"]
 
+# profiles/ lives outside the package per PROMPT.md §2, so an installed wheel would
+# otherwise ship without it. bwz.spec.loaders.profiles_root() prefers this packaged
+# copy and falls back to the repo checkout for `uv run` development sessions.
+[tool.hatch.build.targets.wheel.force-include]
+"profiles" = "bwz/profiles"
+
 [tool.ruff]
 line-length = 100
 target-version = "py311"
@@ -39,6 +45,11 @@ target-version = "py311"
 select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
 # Docstrings state formulas per CLAUDE.md style ("2·M·N·K", "3.35 × 1e12", "µs").
 allowed-confusables = ["×", "·", "µ", "—", "≈", "≤", "≥"]
+
+[tool.ruff.lint.per-file-ignores]
+# typer declares CLI arguments as function defaults; that is the framework's API,
+# not an accidental mutable default.
+"bwz/cli.py" = ["B008"]
 
 [tool.mypy]
 strict = true

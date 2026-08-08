@@ -1,0 +1,28 @@
+id: gemma3_preset_1b
+name: Gemma-3-class 1B (size preset)
+family: transformer_decoder
+hypothetical: true
+preset_of: gemma3_4b
+declared_params: 1.0e9
+params:
+  layers: 34
+  hidden: 2560
+  heads: 8
+  kv_heads: 4
+  head_dim: 256
+  ffn_hidden: 10240
+  ffn_type: geglu
+  vocab: 262208
+  max_context: 131072
+  norm: rmsnorm
+  positional: rope
+  tie_embeddings: true
+  sliding_window: 1024
+  sliding_window_pattern: 6
+estimates:
+  declared_params: >-
+    A size preset, not a published checkpoint. Per docs/CORRECTIONS.md D8 the headline parameter
+    count is the figure that drives weight bytes W = params x w_bytes, and the block dimensions
+    are kept at their 4B values rather than scaled. That choice reproduces every supplied decode
+    and residency golden exactly, since those depend on params alone; it does mean the attention
+    and per-op terms carry 4B-sized dimensions, which shows up only in the prefill compute term.

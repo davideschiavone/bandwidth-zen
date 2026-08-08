@@ -1,0 +1,26 @@
+id: gemma3_preset_2b
+name: Gemma-3-class 2B (size preset)
+family: transformer_decoder
+hypothetical: true
+preset_of: gemma3_4b
+declared_params: 2.0e9
+params:
+  layers: 34
+  hidden: 2560
+  heads: 8
+  kv_heads: 4
+  head_dim: 256
+  ffn_hidden: 10240
+  ffn_type: geglu
+  vocab: 262208
+  max_context: 131072
+  norm: rmsnorm
+  positional: rope
+  tie_embeddings: true
+  sliding_window: 1024
+  sliding_window_pattern: 6
+estimates:
+  declared_params: >-
+    A size preset, not a published checkpoint. See gemma3_preset_1b for the scaling choice and
+    docs/CORRECTIONS.md D8 for why the headline params figure, not the block dimensions, is what
+    drives the weight-traffic results.

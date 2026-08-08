@@ -1,3 +1,102 @@
-"""Input schemas: ModelSpec, HardwareSpec, DeploymentSpec, and YAML/JSON loaders."""
+"""Validated spec objects: what the user writes, turned into what the engine consumes.
+
+``spec`` is the entry point of the one-way dependency chain
+``spec -> graph -> operators -> analysis -> report -> {api, cli}`` (CLAUDE.md).
+Nothing here imports from any later stage.
+"""
 
 from __future__ import annotations
+
+from bwz.spec.deployment import (
+    AttentionImpl,
+    Constraints,
+    DeploymentSpec,
+    Mode,
+    OptimizeFor,
+    Parallelism,
+    Phase,
+    Precision,
+    PrecisionOverride,
+    Sparsity,
+    SparsityType,
+)
+from bwz.spec.dtypes import DType, bytes_per_element, is_integer
+from bwz.spec.hardware_spec import (
+    ComputeUnit,
+    Dataflow,
+    HardwareSpec,
+    Interconnect,
+    InterconnectSet,
+    MemoryLevel,
+    Topology,
+)
+from bwz.spec.loaders import (
+    AnyModelSpec,
+    SpecLoadError,
+    available_chips,
+    available_models,
+    iter_chips,
+    iter_models,
+    load_chip,
+    load_deployment,
+    load_model,
+    profiles_root,
+    to_document,
+    to_yaml,
+)
+from bwz.spec.model_spec import (
+    CNNSpec,
+    CustomSpec,
+    FFNType,
+    ModelFamily,
+    ModelSpec,
+    NormType,
+    PositionalType,
+    TransformerParams,
+    TransformerSpec,
+)
+
+__all__ = [
+    "AnyModelSpec",
+    "AttentionImpl",
+    "CNNSpec",
+    "ComputeUnit",
+    "Constraints",
+    "CustomSpec",
+    "DType",
+    "Dataflow",
+    "DeploymentSpec",
+    "FFNType",
+    "HardwareSpec",
+    "Interconnect",
+    "InterconnectSet",
+    "MemoryLevel",
+    "Mode",
+    "ModelFamily",
+    "ModelSpec",
+    "NormType",
+    "OptimizeFor",
+    "Parallelism",
+    "Phase",
+    "PositionalType",
+    "Precision",
+    "PrecisionOverride",
+    "Sparsity",
+    "SparsityType",
+    "SpecLoadError",
+    "Topology",
+    "TransformerParams",
+    "TransformerSpec",
+    "available_chips",
+    "available_models",
+    "bytes_per_element",
+    "is_integer",
+    "iter_chips",
+    "iter_models",
+    "load_chip",
+    "load_deployment",
+    "load_model",
+    "profiles_root",
+    "to_document",
+    "to_yaml",
+]
