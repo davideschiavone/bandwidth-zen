@@ -102,8 +102,14 @@ def _chip_table() -> Table:
 
 def _model_row(model: AnyModelSpec) -> tuple[str, ...]:
     if isinstance(model, TransformerSpec):
-        p = model.params
-        shape = f"L={p.layers} d={p.hidden} ffn={p.ffn_hidden} kv={p.effective_kv_heads}"
+        p = model.effective_params
+        # h=<query>/<kv>x<head_dim>. Showing kv_heads alone hid both the GQA
+        # ratio and the fact that heads x head_dim need not equal hidden --
+        # Gemma-3-4B is 8x256 = 2048 against a hidden of 2560.
+        shape = (
+            f"L={p.layers} d={p.hidden} ffn={p.ffn_hidden} "
+            f"h={p.heads}/{p.effective_kv_heads}x{p.effective_head_dim}"
+        )
         params = format_quantity(model.headline_parameter_count(), "", precision=4).strip()
         return (model.id, model.name, model.family.value, params, shape, _provenance(model))
     if isinstance(model, CNNSpec):
