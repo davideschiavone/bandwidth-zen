@@ -178,6 +178,66 @@ measurements. They live in `tests/unit/` and an integration snapshot — never i
 `tests/validation/` or `docs/CALIBRATION.md`, which are reserved for published, citable reference
 points. Keeping that line sharp is what makes the Session 5 calibration mean anything.
 
+## D10 — Hardware-dependent effects stay in `analysis/`, not `operators/` (2026-08-08)
+
+`docs/PLAN.md` Session 3 lists "tiled traffic, tail effect" under `operators/matmul.py`. Both
+depend on the chip — tiling on SRAM capacity, the tail effect on `systolic_dims` — so putting them
+in `operators/` would make a cost model take a `HardwareSpec` and blur the layering that CLAUDE.md's
+architecture paragraph draws: `operators/` produces FLOPs and byte counts, `analysis/` runs "the
+roofline, tiling search, memory planner".
+
+Decision (build, 2026-08-08): operator cost models are **hardware-independent**. They report the
+arithmetic performed and the *compulsory* traffic — each weight read once, each input read once,
+each output written once. Tile re-reads, cache reuse and the tail effect land in `analysis/` at M3.
+
+Practical benefit beyond tidiness: every M2 number is hand-checkable without reference to a chip,
+which is what makes the golden tests in `tests/unit/test_operators.py` meaningful.
+
+## D11 — Analytic prefill FLOPs are `2·N·D`, not `6·N·D` (2026-08-08)
+
+`PROMPT.md` §8 M2 gives as a definition of done: "GPT-3 prefill FLOPs match the analytic `6·N·D`
+rule within 3%". `6·N·D` is the *training* compute rule (Kaplan et al.): roughly `2·N·D` forward
+plus `4·N·D` for the backward pass. Prefill is forward-only, so the correct rule is **`2·N·D`**,
+and the DoD as written is wrong by a factor of three. PROMPT.md's own next line — "Gemma forward
+FLOPs match `2·N·S` within 2%" — uses the forward rule, so the two cannot both be right.
+
+Implemented as `2·N·D`. Measured at S=2048, batch 1: **722.6 TFLOP against `2·N·D` = 715.0 TFLOP,
++1.1%**, inside the stated 3%.
+
+### The rule's limit of validity, which PROMPT.md does not state
+
+`2·N·D` counts every parameter as doing two FLOPs per token. Embedding parameters do not: a
+forward pass *gathers* rows from the table rather than multiplying by it, and the LM head runs on
+one token, not `D`. So the rule is only accurate when embeddings are a small fraction of `N`:
+
+| model | embeddings as % of N | actual vs `2·N·D` | actual vs `2·N_non-embedding·D` |
+|---|---|---|---|
+| GPT-3 175B | 0.4% | **+1.1%** | +1.4% |
+| Llama-3-8B | 13.1% | −9.7% | +3.9% |
+| Gemma-3-4B | 17.3% | −13.5% | +4.5% |
+
+The general form is `2·N_non-embedding·D`, and the residual above it is attention, which grows as
+`D²` and so is itself only negligible at short context — at S=512 Gemma-3-4B is +1.2% over that
+form, at S=2048 it is +4.5%. Goldens are therefore pinned as: GPT-3 against `2·N·D` at S=2048
+(±3%), Gemma-3-4B against `2·N_non-embedding·S` at S=512 (±2%).
+
+## D12 — CLAUDE.md's Llama-3-8B decode sanity check looks ~3x too slow (2026-08-08)
+
+CLAUDE.md's sanity checks say: "Llama-3-8B, fp16, batch 1, H100, decode → memory-bound, roughly
+16 GB of weights moved per token, so ~35–55 tok/s."
+
+The weight-traffic half is confirmed by M2: the decode graph moves **15.3 GB** per token (13.96 GB
+of layer weights, 1.05 GB of untied LM head, ~0 for the embedding gather, ~0.3 GB of activations
+and KV). But 16 GB at H100's 3.35 TB/s is **4.8 ms, i.e. ~209 tok/s** at peak and ~167 tok/s at a
+plausible 80% achieved bandwidth. To arrive at 35–55 tok/s you would need to move 60–95 GB per
+token, which contradicts the same sentence's own 16 GB figure.
+
+Published single-GPU numbers for this configuration land around 100–140 tok/s, consistent with the
+bandwidth argument and not with 35–55. **No change made at M2** — nothing here predicts tok/s yet.
+Flagged so that M3 does not "fix" a correct model to hit an incorrect target, and so that Session 5
+resolves the range against a citable measurement rather than against this line. The 16 GB figure
+stands and is the one worth keeping.
+
 ## D9 — `gemma4` profile replaced by `gemma3_4b` (2026-08-07)
 
 Commit 5218046 named `gemma4.yaml` in the Phase 1 plan (no profile was written — `profiles/models/`
@@ -185,9 +245,26 @@ is still empty). No public `config.json` exists under that name, and CLAUDE.md f
 hyperparameters. Decision (user, 2026-08-07): ship Gemma-3-4B, which has a published config and is
 the basis of the D8 worked example.
 
-**Open:** the user's figures are an idealized Gemma-3-4B (Q projection at `d_model×d_model`,
-`d_kv=512`, vocab 256000), whereas the real config has 8 query heads × 256 head-dim, vocab 262144,
-and interleaved local/global attention. Using the true config shifts the 94.4 MB/layer golden.
-Default plan is to ship both — `gemma3_4b_idealized` so the D8 goldens hold exactly, and
-`gemma3_4b` from the HF config — so the cost of the simplification is visible. Awaiting user
-confirmation; not blocking M1.
+**Resolved at M1 (weights) and M2 (KV).** The supplied figures are an idealised Gemma-3-4B
+(Q projection at `d_model×d_model`, `d_kv=512`, vocab 256000); the real config has 8 query heads
+× 256 head-dim, `kv_width = 4×256 = 1024`, and vocab 262208. Only one profile ships — the faithful
+one — because:
+
+- **Attention weights per layer are identical.** `2·2560·(2560+512)` equals `2·2560·(2048+1024)`,
+  so both give 15.73 MB, and with the 78.64 MB GEGLU FFN both give the 94.4 MB/layer that D8's
+  per-op golden asserts. Verified at M1: 94.372 MB, and `ops = 2 × weight_bytes` holds to 4
+  decimal places over the layer's matmuls.
+- **The KV cache is not identical, and the coincidence does not extend to it.** KV depends on
+  `d_kv` alone, not on the sum, so the real `kv_width = 1024` gives exactly **twice** the supplied
+  figure: `34 × 2 × 1024 × 4096 × 1 = 285.2 MB` at C=4k, against D8's 142.6 MB.
+
+The D8 decode-with-KV golden moves accordingly, and the corrected figures are what M3 will assert:
+
+| quantity | as supplied | with the real config |
+|---|---|---|
+| KV(4096), INT8 | 142.6 MB | **285.2 MB** |
+| `t_kv` @ 34 GB/s | 4.19 ms | **8.39 ms** |
+| chip_a 4B decode with KV@4k | 117.3 ms, 8.53 tok/s | **121.5 ms, 8.23 tok/s** |
+
+Every KV-free D8 golden is untouched — the weight-traffic figures dominate at 113 ms and the KV
+term only ever adds to them.

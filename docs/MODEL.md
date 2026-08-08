@@ -9,7 +9,7 @@ Filled in milestone by milestone; the authoritative build spec is `PROMPT.md` §
 |---|---|---|
 | Peak throughput and the ridge point | M1 | **implemented** |
 | Parameter and KV-cache counts | M1 | **implemented** |
-| FLOP/byte counts (transformer, CNN) | M2 | not yet implemented |
+| FLOP/byte counts (transformer, CNN) | M2 | **implemented** |
 | Roofline (flat: compute ridge vs DRAM ridge) | M3 | not yet implemented |
 | Roofline (hierarchical, multi-level) | M8, on demand | not yet implemented |
 | Tiling and DRAM traffic | M3 | not yet implemented |
@@ -110,3 +110,138 @@ The 2 is K and V. Worked example (Llama-3-8B, 8k context, fp16, batch 1):
 `32 x 2 x 1024 x 8192 x 2 = 1.0737e9` bytes — exactly 1.0 GiB, or 1.07 GB in the decimal
 convention this engine uses throughout. GQA is what makes this affordable: with 32 KV heads
 instead of 8 it would be 4.3 GB.
+
+---
+
+## 3. Operator cost models (M2, `operators/`)
+
+Each model reports the arithmetic an operation performs and its **compulsory** traffic — every
+weight read once, every input read once, every output written once. Nothing here knows about a
+chip: tile re-reads, cache reuse and the systolic tail effect are `analysis/`'s job at M3
+(`docs/CORRECTIONS.md` D10). That is what makes every number below checkable with a calculator.
+
+`OpCost` splits bytes by role because M3 treats them differently — weight traffic is what
+residency removes, activation traffic is what tiling affects, and `scratch` is what
+FlashAttention eliminates.
+
+### 3.1 Matmul
+
+```
+flops        = 2 · M · N · K
+weight_bytes = K · N · sizeof(w_dtype)
+input_bytes  = M · K · sizeof(a_dtype)
+output_bytes = M · N · sizeof(a_dtype)
+```
+
+`M` folds batch and sequence: `batch·S` at prefill, `batch` at decode. That one number is the
+difference between the two regimes. Llama-3-8B's Q projection at batch 1 is `M=1, K=N=4096`:
+33.55 MFLOP against 33.55 MB of fp16 weights — **1 FLOP per byte**, against a ridge point of 295
+on H100. Nothing about the compute array matters at that intensity.
+
+### 3.2 Attention
+
+```
+positions = q_len · kv_len,  or the causal lower triangle when q_len > 1:
+            q_len · (kv_len − q_len) + q_len · (q_len + 1)/2
+scored    = batch · heads · positions
+flops     = 2 · 2 · scored · head_dim  +  5 · scored
+```
+
+Three properties the tests assert directly:
+
+- **Causal masking halves prefill scores.** The exact triangular fraction is used, not a flat 0.5,
+  so short prompts and prompts appended to existing context are both right. At decode `q_len = 1`
+  and every key is visible, so nothing is halved. PROMPT.md's `4·d_model·S²` omits this.
+- **GQA changes bytes, never FLOPs.** All `heads` query heads participate in every score; only
+  `kv_heads` distinct K/V heads are read.
+- **FlashAttention changes bytes, never FLOPs.** Vanilla writes the `q_len × kv_len` score matrix
+  and reads it back (`scratch_bytes = 2 · scored · sizeof(a_dtype)`); flash tiles it in registers.
+
+Worked example (Llama-3-8B prefill, S=2048, batch 1, 32 heads, head_dim 128): positions
+`2048·2049/2 = 2 098 176`, scored `67 141 632`, so `4 · scored · 128 = 34.38 GFLOP` plus
+`5 · scored = 0.34 GFLOP` — **34.71 GFLOP**.
+
+### 3.3 Norm, elementwise, embedding
+
+`flops = elements × flops_per_element`, with the per-element counts in `calibration.py` as
+declared conventions (RMSNorm 4, LayerNorm 6, softmax 5 per score, SiLU 4, GELU 8, RoPE 3). None
+of them changes a bottleneck verdict; all of them are memory-bound at intensity ≈ 1.
+
+**Embedding is a gather, and this matters.** Only the rows touched are traffic; the table is
+footprint. Charging the table would add 1.05 GB of phantom traffic to every Llama-3-8B decode step
+and roughly double its predicted latency.
+
+### 3.4 Convolution
+
+```
+flops = 2 · batch · out_h · out_w · out_channels · (in_channels / groups) · kernel_h · kernel_w
+```
+
+im2col shares this model — same arithmetic, different layout. Winograd and FFT genuinely reduce
+the arithmetic and are M8.
+
+**Depthwise** sets `groups = in_channels = out_channels`, collapsing the `in_channels/groups`
+factor to 1: FLOPs fall by the channel count while activation traffic is unchanged, so arithmetic
+intensity falls by the same factor. That is why MobileNetV3's depthwise layers are memory-bound.
+
+---
+
+## 4. Transformer expansion (M2, `graph/transformer.py`)
+
+Prefill and decode are built as **separate graphs**, not one graph with a flag (CLAUDE.md #6).
+Same weights, same op count, same structure; the only difference is `M` and the KV wiring:
+
+| | prefill | decode |
+|---|---|---|
+| `M` (projection rows) | `batch · S` | `batch` |
+| `q_len` / `kv_len` | `S` / `S` | `1` / context |
+| KV traffic | K/V just computed, written as the cache | the whole cache streamed |
+| arithmetic intensity (Llama-3-8B) | **744** FLOP/byte | **1.06** FLOP/byte |
+
+Per block: norm → Q/K/V projections → RoPE → attention → O projection → residual → norm → FFN
+(gate/up/down for a gated FFN, up/down otherwise) → residual. Around them: an embedding gather,
+a final norm, and the LM head.
+
+Two modelling choices worth stating:
+
+- **The LM head runs on the last token only**, in both phases. Inference needs one distribution per
+  *generated* token, and every serving stack slices before the projection. Computing all `S` would
+  add `2·S·hidden·vocab` — for Gemma-3-4B at S=2048 that is 2.7 TFLOP against a 13.7 TFLOP forward
+  pass, a 20% error.
+- **Tied embeddings are one tensor**, so the LM head reuses `embed_tokens` and the footprint counts
+  it once.
+
+### The analytic FLOP rules, and where they stop working
+
+Prefill is forward-only, so the rule is **`2·N·D`** — `6·N·D` is the *training* figure and
+PROMPT.md's M2 DoD states it in error (`docs/CORRECTIONS.md` D11). But `2·N·D` assumes every
+parameter does two FLOPs per token, and embedding parameters do not — they are gathered, and the
+head runs once:
+
+| model | embeddings as % of N | vs `2·N·D` | vs `2·N_non-emb·D` |
+|---|---|---|---|
+| GPT-3 175B | 0.4% | **+1.1%** | +1.4% |
+| Llama-3-8B | 13.1% | −9.7% | +3.9% |
+| Gemma-3-4B | 17.3% | −13.5% | +4.5% |
+
+The general form is `2·N_non-embedding·D`, and the residual above it is attention, which grows as
+`D²` — Gemma-3-4B is +1.2% over that form at S=512 and +4.5% at S=2048. Quote either rule with its
+context length and its embedding share, or not at all.
+
+---
+
+## 5. CNN expansion (M2, `graph/cnn.py`)
+
+Channel propagation is the whole job: layer *n*'s weight shape depends on layer *n−1*'s output
+channels, which is why `CNNSpec.parameter_count()` raises and defers to the graph. Spatial extents
+follow `ceil(extent / stride)` ('same' padding).
+
+An MBConv block expands 1×1, convolves depthwise `k×k`, optionally squeeze-excites, and projects
+1×1, with a residual when stride is 1 and channels are unchanged. **The expansion is omitted when
+`expand_channels == in_channels`** — MobileNetV3's first block expands 16→16, and the reference
+implementation skips it rather than emitting an identity 1×1.
+
+MobileNetV3-Large 1.0 at 224², batch 1: **5.47 M parameters** (paper: 5.4 M, +1.3% — batch-norm
+pairs and SE bottlenecks, which the headline figure does not itemise) and **234.8 M MACs**
+(paper: 219 M, +7.2%). Every convolution in the network sits below 65 FLOP/byte against H100's
+ridge of 295 and chip_a's of 6168, so the whole network is memory-bound on either.

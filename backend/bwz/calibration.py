@@ -34,3 +34,34 @@ DEFAULT_USABLE_MEMORY_FRACTION: float = 0.90
 # number is.
 # TO BE FITTED: docs/PLAN.md Session 5.
 DEFAULT_KERNEL_LAUNCH_OVERHEAD_S: float = 3.0e-6
+
+
+# -- op-count conventions ---------------------------------------------------
+#
+# These are not measurements and never will be: they are how many operations we
+# agree to charge for arithmetic whose exact count depends on the kernel. They
+# live here rather than inline because CLAUDE.md #2 bans magic numbers in
+# operators/, and because a reader deserves to find every debatable constant in
+# one place. None of them changes a bottleneck verdict - a softmax charged at 4
+# instead of 5 FLOPs per score moves total prefill FLOPs by well under 1%.
+
+# exp, running max subtract, sum accumulate, and the final divide.
+SOFTMAX_FLOPS_PER_SCORE: float = 5.0
+
+# square, sum-accumulate, rsqrt (amortised), scale multiply.
+RMSNORM_FLOPS_PER_ELEMENT: float = 4.0
+
+# RMSNorm's four plus a mean accumulate and a subtract.
+LAYERNORM_FLOPS_PER_ELEMENT: float = 6.0
+
+# One compare (max pool) or one accumulate (average pool) per window element.
+POOL_FLOPS_PER_WINDOW_ELEMENT: float = 1.0
+
+# sigmoid (exp, add, reciprocal) plus the gating multiply.
+SILU_FLOPS_PER_ELEMENT: float = 4.0
+
+# tanh approximation: two multiplies, a cube, a tanh, an add and two scales.
+GELU_FLOPS_PER_ELEMENT: float = 8.0
+
+# Rotary embedding: a cos multiply, a sin multiply and an add per element.
+ROPE_FLOPS_PER_ELEMENT: float = 3.0

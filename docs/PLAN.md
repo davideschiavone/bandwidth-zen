@@ -74,15 +74,17 @@ later cross-checks against its summed weight tensors.
   + GQA; flash changes bytes never FLOPs), conv (direct/im2col only; Winograd/FFT in the
   refinement backlog), norm, elementwise.
   FLOP/byte formulas exactly per PROMPT.md §3.2, documented in `docs/MODEL.md` as implemented.
-- Golden tests in the same commits: GPT-3 prefill FLOPs ≈ `6·N·D` within 3%; Gemma-3-4B forward
-  FLOPs (batch 1) ≈ `2·N·S` within 2%; Llama-3-8B KV cache @ 8k fp16 = 1.0 GB ±2%.
+- Golden tests in the same commits: GPT-3 prefill FLOPs ≈ **`2·N·D`** within 3% (PROMPT.md says
+  `6·N·D`, which is the training rule — see D11); Gemma-3-4B forward FLOPs (batch 1) ≈
+  `2·N_non-embedding·S` at S=512 within 2%; Llama-3-8B KV cache @ 8k fp16 = 1.0 **GiB** ±2%.
 - Per-op layer golden from D8 — the decode graph's seven projections (Q/O at `d_model²`, K/V at
   `d_model·d_kv`, three FFN at `d_model·d_ff`) sum to 94.4 MB/layer, 2.78 ms load @ 34 GB/s,
   0.90 µs compute, ≈3080× memory-bound. `ops = 2·weight_bytes` falls out of `2·M·N·K` at M=1.
 - KV cache `n_layers·2·d_kv·C·w_bytes`; prefill score FLOPs **halved for causal masking**, a
   deliberate deviation from the supplied formulas (D8).
 
-**Done when:** all M2 golden tests pass.
+**Done when:** all M2 golden tests pass, and the graph builder's summed weight tensors equal
+`ModelSpec.parameter_count()` for every shipped transformer — two independent derivations agreeing.
 
 ## Session 4 — M3: single-chip analysis → Report
 
