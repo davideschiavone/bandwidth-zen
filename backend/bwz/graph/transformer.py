@@ -56,7 +56,8 @@ class _Builder:
 
     def __init__(self, model: TransformerSpec, deployment: DeploymentSpec, phase: GraphPhase):
         self.model = model
-        self.params = model.params
+        self.params = model.effective_params
+        """Post-preset-scaling shape: what actually gets built."""
         self.deployment = deployment
         self.phase = phase
         self.tensors: dict[str, Tensor] = {}

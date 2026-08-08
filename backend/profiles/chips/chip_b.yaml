@@ -23,8 +23,20 @@ memory:
   - {name: LPDDR4x, level: 2, capacity_bytes: 8.0e9, bandwidth_bytes_per_s: 3.4e10, latency_ns: 150}
 
 async_copy_engines: 2
+dram_bandwidth_efficiency: 1.0
+achieved_flops_fraction: 1.0
 
 estimates:
+  dram_bandwidth_efficiency: >-
+    Set to 1.0 deliberately. The supplied 34 GB/s and 209.6 TOPS are order-of-magnitude
+    engineering estimates with no measured achieved fraction behind them; de-rating them by a
+    constant fitted on datacenter GPUs would compound one guess with another and make the
+    docs/CORRECTIONS.md D8 goldens test the constant rather than the formula. Session 5 replaces
+    this with a fitted value if a measurement ever appears.
+  achieved_flops_fraction: >-
+    Set to 1.0 for the same reason. Note that shape utilisation is applied separately and is NOT
+    disabled by this: a batch-1 GEMM on the 512x512 array still runs at 1/513 of peak, which is
+    the dominant compute effect at these batch sizes.
   hypothetical: >-
     Not a product. A variant of chip_a with 1/4 the TOPS and 1 GB of SRAM, constructed to probe
     the compute-versus-capacity trade. Any number produced from this profile describes a design

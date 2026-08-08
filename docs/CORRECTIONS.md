@@ -81,11 +81,13 @@ PROMPT.md §4.1 — v1 analysis simply does not read it above the DRAM level, an
 
 **Consequence for the D8 goldens:** with no on-chip bandwidth term, the supplied
 `chip_b` 1B decode figure of **128 tok/s has no term that produces it** — it was
-`r·W/bw_onchip` and nothing else. Fully resident means `t_dram = 0`, leaving compute
-(38 µs → ~26k tok/s, obviously unphysical) and the fixed per-op term. So that cell is
-**LATENCY-bound**, its value is set by `per_op_overhead_s`, and the 128 tok/s golden is dropped
-rather than reverse-engineered. Every other D8 golden is unaffected: they are all DRAM- or
-compute-bound (see the margin table in D5b).
+`r·W/bw_onchip` and nothing else. Fully resident means `t_dram = 0`.
+
+*Updated at M3:* the term that takes over is **compute**, not the fixed per-op cost as predicted
+here. `t_compute = 2·params/tops` is 38 µs only if the 512×512 array is fully utilised; at batch 1
+it runs at 1/513 of peak (see D14), giving 20.8 ms and **48 tok/s**. That is a physically grounded
+answer rather than a placeholder, so the cell is `COMPUTE_BOUND` and the golden is 48 tok/s, not
+128 and not a latency artefact.
 
 ## D5b — Why on-chip bandwidth is absent, and what it would take to add it (2026-08-07)
 
@@ -111,13 +113,13 @@ binding term beats a hypothetical `t_onchip` at the supplied 128 GB/s:
 | chip_a 4B / 2B / 1B decode | DRAM | 260× |
 | chip_b 4B decode | DRAM | 11× |
 | chip_b 2B decode | DRAM | 3.8× |
-| **chip_b 1B decode** | LATENCY (D5a) | on-chip would bind |
+| **chip_b 1B decode** | COMPUTE (D14) | on-chip would bind |
 | all prefill TTFT @ S=512, crossover S\* | DRAM / compute | large |
 
 So every result except one is 3.8×–260× away from an on-chip ceiling even at the pessimistic
 128 GB/s: omitting the term costs nothing there. The single exception is the fully-resident
 `chip_b` 1B cell, and that is exactly the cell whose input was least defensible — which is why
-D5a routes it to the latency term instead. Under refinement (2) the margins shrink to
+D5a and D14 route it to the array's batch-1 utilisation instead. Under refinement (2) the margins shrink to
 1.9× / 1.6× / 1.26×, which would move several decode figures by ~25%, so the omission is material
 enough to keep visible via the flip-margin field (`docs/PLAN.md` Session 4). Trigger to revisit: a
 published SRAM organization (banks × width × clock), or a measured figure for either chip.
@@ -237,6 +239,105 @@ bandwidth argument and not with 35–55. **No change made at M2** — nothing he
 Flagged so that M3 does not "fix" a correct model to hit an incorrect target, and so that Session 5
 resolves the range against a citable measurement rather than against this line. The 16 GB figure
 stands and is the one worth keeping.
+
+## D13 — CLAUDE.md's Gemma latency-bound sanity check needs a much smaller model (2026-08-08)
+
+CLAUDE.md: "Gemma-4, batch 1, H100 → latency/launch-bound, single-digit % utilization. Batch 128 →
+good utilization."
+
+The **utilisation** half is confirmed exactly: 0.24% at batch 1, 19.5% at batch 128. The **label**
+is not. At fp16 a 3.88 G model moves 7.8 GB of weights per token, so on H100:
+
+| term | value |
+|---|---|
+| `t_dram` | **2.70 ms** |
+| `t_fixed` (274 dispatches × 3 µs) | 0.82 ms |
+| `t_compute` | 0.21 ms |
+
+DRAM wins by 3.3×. Latency *is* the runner-up — it beats compute by 4× — so "launch-bound" is
+half-right, but the verdict is `DRAM_BW_BOUND`. Reaching a genuinely launch-bound regime takes a
+model three orders of magnitude smaller: **MobileNetV3 (5.4 M parameters) on H100 comes out
+`LATENCY_BOUND`**, and is now the sanity check that covers this case.
+
+No constant was tuned to force the stated label. Doing so would have meant raising
+`per_op_overhead_s` past 10 µs — well outside any defensible range for a GPU — to make a 4 B model
+launch-bound, and that would have corrupted every other prediction to satisfy one line of prose.
+
+## D14 — The systolic tail effect changes the D8 conclusion (2026-08-08)
+
+CLAUDE.md requires it: "GEMM with M=1 on a 128×128 systolic array → utilization ≈ 1/128 from the
+tail effect. If your utilization model doesn't reproduce this, it isn't modelling the array."
+
+Implemented in `analysis/tiling.py` as three multiplicative losses:
+
+```
+utilisation = [K / padded(K, rows)] · [N / padded(N, cols)] · [M / (M + rows)]
+```
+
+The `M/(M+rows)` term is a weight-stationary array's pipeline fill and drain: one row of work still
+costs `rows` cycles of latency. **This is the largest single correction the engine applies**, and it
+falsifies a D8 assumption.
+
+D8 computes `t_compute = 2·params/tops`, i.e. at 100% array utilisation. On a 512×512 array at
+batch 1 the real figure is 1/513 of that — a factor of **513**. Consequences:
+
+| D8 claim | with the tail effect |
+|---|---|
+| per-op layer: compute 0.9 µs, "≈3080× memory-bound" | 0.72 ms, **3.8× memory-bound** |
+| chip_b 4B decode 11.7 tok/s, DRAM-bound | **9.3 tok/s, COMPUTE_BOUND** |
+| chip_b 1B decode 128 tok/s | **48 tok/s, COMPUTE_BOUND** |
+| chip_b prefill @S=512 85 ms, DRAM-bound | **144 ms, COMPUTE_BOUND** |
+
+**The head-to-head conclusion changes.** D8 has chip_b — quarter the compute, 18× the SRAM —
+winning decode by 33%. Once the array's batch-1 utilisation is modelled, chip_b's quarter of the
+TOPS becomes its binding term and the margin collapses to ~11% (9.3 against 8.4). At 1B it wins by
+30%, not 3.5×. chip_a is unaffected throughout: with 4× the compute its array never binds, which is
+why every chip_a figure still reproduces D8 within 5%.
+
+Note also that even at prefill the effect is not small: `M/(M+512)` at a 512-token prompt is 0.5,
+so a 512-deep array is *half idle* on a prompt exactly as long as itself. Amortising it needs
+S ≫ 512.
+
+## D15 — On-chip capacity is allocated to activations before weights (2026-08-08)
+
+D5a says SRAM contributes capacity. It does not say what the capacity is *spent on*, and the answer
+turns out to matter more than the residency formula.
+
+Charging every activation to DRAM gave chip_a a prefill TTFT of 178 ms against D8's 113 ms — a 58%
+error — because a 15 MB activation working set was being streamed from DRAM by a chip with 55 MB of
+SRAM. Allocation order adopted (build decision), which is what an NPU compiler does:
+
+1. **The double buffer** (two tiles). Filling SRAM with resident weights leaves no staging room and
+   forfeits the `max(load, compute)` overlap entirely — a far worse trade than giving up two tiles
+   of residency. chip_b at 1 GB is the case that surfaces it.
+2. **The activation working set.** On chip_a at prefill, 15 MB of activations held on chip removes
+   ~2 GB of DRAM traffic (58 ms); the same 15 MB spent on weight residency removes 15 MB (1.6 ms).
+3. **Weights**, with whatever remains. This is what `resident_fraction` reports.
+
+With this order the D8 residency table is reproduced essentially exactly — 1.40 / 2.73 / 5.71% on
+chip_a and 25.76 / 50.15 / 100% on chip_b against the stated 1.4 / 2.7 / 5.5 and 25.6 / 50 / 100 —
+and chip_a's TTFT lands at 114.6 ms against 113.
+
+## D16 — Size presets are realised by scaling the layer count (2026-08-08)
+
+D8 asks for 1B/2B/4B presets driven by `params`, "keep the other dims or scale them — document the
+choice". At M1 `declared_params` set only the headline figure; the graph still built the full 4B, so
+all three presets produced identical predictions. Fixed at M3.
+
+Choice taken: **scale the layer count**, the dimension that genuinely varies within a model family.
+Widths and vocabulary stay at the family's values. The realisation is never exact — layers are
+integers and the embedding table does not scale at all:
+
+| preset | layers | built | vs declared |
+|---|---|---|---|
+| 2B | 14 | 1.993 G | −0.4% |
+| 1B | 3 | 0.954 G | −4.6% |
+
+The 1B preset is **70% embedding table** (Gemma-3-4B's tied 262208×2560 is 671 M) and has room for
+three blocks. It reproduces D8's residency and decode figures, but as a model it is degenerate, and
+a real `gemma3_1b` profile (26 layers, hidden 1152, 1.0 B) would be the better 1 B point if that
+sweep is ever used for anything beyond checking D8. The residual is reported in
+`report.assumptions` rather than hidden.
 
 ## D9 — `gemma4` profile replaced by `gemma3_4b` (2026-08-07)
 

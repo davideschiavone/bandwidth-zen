@@ -239,21 +239,46 @@ class TransformerSpec(_ModelBase):
             )
         return self
 
+    @property
+    def effective_params(self) -> TransformerParams:
+        """The hyperparameters that are actually built.
+
+        For a size preset, ``declared_params`` is realised by **scaling the layer
+        count** — the dimension that genuinely varies within a model family, and
+        the only one that can be changed without inventing a new architecture.
+        Widths and vocabulary stay at the family's values.
+
+        The realisation is never exact, because layers are integers and the
+        embedding table does not scale at all. Gemma-3-4B's tied 262208x2560
+        table is 671 M parameters, so a 1 B preset of that family is 70%
+        embedding and has room for only 3 blocks — a genuinely degenerate model,
+        and the reason the real ``gemma3_1b`` profile is the better 1 B point.
+        :meth:`declared_vs_derived_error` reports the residual.
+        """
+        if self.declared_params is None:
+            return self.params
+        p = self.params
+        fixed = p.embedding_params() + p.norm_params_per_layer() // 2
+        budget = self.declared_params - fixed
+        layers = max(1, round(budget / p.params_per_layer()))
+        return p.model_copy(update={"layers": layers})
+
     def parameter_count(self) -> int:
-        """Derived count from hyperparameters. See :meth:`TransformerParams.parameter_count`."""
-        return self.params.parameter_count()
+        """Weight count of the model that is actually built (after preset scaling)."""
+        return self.effective_params.parameter_count()
 
     def headline_parameter_count(self) -> float:
         """``declared_params`` when set, otherwise the derived count.
 
-        This is the figure that drives weight bytes ``W = params x w_bytes``.
+        This is the figure a preset is named for; the built model lands near it,
+        not on it.
         """
         if self.declared_params is not None:
             return self.declared_params
         return float(self.parameter_count())
 
     def declared_vs_derived_error(self) -> float | None:
-        """Relative gap between ``declared_params`` and the derived count, or None.
+        """Relative gap between the declared headline and what layer scaling achieves.
 
         M3 emits an assumption line whenever this exceeds 1%.
         """

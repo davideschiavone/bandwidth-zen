@@ -176,6 +176,8 @@ class HardwareSpec(SpecModel):
     memory: list[MemoryLevel] = Field(min_length=1)
 
     usable_memory_fraction: Fraction | None = None
+    dram_bandwidth_efficiency: Fraction | None = None
+    achieved_flops_fraction: Fraction | None = None
     async_copy_engines: int = Field(default=1, ge=0)
     kernel_launch_overhead_s: Seconds | None = None
     tdp_w: Watts | None = None

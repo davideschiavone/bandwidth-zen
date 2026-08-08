@@ -108,16 +108,19 @@ later cross-checks against its summed weight tensors.
 - Property tests (hypothesis): bandwidth↑ never latency↑; INT8 never slower than FP16; monotonic in
   batch; `decode_vs_bandwidth` comes out ~linear in `bw_dram`.
 
-**Done when:** the CLAUDE.md sanity checks hold — Llama-3-8B fp16 decode on H100 → DRAM_BW_BOUND,
-~35–55 tok/s; prefill @2k → COMPUTE_BOUND; Gemma-3-4B batch 1 → LATENCY_BOUND. Snapshot tests for
-all three, **plus the D8 acceptance demo**: ridge points 6165 / 1541 ops/byte; residency 1.4% /
-25.6% at 4B; decode 8.8 / 11.7 / 17.5 / 34 / 36 tok/s; decode 4B with KV@4k ≈ 8.5 tok/s;
-TTFT @ S=512 ≈ 113 / 85 ms (4B) and 27.9 / 19.5 ms (1B); per-op layer 94.4 MB, 2.78 ms, 0.90 µs.
-All within ~2%, all as self-consistency goldens in `tests/unit` and an integration snapshot —
-**not** in `tests/validation/`, which is reserved for published reference points (D8).
-The supplied `chip_b` 1B figure of 128 tok/s is **not** among them: it was a readout of the
-on-chip bandwidth term that D5a removes. That cell is LATENCY-bound and its golden is whatever
-`per_op_overhead_s` produces.
+**Done when:** the CLAUDE.md sanity checks hold, and the D8 acceptance demo is reproduced.
+Achieved — see `docs/MODEL.md` §6.6 for the full table. Llama-3-8B fp16 decode on H100 →
+DRAM_BW_BOUND at **165 tok/s** (not the 35–55 CLAUDE.md pairs with its own 16 GB figure: see D12);
+prefill @2k → COMPUTE_BOUND at 67.7%; Gemma-3-4B batch 1 → 0.24% utilisation but **DRAM-bound**,
+with MobileNetV3 on H100 as the LATENCY_BOUND case instead (D13). D8: ridge points 6165 / 1541;
+residency 1.40 / 2.73 / 5.71% and 25.76 / 50.15 / 100%; chip_a decode 8.4 / 16.8 / 37.0 tok/s;
+chip_a TTFT @512 114.6 ms. All self-consistency goldens in `tests/unit` and
+`tests/integration/test_analyze.py` — **not** in `tests/validation/`, which is reserved for
+published reference points (D8).
+
+Two D8 figures move, both because the systolic tail effect is modelled (D14): `chip_b` is
+COMPUTE_BOUND at batch 1, so its decode rates are 9.3 / 20.6 / 48.2 rather than 11.7 / 34 / 128,
+and the head-to-head margin over chip_a collapses from 33% to ~11%.
 
 ## Session 5 — Calibration + backtest (early M7 slice)
 

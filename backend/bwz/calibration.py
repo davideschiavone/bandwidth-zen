@@ -36,6 +36,24 @@ DEFAULT_USABLE_MEMORY_FRACTION: float = 0.90
 DEFAULT_KERNEL_LAUNCH_OVERHEAD_S: float = 3.0e-6
 
 
+# Fraction of nominal DRAM bandwidth a real access stream achieves: refresh,
+# bank conflicts, read/write turnaround and imperfect access patterns. 0.85 sits
+# in the 0.8-0.9 band that PLAN.md Session 4 names as the documented starting
+# point for HBM. It is a datacenter-GPU figure and has no business being applied
+# to an LPDDR estimate that is itself a guess - profiles that would be
+# double-derated override it to 1.0 with a note (docs/CORRECTIONS.md D6).
+# TO BE FITTED: docs/PLAN.md Session 5.
+DEFAULT_DRAM_BANDWIDTH_EFFICIENCY: float = 0.85
+
+# Fraction of peak arithmetic a real kernel sustains once instruction issue,
+# scheduling and thermal limits are accounted for - but NOT operand shape, which
+# the tail-effect model in analysis/tiling.py handles separately. The two are
+# multiplicative and must not be conflated: 0.7 x a 1/512 tail effect is 0.14%,
+# and that is the correct reading for a batch-1 GEMM on a 512x512 array.
+# TO BE FITTED: docs/PLAN.md Session 5.
+DEFAULT_ACHIEVED_FLOPS_FRACTION: float = 0.70
+
+
 # -- op-count conventions ---------------------------------------------------
 #
 # These are not measurements and never will be: they are how many operations we

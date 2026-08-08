@@ -10,13 +10,13 @@ Filled in milestone by milestone; the authoritative build spec is `PROMPT.md` §
 | Peak throughput and the ridge point | M1 | **implemented** |
 | Parameter and KV-cache counts | M1 | **implemented** |
 | FLOP/byte counts (transformer, CNN) | M2 | **implemented** |
-| Roofline (flat: compute ridge vs DRAM ridge) | M3 | not yet implemented |
+| Roofline (flat: compute ridge vs DRAM ridge) | M3 | **implemented** |
 | Roofline (hierarchical, multi-level) | M8, on demand | not yet implemented |
-| Tiling and DRAM traffic | M3 | not yet implemented |
+| Shape utilisation (systolic tail effect) | M3 | **implemented** |
 | Multi-chip sharding and collectives | M5 | not yet implemented |
-| Memory capacity planning | M3 | not yet implemented |
+| Memory capacity planning and residency | M3 | **implemented** |
 | Power/energy | M7 | not yet implemented |
-| Bottleneck classification | M3 | not yet implemented |
+| Bottleneck classification and flip margins | M3 | **implemented** |
 
 ## The v1 machine
 
@@ -245,3 +245,89 @@ MobileNetV3-Large 1.0 at 224², batch 1: **5.47 M parameters** (paper: 5.4 M, +1
 pairs and SE bottlenecks, which the headline figure does not itemise) and **234.8 M MACs**
 (paper: 219 M, +7.2%). Every convolution in the network sits below 65 FLOP/byte against H100's
 ridge of 295 and chip_a's of 6168, so the whole network is memory-bound on either.
+
+
+---
+
+## 6. Single-chip analysis (M3, `analysis/`)
+
+### 6.1 Shape utilisation — the systolic tail effect
+
+```
+utilisation = [K / padded(K, rows)] · [N / padded(N, cols)] · [M / (M + rows)]
+```
+
+A weight-stationary array holds a `rows × cols` weight tile and streams `M` activation rows
+through it. Each tile costs `M + rows` cycles — `M` to push the data, `rows` to fill and drain the
+pipeline — over `ceil(K/rows) · ceil(N/cols)` tiles. Dividing ideal cycles by actual gives the
+product above. `padded()` rounds the **dimension**, never the tile count, so the result is bounded
+by 1 (CLAUDE.md gotchas).
+
+| case | utilisation |
+|---|---|
+| M=1 on 128×128 (CLAUDE.md's check) | 1/129 ≈ **1/128** |
+| M=1 on 512×512 (chip_a, chip_b) | **1/513** |
+| M=512 on 512×512 | 0.50 |
+| M=2048 on 512×512 | 0.80 |
+
+This is the largest single correction the engine applies, and it is separate from — and
+multiplicative with — the achieved-throughput derating in `calibration.py`. See D14 for what it
+does to the D8 conclusions.
+
+### 6.2 Capacity planning and residency
+
+On-chip capacity is allocated where it removes the most DRAM traffic (D15): the double buffer
+first, then the activation working set, then weights. What is left over as a share of `W` is the
+**residency fraction** `r`, and it is the only way SRAM enters the timing model.
+
+Feasibility is `weights + KV + peak activations ≤ usable DRAM`. A failure returns a `Report` with
+`feasible: false` and fixes ordered by what the user gives up — precision, then context, then
+batch, then hardware — each naming the number it would have to reach.
+
+### 6.3 The per-operation roofline
+
+```
+dram_bytes = (1 − r)·weight_bytes + (1 − a)·(input + output + scratch)
+t_dram     = dram_bytes / (dram_bandwidth · bandwidth_efficiency)
+t_compute  = flops / (peak_flops · achieved_fraction · shape_utilisation)
+t_fixed    = per_op_overhead, for dispatched operations only
+latency    = max(t_dram, t_compute) + t_fixed     [double buffering fits]
+           = t_dram + t_compute      + t_fixed     [otherwise]
+bound      = argmax of the three
+```
+
+`bound` is an argmax rather than a majority vote, so it answers "what do I change to make this
+faster". Norms and elementwise ops are assumed fused and pay no dispatch: charging all 451 graph
+nodes would triple a decode step's fixed cost.
+
+### 6.4 Schedule
+
+A phase costs the sum of its operations. For a transformer the graph is a chain, so the sum *is*
+the critical path; for a branching CNN it is conservative. The DAG longest-path machinery exists in
+`graph/dag.py` and a real list scheduler with resource lanes is M6.
+
+### 6.5 Flip margins
+
+Every phase reports how far its binding term can move before the verdict changes, and whether that
+input was flagged as an estimate. "DRAM-bound" with a 260× margin and "DRAM-bound" with a 6% margin
+are different claims, and the label alone cannot distinguish them. This is what makes D5b's
+deferred refinements safe to defer.
+
+### 6.6 What the model reproduces
+
+| check | source | result |
+|---|---|---|
+| Llama-3-8B fp16 decode, H100 | CLAUDE.md | DRAM_BW_BOUND, 16.1 GB/token, **165 tok/s** (see D12) |
+| … utilisation at batch 1 | CLAUDE.md | **0.27%** |
+| … prefill @2048 | CLAUDE.md | COMPUTE_BOUND, **67.7%** (target 40–70%) |
+| … batch 128 decode | CLAUDE.md | COMPUTE_BOUND, 0.27% → **21%** |
+| Gemma-3-4B batch 1, H100 | CLAUDE.md | 0.24% util; DRAM-bound, not latency-bound (D13) |
+| MobileNetV3 on H100 | — | **LATENCY_BOUND**, the regime D13 describes |
+| chip_a residency 4B/2B/1B | D8 | **1.40 / 2.73 / 5.71%** vs 1.4 / 2.7 / 5.5 |
+| chip_b residency | D8 | **25.76 / 50.15 / 100%** vs 25.6 / 50 / 100 |
+| chip_a decode | D8 | **8.4 / 16.8 / 37.0** tok/s vs 8.8 / 17.5 / 36 |
+| chip_a TTFT @512 | D8 | **114.6 ms** vs 113; 1B **27.2** vs 27.9 |
+| ridge points | D8 | **6165 / 1541** OP/byte |
+| chip_b decode | D8 | **9.3 tok/s COMPUTE_BOUND** vs 11.7 DRAM-bound (D14) |
+| doubling DRAM bandwidth | CLAUDE.md | never raises latency; ~linear while DRAM binds |
+| INT8 vs FP16 | CLAUDE.md | never slower on hardware supporting both |

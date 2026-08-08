@@ -127,15 +127,27 @@ def test_tied_embeddings_halve_the_embedding_parameters() -> None:
 
 
 @pytest.mark.parametrize(
-    ("model_id", "headline"), [("gemma3_preset_1b", 1e9), ("gemma3_preset_2b", 2e9)]
+    ("model_id", "headline", "built", "layers"),
+    [("gemma3_preset_1b", 1e9, 0.954e9, 3), ("gemma3_preset_2b", 2e9, 1.993e9, 14)],
 )
-def test_presets_override_the_headline_count(model_id: str, headline: float) -> None:
+def test_presets_are_realised_by_scaling_the_layer_count(
+    model_id: str, headline: float, built: float, layers: int
+) -> None:
+    """``declared_params`` is realised by scaling layers, the dimension that
+    genuinely varies within a model family.
+
+    The realisation is never exact: layers are integers and the 671 M tied
+    embedding table does not scale at all. The 2 B preset lands within 0.4%; the
+    1 B preset is 4.6% under and is 70% embedding, which is why the residual is
+    reported as an assumption rather than hidden.
+    """
     model = load_model(model_id)
     assert isinstance(model, TransformerSpec)
     assert model.headline_parameter_count() == pytest.approx(headline)
-    assert model.parameter_count() == pytest.approx(3.88e9, rel=5e-3)
+    assert model.effective_params.layers == layers
+    assert model.parameter_count() == pytest.approx(built, rel=0.01)
     error = model.declared_vs_derived_error()
-    assert error is not None and error > 0.01, "must be flagged as an assumption at M3"
+    assert error is not None and error < 0.06
 
 
 def test_base_profile_reports_no_declared_vs_derived_gap() -> None:

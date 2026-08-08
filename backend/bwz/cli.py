@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+from datetime import UTC, datetime
 from enum import StrEnum
 
 import typer
+from rich import box
 from rich.console import Console
 from rich.table import Table
 
 import bwz
+from bwz.analysis import analyze, machine_model, rank_operations, suggestions
+from bwz.analysis.compare import head_to_head, prefill_crossover
+from bwz.report import Bound, Report
 from bwz.spec import (
     CNNSpec,
     CustomSpec,
@@ -18,9 +24,12 @@ from bwz.spec import (
     TransformerSpec,
     iter_chips,
     iter_models,
+    load_chip,
+    load_model,
 )
+from bwz.spec.deployment import AttentionImpl, DeploymentSpec, Phase
 from bwz.spec.loaders import AnyModelSpec
-from bwz.units import format_bandwidth, format_bytes, format_quantity
+from bwz.units import format_bandwidth, format_bytes, format_quantity, format_time
 
 app = typer.Typer(
     name="bwz",
@@ -129,6 +138,215 @@ def _model_table() -> Table:
     for model in iter_models():
         table.add_row(*_model_row(model))
     return table
+
+
+def _run_report(model_id: str, chip_id: str, deployment: DeploymentSpec) -> Report:
+    report = analyze(load_model(model_id), load_chip(chip_id), deployment)
+    return replace(report, meta=replace(report.meta, generated_at=datetime.now(UTC).isoformat()))
+
+
+def _summary_table(report: Report) -> Table:
+    table = Table(title=f"{report.meta.model_name} on {report.meta.chip_name}", box=box.SIMPLE)
+    table.add_column("phase")
+    table.add_column("latency", justify="right")
+    table.add_column("bound")
+    table.add_column("util", justify="right")
+    table.add_column("t_dram", justify="right")
+    table.add_column("t_compute", justify="right")
+    table.add_column("t_fixed", justify="right")
+    for phase in report.phases:
+        table.add_row(
+            phase.phase.value,
+            format_time(phase.latency_s),
+            _colour_bound(phase.bound),
+            f"{phase.utilization:.2%}",
+            format_time(phase.t_dram_s),
+            format_time(phase.t_compute_s),
+            format_time(phase.t_fixed_s),
+        )
+    return table
+
+
+def _colour_bound(bound: Bound) -> str:
+    colour = {
+        Bound.DRAM_BW_BOUND: "yellow",
+        Bound.COMPUTE_BOUND: "green",
+        Bound.LATENCY_BOUND: "red",
+    }[bound]
+    return f"[{colour}]{bound.value}[/{colour}]"
+
+
+def _memory_table(report: Report) -> Table:
+    plan = report.memory
+    table = Table(title="Memory", box=box.SIMPLE)
+    table.add_column("item")
+    table.add_column("bytes", justify="right")
+    table.add_row("weights", format_bytes(plan.weight_bytes))
+    table.add_row("KV cache", format_bytes(plan.kv_cache_bytes))
+    table.add_row("peak activations", format_bytes(plan.peak_activation_bytes))
+    table.add_row("[bold]total[/bold]", f"[bold]{format_bytes(plan.total_bytes)}[/bold]")
+    table.add_row("usable DRAM", format_bytes(plan.usable_dram_bytes))
+    table.add_row("on-chip", format_bytes(plan.on_chip_capacity_bytes))
+    table.add_row("weight residency", f"{plan.resident_fraction:.2%}")
+    table.add_row("activation residency", f"{plan.activation_resident_fraction:.0%}")
+    table.add_row("double buffered", "yes" if plan.double_buffered else "no")
+    return table
+
+
+@app.command()
+def run(
+    model: str = typer.Option(..., "--model", "-m", help="Model profile id or path"),
+    chip: str = typer.Option(..., "--chip", "-c", help="Chip profile id or path"),
+    batch: int = typer.Option(1, "--batch", "-b"),
+    input_tokens: int = typer.Option(2048, "--input-tokens"),
+    output_tokens: int = typer.Option(256, "--output-tokens"),
+    context: int | None = typer.Option(None, "--context", help="KV context; defaults to in+out"),
+    weights: DType = typer.Option(DType.FP16, "--weights", help="Weight precision"),
+    phase: Phase = typer.Option(Phase.BOTH, "--phase"),
+    attention: AttentionImpl = typer.Option(AttentionImpl.FLASH2, "--attention"),
+    show_ops: int = typer.Option(0, "--show-ops", help="Show the N most expensive operations"),
+    as_json: bool = typer.Option(False, "--json", help="Emit the raw Report as JSON"),
+) -> None:
+    """Predict how a model runs on a chip."""
+    try:
+        deployment = DeploymentSpec.model_validate(
+            {
+                "batch": batch,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "kv_context_tokens": context,
+                "phase": phase,
+                "attention_impl": attention,
+                "precision": {"weights": weights, "activations": weights, "kv_cache": weights},
+            }
+        )
+        report = _run_report(model, chip, deployment)
+    except SpecLoadError as exc:
+        console.print(f"[red]bwz:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    if as_json:
+        console.print_json(report.to_json())
+        return
+
+    if not report.feasible:
+        console.print("[red]Infeasible.[/red]")
+        for reason in report.infeasibility:
+            console.print(f"  • {reason}")
+        raise typer.Exit(code=2)
+
+    summary = report.summary
+    assert summary is not None
+    console.print(_summary_table(report))
+    if summary.ttft_s is not None:
+        console.print(f"  TTFT      {format_time(summary.ttft_s)}")
+    if summary.tpot_s is not None:
+        console.print(
+            f"  TPOT      {format_time(summary.tpot_s)}   "
+            f"[bold]{summary.tokens_per_s:.1f} tok/s[/bold]"
+        )
+    console.print(f"  total     {format_time(summary.latency_s)}")
+    console.print(
+        f"  achieved  {format_quantity(summary.achieved_flops_per_s, 'OP/s')} "
+        f"of {format_quantity(summary.peak_flops_per_s, 'OP/s')} "
+        f"({summary.utilization:.2%})"
+    )
+    console.print()
+    console.print(_memory_table(report))
+
+    console.print(f"\n[bold]Why[/bold]  (confidence: {report.confidence.value})")
+    for margin in report.flip_margins:
+        flag = " [yellow](rests on an estimated input)[/yellow]" if margin.rests_on_estimate else ""
+        console.print(f"  • {margin.description}{flag}")
+    for phase_result in report.phases:
+        for hint in suggestions(
+            phase_result, machine_model(load_chip(chip), summary_dtype(weights))
+        ):
+            console.print(f"  → {hint}")
+
+    if show_ops:
+        console.print("\n[bold]Most expensive operations[/bold]")
+        for phase_result in report.phases:
+            for line in rank_operations(phase_result, limit=show_ops):
+                console.print(f"  {phase_result.phase.value}: {line}")
+
+    console.print(f"\n[bold]Assumptions[/bold] ({len(report.assumptions)})")
+    for assumption in report.assumptions:
+        console.print(f"  • {assumption}", highlight=False)
+
+
+def summary_dtype(weights: DType) -> DType:
+    return weights
+
+
+@app.command()
+def compare(
+    chips: str = typer.Option(..., "--chips", help="Comma-separated chip ids, e.g. chip_a,chip_b"),
+    models: str = typer.Option(..., "--models", help="Comma-separated model ids"),
+    batch: int = typer.Option(1, "--batch", "-b"),
+    input_tokens: int = typer.Option(512, "--input-tokens"),
+    output_tokens: int = typer.Option(1, "--output-tokens"),
+    context: int | None = typer.Option(None, "--context"),
+    weights: DType = typer.Option(DType.INT8, "--weights"),
+    crossover: bool = typer.Option(True, "--crossover/--no-crossover"),
+) -> None:
+    """Head-to-head across chips, with the prefill crossover point."""
+    try:
+        chip_specs = [load_chip(c.strip()) for c in chips.split(",")]
+        model_specs = [load_model(m.strip()) for m in models.split(",")]
+    except SpecLoadError as exc:
+        console.print(f"[red]bwz:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    deployment = DeploymentSpec.model_validate(
+        {
+            "batch": batch,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "kv_context_tokens": context,
+            "precision": {"weights": weights, "activations": weights, "kv_cache": weights},
+        }
+    )
+    rows = head_to_head(model_specs, chip_specs, deployment)
+
+    table = Table(
+        title=f"Head to head @ S={input_tokens}, batch {batch}, {weights.value}", box=box.SIMPLE
+    )
+    table.add_column("model")
+    table.add_column("chip")
+    table.add_column("params", justify="right")
+    table.add_column("resident", justify="right")
+    table.add_column("TTFT", justify="right")
+    table.add_column("tok/s", justify="right")
+    table.add_column("bound")
+    table.add_column("util", justify="right")
+    for row in rows:
+        table.add_row(
+            row.model_id,
+            row.chip_id,
+            format_quantity(row.parameter_count, "").strip(),
+            f"{row.resident_fraction:.2%}",
+            format_time(row.ttft_s) if row.ttft_s else "-",
+            f"{row.tokens_per_s:.1f}" if row.tokens_per_s else "-",
+            _colour_bound(row.bound),
+            f"{row.utilization:.2%}",
+        )
+    console.print(table)
+
+    if crossover and len(chip_specs) == 2:
+        console.print("\n[bold]Prefill crossover[/bold]")
+        for model_spec in model_specs:
+            point = prefill_crossover(model_spec, chip_specs[0], chip_specs[1], deployment)
+            if point.tokens is None:
+                console.print(
+                    f"  {model_spec.id}: no crossover in [{point.searched_lo}, "
+                    f"{point.searched_hi}] — {point.faster_below} is faster throughout"
+                )
+            else:
+                console.print(
+                    f"  {model_spec.id}: S* = {point.tokens} tokens "
+                    f"({point.faster_below} faster below, {point.faster_above} above)"
+                )
 
 
 @app.command(name="list")
