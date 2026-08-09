@@ -12,7 +12,7 @@ from rich.console import Console
 from rich.table import Table
 
 import bwz
-from bwz.analysis import analyze, machine_model, rank_operations, suggestions
+from bwz.analysis import analyze, idealised, machine_model, rank_operations, suggestions
 from bwz.analysis.compare import head_to_head, prefill_crossover
 from bwz.report import Bound, Report
 from bwz.spec import (
@@ -146,8 +146,13 @@ def _model_table() -> Table:
     return table
 
 
-def _run_report(model_id: str, chip_id: str, deployment: DeploymentSpec) -> Report:
-    report = analyze(load_model(model_id), load_chip(chip_id), deployment)
+def _run_report(
+    model_id: str, chip_id: str, deployment: DeploymentSpec, *, ideal: bool = False
+) -> Report:
+    chip = load_chip(chip_id)
+    if ideal:
+        chip = idealised(chip)
+    report = analyze(load_model(model_id), chip, deployment)
     return replace(report, meta=replace(report.meta, generated_at=datetime.now(UTC).isoformat()))
 
 
@@ -211,6 +216,11 @@ def run(
     phase: Phase = typer.Option(Phase.BOTH, "--phase"),
     attention: AttentionImpl = typer.Option(AttentionImpl.FLASH2, "--attention"),
     show_ops: int = typer.Option(0, "--show-ops", help="Show the N most expensive operations"),
+    ideal: bool = typer.Option(
+        False,
+        "--ideal",
+        help="Set both efficiency de-ratings to 1.0: a hardware ceiling, not a prediction",
+    ),
     as_json: bool = typer.Option(False, "--json", help="Emit the raw Report as JSON"),
 ) -> None:
     """Predict how a model runs on a chip."""
@@ -226,7 +236,7 @@ def run(
                 "precision": {"weights": weights, "activations": weights, "kv_cache": weights},
             }
         )
-        report = _run_report(model, chip, deployment)
+        report = _run_report(model, chip, deployment, ideal=ideal)
     except SpecLoadError as exc:
         console.print(f"[red]bwz:[/red] {exc}")
         raise typer.Exit(code=1) from exc
@@ -265,9 +275,7 @@ def run(
         flag = " [yellow](rests on an estimated input)[/yellow]" if margin.rests_on_estimate else ""
         console.print(f"  • {margin.description}{flag}")
     for phase_result in report.phases:
-        for hint in suggestions(
-            phase_result, machine_model(load_chip(chip), summary_dtype(weights))
-        ):
+        for hint in suggestions(phase_result, machine_model(_chip_for(chip, ideal), weights)):
             console.print(f"  → {hint}")
 
     if show_ops:
@@ -281,8 +289,9 @@ def run(
         console.print(f"  • {assumption}", highlight=False)
 
 
-def summary_dtype(weights: DType) -> DType:
-    return weights
+def _chip_for(chip_id: str, ideal: bool) -> HardwareSpec:
+    chip = load_chip(chip_id)
+    return idealised(chip) if ideal else chip
 
 
 @app.command()
@@ -295,10 +304,15 @@ def compare(
     context: int | None = typer.Option(None, "--context"),
     weights: DType = typer.Option(DType.INT8, "--weights"),
     crossover: bool = typer.Option(True, "--crossover/--no-crossover"),
+    ideal: bool = typer.Option(
+        False,
+        "--ideal",
+        help="Set both efficiency de-ratings to 1.0: a hardware ceiling, not a prediction",
+    ),
 ) -> None:
     """Head-to-head across chips, with the prefill crossover point."""
     try:
-        chip_specs = [load_chip(c.strip()) for c in chips.split(",")]
+        chip_specs = [_chip_for(c.strip(), ideal) for c in chips.split(",")]
         model_specs = [load_model(m.strip()) for m in models.split(",")]
     except SpecLoadError as exc:
         console.print(f"[red]bwz:[/red] {exc}")
@@ -316,7 +330,11 @@ def compare(
     rows = head_to_head(model_specs, chip_specs, deployment)
 
     table = Table(
-        title=f"Head to head @ S={input_tokens}, batch {batch}, {weights.value}", box=box.SIMPLE
+        title=(
+            f"Head to head @ S={input_tokens}, batch {batch}, {weights.value}"
+            + (" [ideal]" if ideal else "")
+        ),
+        box=box.SIMPLE,
     )
     table.add_column("model")
     table.add_column("chip")

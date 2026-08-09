@@ -11,7 +11,7 @@ from __future__ import annotations
 import bwz
 from bwz.analysis.bottleneck import flip_margin, rank_operations, suggestions
 from bwz.analysis.memory import infeasibility_reasons, plan_memory, usable_memory_fraction
-from bwz.analysis.roofline import MachineModel, compute_dtype, machine_model
+from bwz.analysis.roofline import MachineModel, compute_dtype, idealised, machine_model
 from bwz.analysis.schedule import run_phase
 from bwz.graph.builder import build_graphs, phases_for
 from bwz.graph.ops import GraphPhase
@@ -36,6 +36,7 @@ __all__ = [
     "MachineModel",
     "analyze",
     "flip_margin",
+    "idealised",
     "machine_model",
     "plan_memory",
     "rank_operations",

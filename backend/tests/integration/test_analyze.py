@@ -392,3 +392,52 @@ def test_a_longer_context_never_speeds_decode_up() -> None:
         tpot = _summary(report).tpot_s
         assert tpot is not None and tpot >= previous
         previous = tpot
+
+
+# -- the --ideal escape hatch -----------------------------------------------
+
+
+def test_ideal_mode_removes_only_the_unfitted_derating() -> None:
+    """``--ideal`` sets both efficiency constants to 1.0, so a number can be
+    checked by hand against a datasheet.
+
+    Llama-3-8B prefill @2048 on A100: 29.71 TFLOP over a 312 TFLOP/s peak is
+    95.2 ms at 100% of peak, against 136.0 ms with the 0.70 derating. The ratio
+    is exactly 1/0.70 for the compute term.
+    """
+    from bwz.analysis import idealised
+
+    model, chip = load_model("llama3_8b"), load_chip("a100_80gb")
+    deployment = _dep(input_tokens=2048, output_tokens=1, phase="prefill")
+    derated = _phase(analyze(model, chip, deployment), GraphPhase.PREFILL)
+    ideal = _phase(analyze(model, idealised(chip), deployment), GraphPhase.PREFILL)
+
+    assert ideal.t_compute_s == pytest.approx(derated.t_compute_s * 0.70, rel=1e-9)
+    assert ideal.t_dram_s == pytest.approx(derated.t_dram_s * 0.85, rel=1e-9)
+    assert ideal.bound is derated.bound, "the verdict is robust to the constants"
+
+
+def test_ideal_mode_keeps_shape_utilisation() -> None:
+    """Geometry is not a fudge factor. A batch-1 GEMM on a 512x512 array runs at
+    1/513 of peak on ideal silicon too, because that follows from the array's
+    declared dimensions."""
+    from bwz.analysis import idealised
+
+    model, chip = load_model("gemma3_4b"), idealised(load_chip("chip_a"))
+    report = analyze(model, chip, _dep(input_tokens=1, output_tokens=1, precision=INT8))
+    decode = _phase(report, GraphPhase.DECODE)
+    projections = [op for op in decode.ops if op.op_id.endswith(".q_proj")]
+    assert projections
+    assert max(op.utilization for op in projections) == pytest.approx(1 / 513, rel=0.01)
+
+
+def test_ideal_mode_declares_itself_in_the_assumptions() -> None:
+    """It rides the existing estimates channel, so the report says so without the
+    analysis core knowing the flag exists (D7)."""
+    from bwz.analysis import idealised
+
+    report = analyze(
+        load_model("llama3_8b"), idealised(load_chip("a100_80gb")), _dep(phase="decode")
+    )
+    assert any("--ideal" in a for a in report.assumptions)
+    assert any("not a prediction" in a for a in report.assumptions)

@@ -60,6 +60,43 @@ class MachineModel:
         return self.effective_flops_per_s / self.effective_bandwidth_bytes_per_s
 
 
+IDEAL_NOTE = (
+    "Forced to 1.0 by --ideal. The result is a hardware ceiling, not a prediction: it assumes "
+    "the memory system hits its pin rate and the array issues without a stall. Use it to reason "
+    "about the machine; do not quote it as a throughput figure."
+)
+
+
+def idealised(chip: HardwareSpec) -> HardwareSpec:
+    """*chip* with both efficiency de-ratings set to 1.0.
+
+    Separates the two things that are conflated in a single latency number: the
+    part that follows from published quantities (MACs, clock, bandwidth,
+    capacity) and the part that follows from ``calibration.py`` constants nobody
+    has fitted yet. Under ``--ideal`` only the first remains, so a number can be
+    checked by hand against a datasheet.
+
+    Shape utilisation is **not** disabled — a batch-1 GEMM on a 512x512 array
+    still runs at 1/513 of peak. That is geometry, not a fudge factor: it follows
+    from the array's declared dimensions and would be there on ideal silicon.
+
+    The override is recorded in ``estimates`` so it propagates into
+    ``report.assumptions`` through the normal path (D7). Nothing else has to know
+    the flag exists.
+    """
+    return chip.model_copy(
+        update={
+            "dram_bandwidth_efficiency": 1.0,
+            "achieved_flops_fraction": 1.0,
+            "estimates": {
+                **chip.estimates,
+                "dram_bandwidth_efficiency": IDEAL_NOTE,
+                "achieved_flops_fraction": IDEAL_NOTE,
+            },
+        }
+    )
+
+
 def machine_model(chip: HardwareSpec, dtype: DType) -> MachineModel:
     """Derive effective rates, honouring per-chip overrides over defaults (D6)."""
     efficiency = (
