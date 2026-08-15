@@ -6,7 +6,8 @@ build-backend = "hatchling.build"
 name = "bwz"
 version = "0.1.0"
 description = "bandwidth-zen: analytical performance model for neural-network inference"
-readme = "../README.md"
+# No `readme` field: the only README lives at the repo root, and hatchling refuses
+# a path outside the project directory, which made `uv sync` fail on a fresh clone.
 license = "Apache-2.0"
 requires-python = ">=3.11"
 dependencies = [
@@ -26,6 +27,13 @@ dev = [
     "ruff>=0.6",
     "mypy>=1.11",
     "types-pyyaml>=6.0",
+]
+# Figure generation only (scripts/plot_roofline.py). Deliberately its own group:
+# the engine must never import a plotting library, and `make test` must not pull
+# one in. mypy's `files` list excludes scripts/ for the same reason — matplotlib
+# ships no stubs and --strict would be all noise.
+plots = [
+    "matplotlib>=3.8",
 ]
 
 [tool.hatch.build.targets.wheel]

@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from bwz.graph.cnn import build_cnn_graph
 from bwz.graph.custom import build_custom_graph
+from bwz.graph.gemm import build_gemm_graph
 from bwz.graph.ops import ComputeGraph, GraphPhase
 from bwz.graph.transformer import build_transformer_graph
 from bwz.spec.deployment import DeploymentSpec, Phase
 from bwz.spec.loaders import AnyModelSpec
-from bwz.spec.model_spec import CNNSpec, CustomSpec, TransformerSpec
+from bwz.spec.model_spec import CNNSpec, CustomSpec, GemmSpec, TransformerSpec
 
 
 def phases_for(model: AnyModelSpec, deployment: DeploymentSpec) -> tuple[GraphPhase, ...]:
@@ -34,6 +35,8 @@ def build_graph(
         return build_transformer_graph(model, deployment, phase)
     if isinstance(model, CNNSpec):
         return build_cnn_graph(model, deployment)
+    if isinstance(model, GemmSpec):
+        return build_gemm_graph(model, deployment)
     if isinstance(model, CustomSpec):
         return build_custom_graph(model, deployment)
     raise TypeError(f"no graph builder for model type {type(model).__name__}")

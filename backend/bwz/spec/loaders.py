@@ -27,11 +27,11 @@ from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from bwz.spec.deployment import DeploymentSpec
 from bwz.spec.hardware_spec import HardwareSpec
-from bwz.spec.model_spec import CNNSpec, CustomSpec, ModelSpec, TransformerSpec
+from bwz.spec.model_spec import CNNSpec, CustomSpec, GemmSpec, ModelSpec, TransformerSpec
 
 _PROFILE_ENV_VAR = "BWZ_PROFILE_PATH"
 
-AnyModelSpec = TransformerSpec | CNNSpec | CustomSpec
+AnyModelSpec = TransformerSpec | CNNSpec | GemmSpec | CustomSpec
 _MODEL_ADAPTER: TypeAdapter[AnyModelSpec] = TypeAdapter(ModelSpec)
 
 

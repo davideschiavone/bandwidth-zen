@@ -249,6 +249,36 @@ ridge of 295 and chip_a's of 6168, so the whole network is memory-bound on eithe
 
 ---
 
+## 5b. GEMM expansion (`graph/gemm.py`)
+
+The smallest workload the engine expresses: one `[M, K] × [K, N] → [M, N]` operation, three
+tensors, no network around it. Its purpose is to interrogate the *machine* — where the ridge point
+falls, what the systolic tail costs, what `--ideal` does and does not change — with nothing else
+present to explain a number away. `M` folds batch in, as everywhere else.
+
+It is a family rather than a hand-costed `custom` op because a `CustomOp` carries no shape, so the
+tail effect would silently vanish (`docs/CORRECTIONS.md` D17).
+
+A100, fp16, `--ideal`, three shapes — the same chip, three different machines:
+
+| M | intensity | shape util | verdict | latency |
+|---|---|---|---|---|
+| 10000 | 3333 OP/byte | 99.8% | compute-bound by 24× | 6.42 ms |
+| 512 | 464 OP/byte | 97.0% | compute-bound | 342 µs |
+| 1 | 1.0 OP/byte | **5.88%** = 1/17 | DRAM-bound | 71 µs |
+
+`N = K = 10000` throughout. The last row is the whole point: the arithmetic fell by 10000× but the
+weight traffic did not fall at all, and a 16-row array running one row wastes fifteen of them.
+
+`make plots` places these three, plus a model's prefill and decode, on the chip's roofline:
+[`plots/roofline-a100_80gb-fp16.png`](plots/roofline-a100_80gb-fp16.png). Note that the figure
+plots intensity against **DRAM** traffic rather than compulsory traffic, so residency moves a
+point to the right and a fully resident workload leaves the chart entirely — which is what
+[`plots/roofline-chip_a-int8.png`](plots/roofline-chip_a-int8.png) shows for a 4096³ GEMM on
+55 MB of SRAM.
+
+---
+
 ## 6. Single-chip analysis (M3, `analysis/`)
 
 ### 6.1 Shape utilisation — the systolic tail effect

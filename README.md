@@ -84,6 +84,39 @@ Llama-3-8B  ·  NVIDIA H100 SXM5  ·  fp16  ·  batch 1  ·  2048 in / 256 out
   Confidence: medium (±20%) — decode weight traffic dominates; assumes no weight caching in L2
 ```
 
+Interrogate the machine rather than a network — one matrix multiply, no batch or context knobs,
+`M` folding the batch in:
+
+```bash
+uv run bwz gemm --m 10000 --n 10000 --k 10000 --chip a100_80gb --ideal
+```
+
+```
+  arithmetic                2 TOP    2 x 10000 x 10000 x 10000
+  intensity        3333.3 OP/byte    arithmetic / compulsory traffic
+  ridge point       153.0 OP/byte    above it the chip is compute-bound
+  shape utilisation        99.84%    systolic tail on a 16x16 array — geometry, not a derating
+  t_dram                   264 µs
+  t_compute               6.42 ms
+  latency                 6.43 ms
+  verdict           COMPUTE_BOUND
+```
+
+`--ideal` sets both efficiency de-ratings to 1.0, so every number above can be checked against the
+datasheet by hand. Drop `--m` to 1 and the same GEMM reports 5.88% utilisation — `1/17` of the
+array — and flips to DRAM-bound.
+
+Draw it:
+
+```bash
+make plots        # → docs/plots/roofline-<chip>-<dtype>.png, pipeline-<chip>.png
+```
+
+![A100 roofline](docs/plots/roofline-a100_80gb-fp16.png)
+
+The figures are computed by calling `analyze()`, not drawn by hand, and each carries the command
+that produced it. See [`backend/scripts/plot_roofline.py`](backend/scripts/plot_roofline.py).
+
 Sweep and take the Pareto frontier:
 
 ```bash
@@ -184,8 +217,9 @@ backend/bwz/
   analysis/     roofline, tiling, memory, schedule, parallelism, collectives, power, bottleneck
   api/, cli.py  thin shells over analyze(model, hardware, deployment) -> Report
   profiles/     chip and model YAML
+backend/scripts/  figure generation (imports the engine; the engine never imports it)
 frontend/src/   React + TS dashboard (roofline plot, Gantt, Pareto explorer)
-docs/           MODEL.md · CALIBRATION.md · SCHEMA.md · CORRECTIONS.md
+docs/           MODEL.md · CALIBRATION.md · SCHEMA.md · CORRECTIONS.md · plots/
 ```
 
 The analysis core is pure and dependency-free: `analyze()` is a deterministic function of its

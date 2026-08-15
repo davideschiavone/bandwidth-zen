@@ -19,6 +19,7 @@ from bwz.spec import (
     CNNSpec,
     CustomSpec,
     DType,
+    GemmSpec,
     HardwareSpec,
     SpecLoadError,
     TransformerSpec,
@@ -122,6 +123,16 @@ def _model_row(model: AnyModelSpec) -> tuple[str, ...]:
             shape,
             _provenance(model),
         )
+    if isinstance(model, GemmSpec):
+        params = format_quantity(float(model.parameter_count()), "", precision=4).strip()
+        return (
+            model.id,
+            model.name,
+            model.family.value,
+            params,
+            f"M={model.m} N={model.n} K={model.k}",
+            _provenance(model),
+        )
     assert isinstance(model, CustomSpec)
     return (
         model.id,
@@ -146,14 +157,19 @@ def _model_table() -> Table:
     return table
 
 
+def _report_for(
+    model: AnyModelSpec, chip_id: str, deployment: DeploymentSpec, *, ideal: bool = False
+) -> Report:
+    """Analyse an already-constructed spec. The wall-clock stamp is applied here,
+    outside the pure core (CLAUDE.md #3)."""
+    report = analyze(model, _chip_for(chip_id, ideal), deployment)
+    return replace(report, meta=replace(report.meta, generated_at=datetime.now(UTC).isoformat()))
+
+
 def _run_report(
     model_id: str, chip_id: str, deployment: DeploymentSpec, *, ideal: bool = False
 ) -> Report:
-    chip = load_chip(chip_id)
-    if ideal:
-        chip = idealised(chip)
-    report = analyze(load_model(model_id), chip, deployment)
-    return replace(report, meta=replace(report.meta, generated_at=datetime.now(UTC).isoformat()))
+    return _report_for(load_model(model_id), chip_id, deployment, ideal=ideal)
 
 
 def _summary_table(report: Report) -> Table:
@@ -292,6 +308,122 @@ def run(
 def _chip_for(chip_id: str, ideal: bool) -> HardwareSpec:
     chip = load_chip(chip_id)
     return idealised(chip) if ideal else chip
+
+
+@app.command()
+def gemm(
+    m: int = typer.Option(..., "--m", "-M", help="Rows of the activation operand; folds batch in"),
+    n: int = typer.Option(..., "--n", "-N", help="Columns of the weight operand"),
+    k: int = typer.Option(..., "--k", "-K", help="Contracted (inner) dimension"),
+    chip: str = typer.Option(..., "--chip", "-c", help="Chip profile id or path"),
+    weights: DType = typer.Option(DType.FP16, "--weights", help="Weight precision"),
+    activations: DType | None = typer.Option(
+        None, "--activations", help="Activation precision; defaults to --weights"
+    ),
+    ideal: bool = typer.Option(
+        False,
+        "--ideal",
+        help="Set both efficiency de-ratings to 1.0: a hardware ceiling, not a prediction",
+    ),
+    as_json: bool = typer.Option(False, "--json", help="Emit the raw Report as JSON"),
+) -> None:
+    """Run one [M, K] x [K, N] matmul: the smallest probe of a chip's roofline.
+
+    No batch, context or phase knobs — a bare GEMM has none. M is the full row
+    count, so a batch of 128 is M=128.
+    """
+    a_dtype = activations if activations is not None else weights
+    try:
+        spec = GemmSpec.model_validate(
+            {
+                "id": f"gemm_{m}x{n}x{k}",
+                "name": f"GEMM {m}x{n}x{k}",
+                "family": "gemm",
+                "m": m,
+                "n": n,
+                "k": k,
+            }
+        )
+        deployment = DeploymentSpec.model_validate(
+            {
+                "batch": 1,
+                "input_tokens": 1,
+                "output_tokens": 0,
+                "phase": Phase.PREFILL,
+                "precision": {"weights": weights, "activations": a_dtype, "kv_cache": a_dtype},
+            }
+        )
+        report = _report_for(spec, chip, deployment, ideal=ideal)
+    except SpecLoadError as exc:
+        console.print(f"[red]bwz:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    if as_json:
+        console.print_json(report.to_json())
+        return
+
+    if not report.feasible:
+        console.print("[red]Infeasible.[/red]")
+        for reason in report.infeasibility:
+            console.print(f"  • {reason}")
+        raise typer.Exit(code=2)
+
+    machine = machine_model(_chip_for(chip, ideal), weights)
+    summary = report.summary
+    assert summary is not None
+    op = report.phases[0].ops[0]
+
+    table = Table(title=f"{spec.name} on {report.meta.chip_name}", box=box.SIMPLE)
+    table.add_column("quantity")
+    table.add_column("value", justify="right")
+    table.add_column("derivation")
+    table.add_row("arithmetic", format_quantity(op.flops, "OP"), f"2 x {m} x {n} x {k}")
+    table.add_row(
+        "DRAM traffic",
+        format_bytes(op.dram_bytes),
+        f"weights {format_bytes(op.weight_bytes)} + activations, less what stays on chip",
+    )
+    table.add_row(
+        "intensity", f"{op.arithmetic_intensity:.1f} OP/byte", "arithmetic / compulsory traffic"
+    )
+    table.add_row(
+        "ridge point",
+        f"{machine.ridge_point:.1f} OP/byte",
+        "effective OP/s / effective bytes/s — above it the chip is compute-bound",
+    )
+    dims = machine.unit.systolic_dims
+    table.add_row(
+        "shape utilisation",
+        f"{op.utilization:.2%}",
+        (
+            f"systolic tail on a {dims[0]}x{dims[1]} array — geometry, not a derating"
+            if dims is not None
+            else "profile declares no array geometry, so no tail effect is claimed"
+        ),
+    )
+    table.add_row("t_dram", format_time(op.t_dram_s), "traffic / effective bandwidth")
+    table.add_row("t_compute", format_time(op.t_compute_s), "arithmetic / (effective peak x util)")
+    table.add_row("t_fixed", format_time(op.t_fixed_s), "one kernel dispatch")
+    table.add_row("[bold]latency[/bold]", f"[bold]{format_time(op.latency_s)}[/bold]", "")
+    table.add_row("[bold]verdict[/bold]", _colour_bound(op.bound), "")
+    console.print(table)
+
+    console.print(
+        f"  achieved  {format_quantity(summary.achieved_flops_per_s, 'OP/s')} "
+        f"of {format_quantity(summary.peak_flops_per_s, 'OP/s')} "
+        f"({summary.utilization:.2%})"
+    )
+
+    console.print(f"\n[bold]Why[/bold]  (confidence: {report.confidence.value})")
+    for margin in report.flip_margins:
+        flag = " [yellow](rests on an estimated input)[/yellow]" if margin.rests_on_estimate else ""
+        console.print(f"  • {margin.description}{flag}")
+    for hint in suggestions(report.phases[0], machine):
+        console.print(f"  → {hint}")
+
+    console.print(f"\n[bold]Assumptions[/bold] ({len(report.assumptions)})")
+    for assumption in report.assumptions:
+        console.print(f"  • {assumption}", highlight=False)
 
 
 @app.command()

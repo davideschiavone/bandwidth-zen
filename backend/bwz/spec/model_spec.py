@@ -26,6 +26,7 @@ class ModelFamily(StrEnum):
     TRANSFORMER_DECODER = "transformer_decoder"
     TRANSFORMER_ENCODER = "transformer_encoder"
     CNN = "cnn"
+    GEMM = "gemm"
     CUSTOM = "custom"
 
 
@@ -385,6 +386,48 @@ class CNNSpec(_ModelBase):
         )
 
 
+# -- gemm -------------------------------------------------------------------
+
+
+class GemmSpec(_ModelBase):
+    """A single ``[M, K] x [K, N] -> [M, N]`` matrix multiply.
+
+    The smallest workload the engine can express, and the one whose numbers can
+    be checked by hand against a datasheet: ``2*M*N*K`` FLOPs against
+    ``(M*K + K*N + M*N)`` elements of traffic. Its purpose is to interrogate the
+    *machine* rather than a network — where the ridge point falls, how much the
+    systolic tail costs at small ``M``, what ``--ideal`` changes.
+
+    This is a family rather than a :class:`CustomSpec` op precisely because
+    ``CustomOp`` carries hand-written FLOPs and bytes but no shape, so
+    ``analysis.tiling.operation_utilisation`` would have nothing to work with and
+    would return 1.0 — silently dropping the tail effect, which is the single
+    most interesting thing about a small GEMM (docs/CORRECTIONS.md D17).
+
+    ``M`` folds batch in, exactly as :class:`bwz.graph.ops.MatmulAttrs` does:
+    a batch of 128 rows of width ``K`` is ``m=128``. There is deliberately no
+    separate batch knob, because at the level of one GEMM there is no operation
+    that would distinguish the two.
+    """
+
+    family: Literal[ModelFamily.GEMM]
+    m: int = Field(gt=0, description="Rows of the activation operand; folds batch in")
+    n: int = Field(gt=0, description="Columns of the weight operand")
+    k: int = Field(gt=0, description="Contracted (inner) dimension")
+    hypothetical: bool = True
+
+    @property
+    def flops(self) -> float:
+        """``2*M*N*K``. Restated here only so a caller can size a run without
+        building the graph; :class:`bwz.operators.matmul.MatmulCost` is the
+        authority (CLAUDE.md #5)."""
+        return 2.0 * self.m * self.n * self.k
+
+    def parameter_count(self) -> int:
+        """``K x N`` — the weight operand. The activation is not a parameter."""
+        return self.k * self.n
+
+
 # -- custom -----------------------------------------------------------------
 
 
@@ -413,7 +456,7 @@ class CustomSpec(_ModelBase):
 
 
 ModelSpec = Annotated[
-    TransformerSpec | CNNSpec | CustomSpec,
+    TransformerSpec | CNNSpec | GemmSpec | CustomSpec,
     Field(discriminator="family"),
 ]
 """Any model profile. Discriminated on ``family`` so a bad value names the allowed set."""

@@ -369,3 +369,33 @@ The D8 decode-with-KV golden moves accordingly, and the corrected figures are wh
 
 Every KV-free D8 golden is untouched — the weight-traffic figures dominate at 113 ms and the KV
 term only ever adds to them.
+
+---
+
+## D17 — A bare GEMM is a model family, not a `custom` op (2026-08-15)
+
+The engine could describe an 8 B transformer but not a single matrix multiply. `family: custom`
+came close — it takes an op list with hand-written FLOPs and bytes — but `CustomOp` carries **no
+shape**, and `analysis.tiling.operation_utilisation` dispatches on the attribute type. A GEMM
+expressed as a custom op therefore falls through to `MatmulAttrs`-less `CustomAttrs` and returns a
+utilisation of **1.0**: the systolic tail effect silently disappears.
+
+That effect is the single most interesting thing about a small GEMM. `M=1` on A100's 16×16 tensor
+core is `1/17 = 5.88%` of peak; on chip_a's 512×512 array it is `1/513 = 0.19%`. A tool that
+reported 100% there would be wrong in exactly the way CLAUDE.md's sanity checks exist to catch.
+
+Decision (user, 2026-08-15): add `ModelFamily.GEMM` with `m`, `n`, `k`, and a 25-line builder
+emitting one `MATMUL` operation with real `MatmulAttrs`. Nothing in `operators/`, `analysis/` or
+`report.py` changed — `MatmulCost` and the roofline picked it up unmodified, which is the useful
+test of whether the layering is honest.
+
+Two consequences worth stating:
+
+- **`M` folds batch in**, exactly as `MatmulAttrs` documents. There is no `--batch` on `bwz gemm`,
+  because at the level of one operation nothing distinguishes a batch of 128 rows from 128 rows.
+- **`hypothetical` defaults to `true`** for this family. A synthetic shape has no `source_url` to
+  cite, and the provenance validator would otherwise reject every invocation.
+
+Golden (`tests/unit/test_gemm.py`), and the figure the roofline plot is drawn from: 10000³ fp16 on
+A100 under `--ideal` is `2.000e12` OP against `6.000e8` bytes, intensity 3333 against a ridge of
+153, **6.42 ms**, `COMPUTE_BOUND` by 24×.
