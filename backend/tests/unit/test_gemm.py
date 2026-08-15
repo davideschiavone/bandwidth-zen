@@ -115,6 +115,29 @@ def test_int8_is_never_slower_than_fp16() -> None:
     assert int8.latency_s <= fp16.latency_s
 
 
+def test_mixed_precision_runs_at_the_weight_dtype() -> None:
+    """W8A16: int8 weights, fp16 activations.
+
+    The GEMM runs at A100's int8 rate (624 TOP/s, twice fp16) because that is the
+    entire point of quantising, while the activations still move 2 bytes each.
+    Bytes and arithmetic therefore come from different dtypes, which is why
+    ``bwz gemm`` prints the governing dtype rather than echoing ``--weights``.
+    """
+    chip = idealised(load_chip("a100_80gb"))
+    deployment = DeploymentSpec.model_validate(
+        {
+            "batch": 1,
+            "input_tokens": 1,
+            "output_tokens": 1,
+            "precision": {"weights": "int8", "activations": "fp16", "kv_cache": "fp16"},
+        }
+    )
+    mixed = _only_op(analyze(_spec(4096, 4096, 4096), chip, deployment))
+    fp16 = _only_op(analyze(_spec(4096, 4096, 4096), chip, _deployment("fp16")))
+
+    assert mixed.t_compute_s == pytest.approx(fp16.t_compute_s / 2, rel=1e-6)
+
+
 def test_ideal_removes_only_the_deratings() -> None:
     """--ideal divides t_compute by 0.70 and t_dram by 0.85, and leaves the
     shape utilisation exactly where it was."""

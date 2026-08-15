@@ -14,6 +14,7 @@ from rich.table import Table
 import bwz
 from bwz.analysis import analyze, idealised, machine_model, rank_operations, suggestions
 from bwz.analysis.compare import head_to_head, prefill_crossover
+from bwz.analysis.roofline import compute_dtype
 from bwz.report import Bound, Report
 from bwz.spec import (
     CNNSpec,
@@ -23,6 +24,7 @@ from bwz.spec import (
     HardwareSpec,
     SpecLoadError,
     TransformerSpec,
+    bytes_per_element,
     iter_chips,
     iter_models,
     load_chip,
@@ -291,7 +293,8 @@ def run(
         flag = " [yellow](rests on an estimated input)[/yellow]" if margin.rests_on_estimate else ""
         console.print(f"  • {margin.description}{flag}")
     for phase_result in report.phases:
-        for hint in suggestions(phase_result, machine_model(_chip_for(chip, ideal), weights)):
+        governing = compute_dtype(_chip_for(chip, ideal), weights, weights)
+        for hint in suggestions(phase_result, machine_model(_chip_for(chip, ideal), governing)):
             console.print(f"  → {hint}")
 
     if show_ops:
@@ -368,20 +371,44 @@ def gemm(
             console.print(f"  • {reason}")
         raise typer.Exit(code=2)
 
-    machine = machine_model(_chip_for(chip, ideal), weights)
+    resolved = _chip_for(chip, ideal)
+    # The dtype whose peak rate governs, resolved exactly as analyze() resolves
+    # it: quantised inference runs the GEMM at the weight dtype when the chip has
+    # a unit for it, and falls back to the activation dtype otherwise. Reading
+    # `weights` here instead would quote a ridge point from a rate the chip
+    # cannot reach.
+    governing = compute_dtype(resolved, weights, a_dtype)
+    machine = machine_model(resolved, governing)
     summary = report.summary
     assert summary is not None
     op = report.phases[0].ops[0]
 
-    table = Table(title=f"{spec.name} on {report.meta.chip_name}", box=box.SIMPLE)
+    precision = f"{weights.value}" if a_dtype is weights else f"w:{weights.value} a:{a_dtype.value}"
+    table = Table(
+        title=f"{spec.name} at {precision} on {report.meta.chip_name}",
+        box=box.SIMPLE,
+    )
     table.add_column("quantity")
     table.add_column("value", justify="right")
     table.add_column("derivation")
     table.add_row("arithmetic", format_quantity(op.flops, "OP"), f"2 x {m} x {n} x {k}")
     table.add_row(
+        "arithmetic dtype",
+        governing.value,
+        (
+            f"{machine.unit.name} peak {format_quantity(machine.peak_flops_per_s, 'OP/s')}"
+            + (
+                ""
+                if governing is weights
+                else f" — {weights.value} has no unit on this chip, so the activation dtype governs"
+            )
+        ),
+    )
+    table.add_row(
         "DRAM traffic",
         format_bytes(op.dram_bytes),
-        f"weights {format_bytes(op.weight_bytes)} + activations, less what stays on chip",
+        f"weights {k}x{n}x{bytes_per_element(weights):g} B = {format_bytes(op.weight_bytes)}, "
+        f"plus activations at {bytes_per_element(a_dtype):g} B, less what stays on chip",
     )
     table.add_row(
         "intensity", f"{op.arithmetic_intensity:.1f} OP/byte", "arithmetic / compulsory traffic"

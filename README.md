@@ -93,6 +93,7 @@ uv run bwz gemm --m 10000 --n 10000 --k 10000 --chip a100_80gb --ideal
 
 ```
   arithmetic                2 TOP    2 x 10000 x 10000 x 10000
+  arithmetic dtype          fp16     tensor_core peak 312 TOP/s
   intensity        3333.3 OP/byte    arithmetic / compulsory traffic
   ridge point       153.0 OP/byte    above it the chip is compute-bound
   shape utilisation        99.84%    systolic tail on a 16x16 array — geometry, not a derating

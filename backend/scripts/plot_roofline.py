@@ -434,14 +434,15 @@ def draw_pipeline(chip: HardwareSpec, dtype: DType, command: str, out: Path) -> 
         (
             6,
             "DRAM",
-            f"{format_bytes(chip.dram.capacity_bytes)}\n{format_bandwidth(chip.dram.bandwidth_bytes_per_s)}",
+            f"{format_bytes(chip.dram.capacity_bytes)}\n"
+            f"{format_bandwidth(chip.dram.bandwidth_bytes_per_s)}",
             DATASHEET,
         ),
         (40, "on-chip SRAM", f"{format_bytes(on_chip)}\ncapacity only", INK_SECONDARY),
         (
             74,
             "compute array",
-            f"{format_quantity(machine.peak_flops_per_s, 'OP/s')}\n"
+            f"{format_quantity(machine.peak_flops_per_s, 'OP/s')} at {dtype.value}\n"
             + (
                 f"{machine.unit.systolic_dims[0]}x{machine.unit.systolic_dims[1]} systolic"
                 if machine.unit.systolic_dims
@@ -534,12 +535,20 @@ def draw_pipeline(chip: HardwareSpec, dtype: DType, command: str, out: Path) -> 
     fig.text(
         0.052,
         0.93,
-        f"{chip.name} — the machine bwz models",
+        f"{chip.name} — the machine bwz models, at {dtype.value}",
         fontsize=15,
         fontweight="bold",
         color=INK,
     )
-    fig.text(0.052, 0.035, f"$ {command}", fontsize=8.5, color=INK_MUTED, family="monospace")
+    for offset, line in enumerate(_wrap_command(command)):
+        fig.text(
+            0.052,
+            0.055 - 0.038 * offset,
+            line,
+            fontsize=8.5,
+            color=INK_MUTED,
+            family="monospace",
+        )
 
     out.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out, facecolor=SURFACE)
