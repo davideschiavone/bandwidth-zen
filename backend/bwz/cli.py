@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import UTC, datetime
 from enum import StrEnum
+from pathlib import Path
 
 import typer
 from rich import box
@@ -12,9 +13,20 @@ from rich.console import Console
 from rich.table import Table
 
 import bwz
-from bwz.analysis import analyze, idealised, machine_model, rank_operations, suggestions
+from bwz.analysis import (
+    analyze,
+    idealised,
+    machine_model,
+    rank_operations,
+    suggestions,
+    trace_phases,
+)
 from bwz.analysis.compare import head_to_head, prefill_crossover
+from bwz.analysis.pipeline import Lane, PipelineTrace, build_trace
 from bwz.analysis.roofline import compute_dtype
+from bwz.graph import build_graph
+from bwz.graph.ops import GraphPhase
+from bwz.kanata import to_kanata
 from bwz.report import Bound, Report
 from bwz.spec import (
     CNNSpec,
@@ -239,6 +251,9 @@ def run(
         "--ideal",
         help="Set both efficiency de-ratings to 1.0: a hardware ceiling, not a prediction",
     ),
+    kanata: Path | None = typer.Option(
+        None, "--kanata", help="Write a Kanata log per phase, for Konata to open"
+    ),
     as_json: bool = typer.Option(False, "--json", help="Emit the raw Report as JSON"),
 ) -> None:
     """Predict how a model runs on a chip."""
@@ -303,6 +318,10 @@ def run(
             for line in rank_operations(phase_result, limit=show_ops):
                 console.print(f"  {phase_result.phase.value}: {line}")
 
+    if kanata is not None:
+        console.print("\n[bold]Pipeline[/bold]")
+        _write_kanata(kanata, load_model(model), chip, deployment, ideal=ideal)
+
     console.print(f"\n[bold]Assumptions[/bold] ({len(report.assumptions)})")
     for assumption in report.assumptions:
         console.print(f"  • {assumption}", highlight=False)
@@ -311,6 +330,87 @@ def run(
 def _chip_for(chip_id: str, ideal: bool) -> HardwareSpec:
     chip = load_chip(chip_id)
     return idealised(chip) if ideal else chip
+
+
+def _write_kanata(
+    path: Path,
+    model: AnyModelSpec,
+    chip_id: str,
+    deployment: DeploymentSpec,
+    *,
+    ideal: bool,
+) -> None:
+    """Write one Kanata log per phase, for Konata to open.
+
+    A multi-phase run gets one file per phase — prefill and decode are different
+    schedules on the same hardware and overlaying them on one time axis would
+    make the decode step invisible (a 2048-token prefill is ~12x a decode step).
+    """
+    chip = _chip_for(chip_id, ideal)
+    traces = trace_phases(model, chip, deployment)
+    if not traces:
+        console.print("[yellow]bwz:[/yellow] infeasible configuration, no trace written")
+        return
+    for phase, trace in traces:
+        target = (
+            path if len(traces) == 1 else path.with_name(f"{path.stem}-{phase.value}{path.suffix}")
+        )
+        title = f"{model.name} on {chip.name} ({phase.value})"
+        target.write_text(to_kanata(trace, title=title), encoding="utf-8")
+        drift = trace.total_s - trace.reported_latency_s
+        # Relative epsilon: an operation trace reproduces the reported latency
+        # exactly, and float residue should not be dressed up as fill/drain.
+        significant = trace.reported_latency_s > 0 and abs(drift) > 1e-9 * trace.reported_latency_s
+        console.print(
+            f"  wrote {target}  —  {trace.steps} steps"
+            + (f" coalesced from {trace.tiles}" if trace.coalesced else "")
+            + f", span {format_time(trace.total_s)}"
+            + (
+                f" ({drift / trace.reported_latency_s:+.1%} vs the reported latency:"
+                f" pipeline fill/drain)"
+                if significant
+                else " (matches the reported latency)"
+            )
+        )
+
+
+def _pipeline_note(trace: PipelineTrace) -> str:
+    """One line on what the schedule costs that the roofline number does not."""
+    steps = (
+        f"{trace.steps} steps drawn, coalesced from {trace.tiles} tiles"
+        if trace.coalesced
+        else f"{trace.steps} tile steps"
+    )
+    if not trace.double_buffered:
+        return (
+            f"{steps}; no double buffer, so each load waits for the previous tile's "
+            f"arithmetic and the span is load + compute exactly."
+        )
+    share = trace.fill_drain_s / trace.total_s if trace.total_s > 0 else 0.0
+    return (
+        f"{steps}, double buffered. Span {format_time(trace.total_s)} against a reported "
+        f"{format_time(trace.reported_latency_s)}: the extra {format_time(trace.fill_drain_s)} "
+        f"({share:.1%}) is pipeline fill/drain, which max(load, compute) omits."
+    )
+
+
+def _lane_table(trace: PipelineTrace) -> Table:
+    """Who was busy, and for how long. The picture in five rows."""
+    table = Table(title="Pipeline", box=box.SIMPLE)
+    table.add_column("lane")
+    table.add_column("busy", justify="right")
+    table.add_column("of span", justify="right")
+    table.add_column("what it was doing")
+    busy = trace.busy_s
+    descriptions = {
+        Lane.DRAM: "streaming operand tiles across the one modelled link",
+        Lane.SRAM: "holding tiles from fetch to use — two at once when double buffered",
+        Lane.CORE: "arithmetic, plus one dispatch",
+    }
+    for lane in Lane:
+        share = busy[lane] / trace.total_s if trace.total_s > 0 else 0.0
+        table.add_row(lane.value, format_time(busy[lane]), f"{share:.0%}", descriptions[lane])
+    return table
 
 
 @app.command()
@@ -334,6 +434,12 @@ def matmul(
         False,
         "--ideal",
         help="Set both efficiency de-ratings to 1.0: a hardware ceiling, not a prediction",
+    ),
+    pipeline: bool = typer.Option(
+        True, "--pipeline/--no-pipeline", help="Show which resource is busy for how long"
+    ),
+    kanata: Path | None = typer.Option(
+        None, "--kanata", help="Write a Kanata log of the tile schedule, for Konata to open"
     ),
     as_json: bool = typer.Option(False, "--json", help="Emit the raw Report as JSON"),
 ) -> None:
@@ -463,6 +569,21 @@ def matmul(
         f"of {format_quantity(summary.peak_flops_per_s, 'OP/s')} "
         f"({summary.utilization:.2%})"
     )
+
+    if pipeline or kanata is not None:
+        graph = build_graph(spec, deployment, GraphPhase.STATIC)
+        trace = build_trace(
+            graph,
+            report.phases[0],
+            machine,
+            double_buffered=report.memory.double_buffered,
+        )
+        if pipeline:
+            console.print()
+            console.print(_lane_table(trace))
+            console.print(f"  {_pipeline_note(trace)}", highlight=False)
+        if kanata is not None:
+            _write_kanata(kanata, spec, chip, deployment, ideal=ideal)
 
     console.print(f"\n[bold]Why[/bold]  (confidence: {report.confidence.value})")
     for margin in report.flip_margins:

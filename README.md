@@ -125,16 +125,24 @@ All four do the same 137.4 GOP. The int32 result quadruples C from 16.8 MB to 67
 the arithmetic intensity; the mixed-operand case runs at the **fp16** rate, because both operands
 share one datapath — the narrow side saves bytes and buys no throughput.
 
-Draw it:
+See where the time went — one figure per chip, since the schedule is a property of the machine:
 
 ```bash
-make plots        # → docs/plots/roofline-<chip>-<dtype>.png, pipeline-<chip>.png
+make plots                                                  # → docs/plots/
+uv run bwz matmul -M 4096 -N 4096 -K 4096 -c a100_80gb \
+  --kanata run.kanata                                       # open in Konata
 ```
 
 ![A100 roofline](docs/plots/roofline-a100_80gb-fp16.png)
 
-The figures are computed by calling `analyze()`, not drawn by hand, and each carries the command
-that produced it. See [`backend/scripts/plot_roofline.py`](backend/scripts/plot_roofline.py).
+![A100 tile schedule](docs/plots/pipeline-matmul-a100_80gb-fp16.png)
+
+The same 4096³ matmul is 4% DRAM-busy on A100 and touches DRAM not at all on `chip_a`, whose 55 MB
+of SRAM holds all of operand B. The spans are a decomposition of the reported latency rather than a
+second model: DRAM busy sums to `t_dram`, core busy to `t_compute + t_fixed`.
+
+Every figure is computed by calling `analyze()`, not drawn by hand, and carries the command that
+produced it. See [`backend/scripts/`](backend/scripts/).
 
 Sweep and take the Pareto frontier:
 

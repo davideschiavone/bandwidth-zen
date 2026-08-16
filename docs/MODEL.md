@@ -388,14 +388,64 @@ A phase costs the sum of its operations. For a transformer the graph is a chain,
 the critical path; for a branching CNN it is conservative. The DAG longest-path machinery exists in
 `graph/dag.py` and a real list scheduler with resource lanes is M6.
 
-### 6.5 Flip margins
+### 6.5 The tile schedule behind `max(load, compute)`
+
+`analysis/pipeline.py` decomposes a phase's roofline numbers into the schedule they imply — which
+resource is busy when — so the overlap can be *seen* rather than asserted. It adds no cost: the
+spans on each lane sum back to `t_dram`, `t_compute` and `t_fixed`, which is the property its tests
+assert.
+
+A matmul's steps are its real tiles. A weight-stationary array holds a `rows × cols` slice of `B`,
+so the schedule has `ceil(K/rows) · ceil(N/cols)` steps — the same product §6.1 divides by — and
+each loads `t_dram/tiles` and computes `t_compute/tiles`. Two resources, each serial in itself, and
+a buffer depth:
+
+```
+depth            = 2 if double buffered else 1
+load_start(i)    = max(load_end(i-1), compute_end(i-depth))
+compute_start(i) = max(load_end(i), compute_end(i-1))
+```
+
+The `compute_end(i-depth)` term is the buffer being *freed*. Drop it and the schedule quietly
+assumes infinite on-chip capacity, which is the thing capacity planning exists to prevent.
+
+**What the schedule shows that the number hides.** Under double buffering it costs one extra step
+of the *non-binding* resource — fill when compute dominates, drain when DRAM does:
+
+```
+total = max(t_dram, t_compute) + min(t_dram, t_compute) / tiles
+```
+
+So `max(load, compute)` is the `tiles → ∞` limit, and the error it carries is
+`min(t_dram, t_compute)/tiles`. On a 4096³ fp16 matmul on A100 that is 720 ns against 635 µs
+(0.1%); on a decode projection, which is a handful of tiles, it is not small. Reported as
+`PipelineTrace.fill_drain_s` rather than folded into a latency. Without a double buffer the span is
+`t_dram + t_compute` exactly — there is nothing to hide when nothing overlaps.
+
+**A network does not pipeline against itself.** For anything but a single matmul the trace lays
+operations end to end, overlapping load and compute only *within* one, because that is the model's
+own schedule (D5a). Its span therefore equals the reported latency exactly.
+
+Two outputs, same data:
+
+```
+bwz matmul -M 4096 -N 4096 -K 4096 -c a100_80gb --kanata run.kanata   # open in Konata
+make plots                                                            # docs/plots/pipeline-matmul-*.png
+```
+
+![A100 tile schedule](plots/pipeline-matmul-a100_80gb-fp16.png)
+
+One figure per chip, because the schedule is a property of the machine: the same 4096³ matmul is
+4% DRAM-busy on A100 and touches DRAM not at all on chip_a, whose 55 MB of SRAM holds all of `B`.
+
+### 6.6 Flip margins
 
 Every phase reports how far its binding term can move before the verdict changes, and whether that
 input was flagged as an estimate. "DRAM-bound" with a 260× margin and "DRAM-bound" with a 6% margin
 are different claims, and the label alone cannot distinguish them. This is what makes D5b's
 deferred refinements safe to defer.
 
-### 6.6 What the model reproduces
+### 6.7 What the model reproduces
 
 | check | source | result |
 |---|---|---|

@@ -11,6 +11,7 @@ from __future__ import annotations
 import bwz
 from bwz.analysis.bottleneck import flip_margin, rank_operations, suggestions
 from bwz.analysis.memory import infeasibility_reasons, plan_memory, usable_memory_fraction
+from bwz.analysis.pipeline import PipelineTrace, build_trace
 from bwz.analysis.roofline import MachineModel, compute_dtype, idealised, machine_model
 from bwz.analysis.schedule import run_phase
 from bwz.graph.builder import build_graphs, phases_for
@@ -34,13 +35,16 @@ from bwz.units import format_bytes
 
 __all__ = [
     "MachineModel",
+    "PipelineTrace",
     "analyze",
+    "build_trace",
     "flip_margin",
     "idealised",
     "machine_model",
     "plan_memory",
     "rank_operations",
     "suggestions",
+    "trace_phases",
 ]
 
 
@@ -105,6 +109,39 @@ def analyze(model: AnyModelSpec, hardware: HardwareSpec, deployment: DeploymentS
         assumptions=_assumptions(model, hardware, deployment, plan, phases, machine, margins),
         flip_margins=margins,
         confidence=_confidence(hardware, margins),
+    )
+
+
+def trace_phases(
+    model: AnyModelSpec, hardware: HardwareSpec, deployment: DeploymentSpec
+) -> tuple[tuple[GraphPhase, PipelineTrace], ...]:
+    """The resource schedule behind each phase of :func:`analyze`.
+
+    Rebuilds the graphs rather than carrying them on the ``Report``: building is
+    cheap and deterministic, and the report stays a plain data structure that a
+    frontend can consume without a graph library (CLAUDE.md).
+    """
+    report = analyze(model, hardware, deployment)
+    if not report.feasible:
+        return ()
+    dtype = (
+        model.operand_dtype
+        if isinstance(model, MatmulSpec)
+        else compute_dtype(hardware, deployment.precision.weights, deployment.precision.activations)
+    )
+    machine = machine_model(hardware, dtype)
+    graphs = build_graphs(model, deployment)
+    return tuple(
+        (
+            result.phase,
+            build_trace(
+                graphs[result.phase],
+                result,
+                machine,
+                double_buffered=report.memory.double_buffered,
+            ),
+        )
+        for result in report.phases
     )
 
 

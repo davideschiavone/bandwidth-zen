@@ -454,3 +454,44 @@ phase, no attention implementation.
 Renames: `ModelFamily.GEMM` → `MATMUL`, `GemmSpec` → `MatmulSpec`, `graph/gemm.py` →
 `graph/matmul.py`, `bwz gemm` → `bwz matmul`, `--gemm` → `--matmul` on the plot script. One commit
 old and no profile YAML used it, so no compatibility shim.
+
+---
+
+## D19 — The pipeline trace decomposes the roofline; it does not re-model it (2026-08-16)
+
+Asked for a Konata-style view of what happens on DRAM, SRAM and the cores over the run, one per
+chip, tailored to the matmul.
+
+The design constraint that decided everything: **a picture that disagrees with the report is worse
+than no picture.** So `analysis/pipeline.py` emits spans that are slices of quantities
+`op_roofline` already produced — DRAM busy sums to `t_dram`, core busy to `t_compute + t_fixed` —
+and the tests assert exactly that. The tile count is the same `ceil(K/rows)·ceil(N/cols)` that
+`systolic_utilisation` divides by, so the picture and the utilisation figure cannot tell different
+stories.
+
+Three things fell out of drawing it, each a modelling statement rather than a rendering one:
+
+**1. The roofline's `max()` omits pipeline fill/drain.** A double-buffered schedule costs
+`max(t_dram, t_compute) + min(t_dram, t_compute)/tiles` — one extra step of whichever resource is
+*not* binding. `max()` alone is the `tiles → ∞` limit. Reported as `fill_drain_s`, not folded into
+the latency: 0.1% on a 65 536-tile matmul, not negligible on a decode projection of a dozen tiles.
+Fixing the latency itself would move every number in the repo and belongs with calibration.
+
+**2. Double buffering means depth two, and the schedule has to say so.** The first draft let a
+tile be fetched as soon as DRAM was free, which put all 64 tiles on chip at once — SRAM occupancy
+came out at 3237% of the span. The missing constraint is the buffer being freed:
+`load_start(i) >= compute_end(i - depth)`. With it, occupancy is exactly 196%, i.e. two tiles
+throughout, which is what "double buffered" means and what capacity planning granted.
+
+**3. Coalescing must not re-schedule.** 390 625 tiles cannot be drawn, and 451 graph nodes should
+not be. Grouping them, a group's duration is the **sum of its members' latencies**, not the latency
+of their summed terms — `max(ΣL, ΣC) ≤ Σ max(L, C)`, so the natural-looking version drew a network
+1.0% faster than the report it illustrated. Caught by the test asserting the operation trace
+reproduces the reported latency exactly.
+
+Output is a Kanata log (`--kanata`, opens in Konata) and a two-register PNG per chip
+(`scripts/plot_pipeline.py`): the whole run at total scale, and the first few steps zoomed, since
+at total scale one step of a 65 536-tile matmul is a hairline. The x axis is normalised to the
+total time in both, which is what makes two chips comparable when their absolute times differ by
+orders of magnitude. Kanata has no cycle here — a tick is `total/resolution`, stated in the file
+header.

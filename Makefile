@@ -39,6 +39,7 @@ plots:
 	$(BACKEND) --group plots python scripts/plot_roofline.py --chip chip_a --weights int8 \
 		--model gemma3_4b --tokens 512 \
 		--matmul 512,4096,4096 --matmul 128,4096,4096 --matmul 1,4096,4096
+	$(BACKEND) --group plots python scripts/plot_pipeline.py --kanata
 
 docker:
 	@echo "no-op until M4: docker compose lands with the API + frontend"
