@@ -32,7 +32,7 @@ from bwz.analysis import analyze, idealised, machine_model
 from bwz.analysis.roofline import MachineModel
 from bwz.graph.ops import GraphPhase
 from bwz.report import Bound
-from bwz.spec import DeploymentSpec, DType, GemmSpec, HardwareSpec, load_chip, load_model
+from bwz.spec import DeploymentSpec, DType, HardwareSpec, MatmulSpec, load_chip, load_model
 from bwz.units import format_bandwidth, format_bytes, format_quantity, format_time
 
 # -- palette ---------------------------------------------------------------
@@ -83,13 +83,22 @@ def _deployment(dtype: DType, **overrides: object) -> DeploymentSpec:
     return DeploymentSpec.model_validate(document)
 
 
-def gemm_point(chip: HardwareSpec, dtype: DType, m: int, n: int, k: int) -> Point:
-    spec = GemmSpec.model_validate(
-        {"id": "p", "name": "p", "family": "gemm", "m": m, "n": n, "k": k}
+def matmul_point(chip: HardwareSpec, dtype: DType, m: int, n: int, k: int) -> Point:
+    spec = MatmulSpec.model_validate(
+        {
+            "id": "p",
+            "name": "p",
+            "family": "matmul",
+            "m": m,
+            "n": n,
+            "k": k,
+            "a_dtype": dtype,
+            "b_dtype": dtype,
+        }
     )
     report = analyze(spec, chip, _deployment(dtype))
     if not report.feasible:
-        raise SystemExit(f"bwz: GEMM {m}x{n}x{k} is infeasible: {report.infeasibility[0]}")
+        raise SystemExit(f"bwz: matmul {m}x{n}x{k} is infeasible: {report.infeasibility[0]}")
     op = report.phases[0].ops[0]
     # Against *DRAM* traffic, not compulsory traffic, so the point lands on the
     # roof. Residency is exactly what moves a workload to the right: bytes that
@@ -99,7 +108,7 @@ def gemm_point(chip: HardwareSpec, dtype: DType, m: int, n: int, k: int) -> Poin
     # infinite intensity -- it has walked off the right-hand edge of the roofline,
     # which is a real answer, not an error.
     return Point(
-        label=f"GEMM M={m}",
+        label=f"matmul M={m}",
         intensity=_intensity(op.flops, op.dram_bytes),
         achieved_flops_per_s=op.flops / op.latency_s,
         latency_s=op.latency_s,
@@ -574,11 +583,11 @@ def main() -> None:
     parser.add_argument("--chip", default="a100_80gb", help="Chip profile id or path")
     parser.add_argument("--weights", default="fp16", help="Precision to plot the roofline at")
     parser.add_argument(
-        "--gemm",
+        "--matmul",
         action="append",
         default=None,
         metavar="M,N,K",
-        help="A GEMM shape to place on the roofline; repeatable",
+        help="A matmul shape to place on the roofline; repeatable",
     )
     parser.add_argument(
         "--model",
@@ -597,14 +606,14 @@ def main() -> None:
     # The derated roofs stay in the picture as the band a real run falls into.
     ideal_chip = idealised(chip)
 
-    shapes = args.gemm or ["10000,10000,10000", "512,10000,10000", "1,10000,10000"]
+    shapes = args.matmul or ["10000,10000,10000", "512,10000,10000", "1,10000,10000"]
     points = []
     for shape in shapes:
         try:
             m, n, k = (int(part) for part in shape.split(","))
         except ValueError:
-            raise SystemExit(f"bwz: --gemm expects M,N,K; got {shape!r}") from None
-        points.append(gemm_point(ideal_chip, dtype, m, n, k))
+            raise SystemExit(f"bwz: --matmul expects M,N,K; got {shape!r}") from None
+        points.append(matmul_point(ideal_chip, dtype, m, n, k))
     for model_id in args.model or []:
         points.extend(model_points(ideal_chip, dtype, model_id, args.tokens))
 

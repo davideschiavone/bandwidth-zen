@@ -17,6 +17,7 @@ from typing import Annotated, Literal
 from pydantic import Field, model_validator
 
 from bwz.spec.base import Identifier, SourceUrl, SpecModel
+from bwz.spec.dtypes import DType, bytes_per_element
 from bwz.spec.quantities import Bytes, Flops
 
 
@@ -26,7 +27,7 @@ class ModelFamily(StrEnum):
     TRANSFORMER_DECODER = "transformer_decoder"
     TRANSFORMER_ENCODER = "transformer_encoder"
     CNN = "cnn"
-    GEMM = "gemm"
+    MATMUL = "matmul"
     CUSTOM = "custom"
 
 
@@ -386,35 +387,77 @@ class CNNSpec(_ModelBase):
         )
 
 
-# -- gemm -------------------------------------------------------------------
+# -- matmul -----------------------------------------------------------------
 
 
-class GemmSpec(_ModelBase):
-    """A single ``[M, K] x [K, N] -> [M, N]`` matrix multiply.
+class MatmulSpec(_ModelBase):
+    """A single ``A[M, K] x B[K, N] -> C[M, N]``.
 
     The smallest workload the engine can express, and the one whose numbers can
-    be checked by hand against a datasheet: ``2*M*N*K`` FLOPs against
-    ``(M*K + K*N + M*N)`` elements of traffic. Its purpose is to interrogate the
+    be checked by hand against a datasheet. Its purpose is to interrogate the
     *machine* rather than a network — where the ridge point falls, how much the
     systolic tail costs at small ``M``, what ``--ideal`` changes.
 
-    This is a family rather than a :class:`CustomSpec` op precisely because
-    ``CustomOp`` carries hand-written FLOPs and bytes but no shape, so
+    **This family speaks matmul, not transformer.** Everywhere else the engine
+    says "weights" and "activations", because in a network one operand is a
+    parameter that lives on the chip and the other is data flowing through it.
+    A bare matmul has no such asymmetry: it has operand ``A``, operand ``B``, and
+    a result ``C``, and each carries its own width:
+
+    - ``a_dtype`` — the ``M x K`` operand
+    - ``b_dtype`` — the ``K x N`` operand
+    - ``out_dtype`` — the ``M x N`` result, which is the *accumulator* width and
+      is routinely wider than either operand: ``int8 x int8`` accumulates into
+      ``int32``, ``fp16 x fp16`` into ``fp32``.
+
+    The result width changes **bytes only, never operations** (CLAUDE.md #5).
+    An ``int8 x int8 -> int32`` matmul does exactly the same 2*M*N*K integer
+    operations as ``int8 x int8 -> int8``; it just writes four bytes per result
+    instead of one, which matters when ``M x N`` is large next to ``K``.
+
+    A family rather than a :class:`CustomSpec` op because ``CustomOp`` carries
+    hand-written FLOPs and bytes but no shape, so
     ``analysis.tiling.operation_utilisation`` would have nothing to work with and
     would return 1.0 — silently dropping the tail effect, which is the single
-    most interesting thing about a small GEMM (docs/CORRECTIONS.md D17).
+    most interesting thing about a small matmul (docs/CORRECTIONS.md D17).
 
     ``M`` folds batch in, exactly as :class:`bwz.graph.ops.MatmulAttrs` does:
     a batch of 128 rows of width ``K`` is ``m=128``. There is deliberately no
-    separate batch knob, because at the level of one GEMM there is no operation
+    separate batch knob, because at the level of one operation there is nothing
     that would distinguish the two.
     """
 
-    family: Literal[ModelFamily.GEMM]
-    m: int = Field(gt=0, description="Rows of the activation operand; folds batch in")
-    n: int = Field(gt=0, description="Columns of the weight operand")
+    family: Literal[ModelFamily.MATMUL]
+    m: int = Field(gt=0, description="Rows of operand A; folds batch in")
+    n: int = Field(gt=0, description="Columns of operand B")
     k: int = Field(gt=0, description="Contracted (inner) dimension")
+    a_dtype: DType = Field(default=DType.FP16, description="Width of the M x K operand")
+    b_dtype: DType = Field(default=DType.FP16, description="Width of the K x N operand")
+    out_dtype: DType | None = Field(
+        default=None,
+        description="Width of the M x N result; defaults to the wider operand (no accumulator "
+        "widening). Set int32 or fp32 to model a widening accumulator.",
+    )
     hypothetical: bool = True
+
+    @property
+    def result_dtype(self) -> DType:
+        """``out_dtype`` if set, otherwise the wider operand."""
+        if self.out_dtype is not None:
+            return self.out_dtype
+        return max(self.a_dtype, self.b_dtype, key=bytes_per_element)
+
+    @property
+    def operand_dtype(self) -> DType:
+        """The width the arithmetic runs at.
+
+        Both operands enter the array through the same datapath, so a mixed-width
+        matmul runs at the *wider* one — an ``int8 x fp16`` product is computed by
+        widening the int8 side, not by finding an int8 rate for it. The narrow
+        operand still saves its bytes; it just does not buy any throughput
+        (docs/CORRECTIONS.md D18).
+        """
+        return max(self.a_dtype, self.b_dtype, key=bytes_per_element)
 
     @property
     def flops(self) -> float:
@@ -424,7 +467,8 @@ class GemmSpec(_ModelBase):
         return 2.0 * self.m * self.n * self.k
 
     def parameter_count(self) -> int:
-        """``K x N`` — the weight operand. The activation is not a parameter."""
+        """``K x N`` — operand B. Called a parameter count only because the base
+        class asks for one; a matmul has no parameters."""
         return self.k * self.n
 
 
@@ -456,7 +500,7 @@ class CustomSpec(_ModelBase):
 
 
 ModelSpec = Annotated[
-    TransformerSpec | CNNSpec | GemmSpec | CustomSpec,
+    TransformerSpec | CNNSpec | MatmulSpec | CustomSpec,
     Field(discriminator="family"),
 ]
 """Any model profile. Discriminated on ``family`` so a bad value names the allowed set."""

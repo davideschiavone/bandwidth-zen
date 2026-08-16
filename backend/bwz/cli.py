@@ -20,8 +20,8 @@ from bwz.spec import (
     CNNSpec,
     CustomSpec,
     DType,
-    GemmSpec,
     HardwareSpec,
+    MatmulSpec,
     SpecLoadError,
     TransformerSpec,
     bytes_per_element,
@@ -125,7 +125,7 @@ def _model_row(model: AnyModelSpec) -> tuple[str, ...]:
             shape,
             _provenance(model),
         )
-    if isinstance(model, GemmSpec):
+    if isinstance(model, MatmulSpec):
         params = format_quantity(float(model.parameter_count()), "", precision=4).strip()
         return (
             model.id,
@@ -314,14 +314,21 @@ def _chip_for(chip_id: str, ideal: bool) -> HardwareSpec:
 
 
 @app.command()
-def gemm(
-    m: int = typer.Option(..., "--m", "-M", help="Rows of the activation operand; folds batch in"),
-    n: int = typer.Option(..., "--n", "-N", help="Columns of the weight operand"),
+def matmul(
+    m: int = typer.Option(..., "--m", "-M", help="Rows of operand A; folds batch in"),
+    n: int = typer.Option(..., "--n", "-N", help="Columns of operand B"),
     k: int = typer.Option(..., "--k", "-K", help="Contracted (inner) dimension"),
     chip: str = typer.Option(..., "--chip", "-c", help="Chip profile id or path"),
-    weights: DType = typer.Option(DType.FP16, "--weights", help="Weight precision"),
-    activations: DType | None = typer.Option(
-        None, "--activations", help="Activation precision; defaults to --weights"
+    dtype: DType = typer.Option(
+        DType.FP16, "--dtype", "-d", help="Width of both operands, and of the result unless --out"
+    ),
+    a_dtype: DType | None = typer.Option(None, "--a", help="Width of the M x K operand A"),
+    b_dtype: DType | None = typer.Option(None, "--b", help="Width of the K x N operand B"),
+    out_dtype: DType | None = typer.Option(
+        None,
+        "--out",
+        help="Width of the M x N result. Defaults to the wider operand; set int32 or fp32 for a "
+        "widening accumulator",
     ),
     ideal: bool = typer.Option(
         False,
@@ -330,31 +337,37 @@ def gemm(
     ),
     as_json: bool = typer.Option(False, "--json", help="Emit the raw Report as JSON"),
 ) -> None:
-    """Run one [M, K] x [K, N] matmul: the smallest probe of a chip's roofline.
+    """Run one A[M,K] x B[K,N] -> C[M,N]: the smallest probe of a chip's roofline.
 
-    No batch, context or phase knobs — a bare GEMM has none. M is the full row
-    count, so a batch of 128 is M=128.
+    Matmul vocabulary throughout — operands A and B and a result C, not weights
+    and activations, which mean nothing outside a network. No batch, context or
+    phase knobs either: M is the full row count, so a batch of 128 is M=128.
+
+    The result width is the accumulator width and changes bytes only, never
+    operations: int8 x int8 -> int32 does exactly the same 2*M*N*K integer
+    operations as int8 x int8 -> int8, and writes four times the bytes.
     """
-    a_dtype = activations if activations is not None else weights
+    a = a_dtype if a_dtype is not None else dtype
+    b = b_dtype if b_dtype is not None else dtype
     try:
-        spec = GemmSpec.model_validate(
+        spec = MatmulSpec.model_validate(
             {
-                "id": f"gemm_{m}x{n}x{k}",
-                "name": f"GEMM {m}x{n}x{k}",
-                "family": "gemm",
+                "id": f"matmul_{m}x{n}x{k}",
+                "name": f"matmul {m}x{n}x{k}",
+                "family": "matmul",
                 "m": m,
                 "n": n,
                 "k": k,
+                "a_dtype": a,
+                "b_dtype": b,
+                "out_dtype": out_dtype,
             }
         )
+        # DeploymentSpec is required by analyze() but a bare matmul reads nothing
+        # from it: the builder takes its widths from the spec (D18) and there is
+        # no batch, context or phase to describe.
         deployment = DeploymentSpec.model_validate(
-            {
-                "batch": 1,
-                "input_tokens": 1,
-                "output_tokens": 0,
-                "phase": Phase.PREFILL,
-                "precision": {"weights": weights, "activations": a_dtype, "kv_cache": a_dtype},
-            }
+            {"batch": 1, "input_tokens": 1, "output_tokens": 0, "phase": Phase.PREFILL}
         )
         report = _report_for(spec, chip, deployment, ideal=ideal)
     except SpecLoadError as exc:
@@ -371,47 +384,57 @@ def gemm(
             console.print(f"  • {reason}")
         raise typer.Exit(code=2)
 
-    resolved = _chip_for(chip, ideal)
-    # The dtype whose peak rate governs, resolved exactly as analyze() resolves
-    # it: quantised inference runs the GEMM at the weight dtype when the chip has
-    # a unit for it, and falls back to the activation dtype otherwise. Reading
-    # `weights` here instead would quote a ridge point from a rate the chip
-    # cannot reach.
-    governing = compute_dtype(resolved, weights, a_dtype)
-    machine = machine_model(resolved, governing)
+    machine = machine_model(_chip_for(chip, ideal), spec.operand_dtype)
     summary = report.summary
     assert summary is not None
     op = report.phases[0].ops[0]
+    result = spec.result_dtype
 
-    precision = f"{weights.value}" if a_dtype is weights else f"w:{weights.value} a:{a_dtype.value}"
     table = Table(
-        title=f"{spec.name} at {precision} on {report.meta.chip_name}",
+        title=(
+            # No square brackets: rich would read them as markup tags.
+            f"A {m}x{k} {a.value}  x  B {k}x{n} {b.value}  ->  C {m}x{n} {result.value}"
+            f"\non {report.meta.chip_name}"
+        ),
         box=box.SIMPLE,
     )
     table.add_column("quantity")
     table.add_column("value", justify="right")
     table.add_column("derivation")
-    table.add_row("arithmetic", format_quantity(op.flops, "OP"), f"2 x {m} x {n} x {k}")
     table.add_row(
-        "arithmetic dtype",
-        governing.value,
-        (
-            f"{machine.unit.name} peak {format_quantity(machine.peak_flops_per_s, 'OP/s')}"
-            + (
-                ""
-                if governing is weights
-                else f" — {weights.value} has no unit on this chip, so the activation dtype governs"
-            )
-        ),
+        "operations",
+        format_quantity(op.flops, "OP"),
+        f"2 x {m} x {n} x {k} — unchanged by the result width",
+    )
+    table.add_row(
+        "arithmetic runs at",
+        spec.operand_dtype.value,
+        f"{machine.unit.name} peak {format_quantity(machine.peak_flops_per_s, 'OP/s')}"
+        + ("" if a is b else " — the wider operand; both share one datapath"),
+    )
+    table.add_row(
+        "operand A",
+        format_bytes(m * k * bytes_per_element(a)),
+        f"{m} x {k} x {bytes_per_element(a):g} B",
+    )
+    table.add_row(
+        "operand B",
+        format_bytes(k * n * bytes_per_element(b)),
+        f"{k} x {n} x {bytes_per_element(b):g} B",
+    )
+    table.add_row(
+        "result C",
+        format_bytes(m * n * bytes_per_element(result)),
+        f"{m} x {n} x {bytes_per_element(result):g} B"
+        + ("" if out_dtype is None else " — widening accumulator"),
     )
     table.add_row(
         "DRAM traffic",
         format_bytes(op.dram_bytes),
-        f"weights {k}x{n}x{bytes_per_element(weights):g} B = {format_bytes(op.weight_bytes)}, "
-        f"plus activations at {bytes_per_element(a_dtype):g} B, less what stays on chip",
+        "the three operands, less whatever stays on chip",
     )
     table.add_row(
-        "intensity", f"{op.arithmetic_intensity:.1f} OP/byte", "arithmetic / compulsory traffic"
+        "intensity", f"{op.arithmetic_intensity:.1f} OP/byte", "operations / compulsory traffic"
     )
     table.add_row(
         "ridge point",
@@ -429,7 +452,7 @@ def gemm(
         ),
     )
     table.add_row("t_dram", format_time(op.t_dram_s), "traffic / effective bandwidth")
-    table.add_row("t_compute", format_time(op.t_compute_s), "arithmetic / (effective peak x util)")
+    table.add_row("t_compute", format_time(op.t_compute_s), "operations / (effective peak x util)")
     table.add_row("t_fixed", format_time(op.t_fixed_s), "one kernel dispatch")
     table.add_row("[bold]latency[/bold]", f"[bold]{format_time(op.latency_s)}[/bold]", "")
     table.add_row("[bold]verdict[/bold]", _colour_bound(op.bound), "")

@@ -29,7 +29,7 @@ from bwz.report import (
 from bwz.spec.deployment import DeploymentSpec
 from bwz.spec.hardware_spec import HardwareSpec
 from bwz.spec.loaders import AnyModelSpec
-from bwz.spec.model_spec import TransformerSpec
+from bwz.spec.model_spec import MatmulSpec, TransformerSpec
 from bwz.units import format_bytes
 
 __all__ = [
@@ -51,7 +51,13 @@ def analyze(model: AnyModelSpec, hardware: HardwareSpec, deployment: DeploymentS
     or a model that does not fit returns a ``Report`` with ``feasible: false`` and
     the cheapest fixes (CLAUDE.md #8).
     """
-    dtype = compute_dtype(hardware, deployment.precision.weights, deployment.precision.activations)
+    # A bare matmul names its own operand widths and ignores the deployment's
+    # weights/activations vocabulary entirely (docs/CORRECTIONS.md D18).
+    dtype = (
+        model.operand_dtype
+        if isinstance(model, MatmulSpec)
+        else compute_dtype(hardware, deployment.precision.weights, deployment.precision.activations)
+    )
     meta = Meta(
         model_name=model.name,
         chip_name=hardware.name,
@@ -215,6 +221,9 @@ def _assumptions(
         "last reader completes — optimistic.",
         "A phase costs the sum of its operations; no overlap is modelled between one kernel's "
         "prefetch and the previous kernel's arithmetic.",
+        "DRAM traffic is compulsory traffic: each operand crosses the bus once. Re-reads forced "
+        "by tiling a working set that does not fit on chip are not modelled, so a DRAM-bound "
+        "latency here is a lower bound (docs/MODEL.md 6.2).",
     ]
 
     if plan.double_buffered:
@@ -236,6 +245,18 @@ def _assumptions(
         f"{dispatched} of {total_ops} graph operations are charged a dispatch cost; norms and "
         f"elementwise ops are assumed fused into an adjacent kernel."
     )
+
+    if isinstance(model, MatmulSpec):
+        out.append(
+            f"Arithmetic runs at {model.operand_dtype.value}, the wider of the two operands "
+            f"(A {model.a_dtype.value}, B {model.b_dtype.value}): both enter the array through "
+            f"one datapath, so a narrow operand saves bytes but buys no throughput "
+            f"(docs/CORRECTIONS.md D18)."
+        )
+        out.append(
+            f"The {model.result_dtype.value} result is an accumulator width: it changes bytes "
+            f"only, never operations. 2*M*N*K is the same at every result width."
+        )
 
     if isinstance(model, TransformerSpec):
         out.append("The LM head is computed for the last token only, as every serving stack does.")

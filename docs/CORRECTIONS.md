@@ -396,6 +396,61 @@ Two consequences worth stating:
 - **`hypothetical` defaults to `true`** for this family. A synthetic shape has no `source_url` to
   cite, and the provenance validator would otherwise reject every invocation.
 
-Golden (`tests/unit/test_gemm.py`), and the figure the roofline plot is drawn from: 10000³ fp16 on
-A100 under `--ideal` is `2.000e12` OP against `6.000e8` bytes, intensity 3333 against a ridge of
-153, **6.42 ms**, `COMPUTE_BOUND` by 24×.
+Golden, and the figure the roofline plot is drawn from: 10000³ fp16 on A100 under `--ideal` is
+`2.000e12` OP against `6.000e8` bytes, intensity 3333 against a ridge of 153, **6.42 ms**,
+`COMPUTE_BOUND` by 24×.
+
+> **Superseded in part by D18**, one day later: the family, the command, the module and the test
+> file were all renamed from `gemm` to `matmul`, and the transformer precision vocabulary this
+> entry inherited was replaced by per-operand widths. The reasoning above — why it is a family and
+> not a `custom` op — stands unchanged.
+
+---
+
+## D18 — A matmul speaks matmul, not transformer (2026-08-16)
+
+D17 shipped the family with `--weights` and `--activations` on the CLI, inherited from
+`DeploymentSpec.precision`. That vocabulary is wrong here and the user said so: in a network one
+operand is a parameter that lives on the chip and the other is data flowing through it, but a bare
+matmul has no such asymmetry. It has operand `A`, operand `B`, and a result `C`.
+
+Decision (user, 2026-08-16): rename the family to `matmul`, give it three widths of its own, and
+have the builder ignore `deployment.precision` entirely.
+
+```
+bwz matmul -M 4096 -N 4096 -K 4096 --chip a100_80gb --dtype int8              # all int8
+bwz matmul -M 4096 -N 4096 -K 4096 --chip a100_80gb --dtype int8 --out int32  # int32 accumulator
+bwz matmul -M 4096 -N 4096 -K 4096 --chip a100_80gb --dtype fp16 --out fp32   # all float
+bwz matmul -M 4096 -N 4096 -K 4096 --chip a100_80gb --a fp16 --b int8         # mixed operands
+```
+
+Three consequences, each a modelling statement rather than a naming one:
+
+**1. The result width is an accumulator width, and changes bytes only.** `int8 x int8 -> int32`
+performs exactly the same `2·M·N·K` integer operations as `int8 x int8 -> int8`; it writes four
+bytes per result instead of one. At M=N=K=4096 that is 67.1 MB of result against 16.8 MB — the
+compulsory intensity halves, from 2731 to 1365 OP/byte. `DType.INT32` was added for this and is a
+storage width only: no chip declares a compute unit for it, which is correct, because an int8
+product accumulates in int32 *at the int8 rate*.
+
+**2. Mixed-width operands run at the wider one.** Both operands enter the array through the same
+datapath, so `int8 × fp16` is computed by widening the int8 side — there is no int8 rate available
+for it. The narrow operand still saves its bytes; it buys no throughput.
+
+This **reverses** what the engine did before. `compute_dtype()` returns the weight dtype whenever
+the chip supports it, on the reasoning that "quantised inference runs the GEMM at the weight dtype
+— that is the entire point of quantising". That is true for W8A8 and **false for W8A16**, where
+real kernels dequantise and run the fp16 tensor cores; the speedup of weight-only quantisation is
+entirely in the bytes, which is why it helps a memory-bound decode and does nothing for a
+compute-bound prefill. `MatmulSpec` now uses the wider-operand rule. The transformer path still
+uses `compute_dtype()` and is therefore still wrong for W8A16 — **left open deliberately**, since
+changing it moves every mixed-precision transformer number in the repo and deserves its own
+decision.
+
+**3. The deployment is unused for this family.** `analyze()` still takes one, because its signature
+is fixed, but `build_matmul_graph` discards it. Batch is folded into `M`; there is no context, no
+phase, no attention implementation.
+
+Renames: `ModelFamily.GEMM` → `MATMUL`, `GemmSpec` → `MatmulSpec`, `graph/gemm.py` →
+`graph/matmul.py`, `bwz gemm` → `bwz matmul`, `--gemm` → `--matmul` on the plot script. One commit
+old and no profile YAML used it, so no compatibility shim.

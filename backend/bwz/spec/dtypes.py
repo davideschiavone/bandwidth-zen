@@ -24,6 +24,11 @@ class DType(StrEnum):
     FP8 = "fp8"
     INT8 = "int8"
     INT4 = "int4"
+    INT32 = "int32"
+    """Accumulator width. No chip declares a compute unit for it -- an int8 x int8
+    product accumulates in int32 at the *int8* rate -- so it appears only as the
+    result dtype of a matmul, where it doubles or quadruples the output bytes
+    without changing a single operation."""
 
 
 _BYTES_PER_ELEMENT: dict[DType, float] = {
@@ -34,6 +39,7 @@ _BYTES_PER_ELEMENT: dict[DType, float] = {
     DType.FP8: 1.0,
     DType.INT8: 1.0,
     DType.INT4: 0.5,
+    DType.INT32: 4.0,
 }
 
 
@@ -48,4 +54,4 @@ def bytes_per_element(dtype: DType) -> float:
 
 def is_integer(dtype: DType) -> bool:
     """True for integer formats, whose peak throughput is quoted in OP/s not FLOP/s."""
-    return dtype in (DType.INT8, DType.INT4)
+    return dtype in (DType.INT8, DType.INT4, DType.INT32)

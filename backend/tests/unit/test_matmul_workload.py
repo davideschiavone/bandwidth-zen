@@ -1,4 +1,4 @@
-"""The one-op GEMM workload: a hand-checkable probe of the roofline.
+"""The one-op matmul workload: a hand-checkable probe of the roofline.
 
 Every expected value here is written out arithmetically in the docstring, because
 the entire purpose of this family is that its numbers can be verified against a
@@ -13,24 +13,28 @@ from bwz.analysis import analyze, idealised
 from bwz.graph import GraphPhase, build_graph
 from bwz.graph.ops import MatmulAttrs, OpType
 from bwz.report import Bound, OpResult, Report
-from bwz.spec import DeploymentSpec, GemmSpec, load_chip
+from bwz.spec import DeploymentSpec, DType, MatmulSpec, load_chip
 
 
-def _spec(m: int, n: int, k: int) -> GemmSpec:
-    return GemmSpec.model_validate(
-        {"id": "t", "name": "t", "family": "gemm", "m": m, "n": n, "k": k}
-    )
-
-
-def _deployment(dtype: str = "fp16") -> DeploymentSpec:
-    return DeploymentSpec.model_validate(
+def _spec(m: int, n: int, k: int, dtype: str = "fp16", out: str | None = None) -> MatmulSpec:
+    return MatmulSpec.model_validate(
         {
-            "batch": 1,
-            "input_tokens": 1,
-            "output_tokens": 1,
-            "precision": {"weights": dtype, "activations": dtype, "kv_cache": dtype},
+            "id": "t",
+            "name": "t",
+            "family": "matmul",
+            "m": m,
+            "n": n,
+            "k": k,
+            "a_dtype": dtype,
+            "b_dtype": dtype,
+            "out_dtype": out,
         }
     )
+
+
+def _deployment() -> DeploymentSpec:
+    """A matmul reads nothing from the deployment (D18); analyze() still wants one."""
+    return DeploymentSpec.model_validate({"batch": 1, "input_tokens": 1, "output_tokens": 1})
 
 
 def _only_op(report: Report) -> OpResult:
@@ -42,16 +46,16 @@ def _only_op(report: Report) -> OpResult:
 
 
 def test_graph_is_one_matmul_with_three_operands() -> None:
-    """M=8, N=4, K=2: weights [2,4], input [8,2], output [8,4]."""
+    """M=8, N=4, K=2: A [8,2], B [2,4], C [8,4]."""
     graph = build_graph(_spec(8, 4, 2), _deployment(), GraphPhase.STATIC)
 
     assert len(graph.ops) == 1
     op = graph.ops[0]
     assert op.op_type is OpType.MATMUL
     assert op.attrs == MatmulAttrs(m=8, n=4, k=2)
-    assert graph.tensors["gemm.w"].shape == (2, 4)
-    assert graph.tensors["gemm.x"].shape == (8, 2)
-    assert graph.tensors["gemm.out"].shape == (8, 4)
+    assert graph.tensors["matmul.a"].shape == (8, 2)
+    assert graph.tensors["matmul.b"].shape == (2, 4)
+    assert graph.tensors["matmul.c"].shape == (8, 4)
 
 
 def test_parameter_count_is_the_weight_operand() -> None:
@@ -94,7 +98,7 @@ def test_m_equals_one_reproduces_the_tail_effect() -> None:
     """A single row on a 16-row array wastes 15 of them: 1/(1+16) = 5.88%.
 
     This is the sanity check CLAUDE.md names for the utilisation model, and the
-    reason a GEMM is a family rather than a hand-costed custom op — a CustomOp
+    reason a matmul is a family rather than a hand-costed custom op — a CustomOp
     carries no shape, so this number would silently come back as 100%.
     """
     report = analyze(_spec(1, 10_000, 10_000), idealised(load_chip("a100_80gb")), _deployment())
@@ -108,34 +112,55 @@ def test_m_equals_one_reproduces_the_tail_effect() -> None:
 def test_int8_is_never_slower_than_fp16() -> None:
     """CLAUDE.md sanity check, on the one workload where nothing else moves."""
     chip = load_chip("a100_80gb")
-    spec = _spec(4096, 4096, 4096)
-    fp16 = _only_op(analyze(spec, chip, _deployment("fp16")))
-    int8 = _only_op(analyze(spec, chip, _deployment("int8")))
+    fp16 = _only_op(analyze(_spec(4096, 4096, 4096, "fp16"), chip, _deployment()))
+    int8 = _only_op(analyze(_spec(4096, 4096, 4096, "int8"), chip, _deployment()))
 
     assert int8.latency_s <= fp16.latency_s
 
 
-def test_mixed_precision_runs_at_the_weight_dtype() -> None:
-    """W8A16: int8 weights, fp16 activations.
+def test_mixed_operands_run_at_the_wider_one() -> None:
+    """int8 x fp16 runs at the fp16 rate, not the int8 rate (D18).
 
-    The GEMM runs at A100's int8 rate (624 TOP/s, twice fp16) because that is the
-    entire point of quantising, while the activations still move 2 bytes each.
-    Bytes and arithmetic therefore come from different dtypes, which is why
-    ``bwz gemm`` prints the governing dtype rather than echoing ``--weights``.
+    Both operands enter the array through one datapath, so the narrow side is
+    widened on the way in. It still saves its bytes — B is half the size — but it
+    buys no arithmetic throughput, which is exactly why weight-only quantisation
+    speeds up a memory-bound decode and does nothing for a compute-bound prefill.
     """
     chip = idealised(load_chip("a100_80gb"))
-    deployment = DeploymentSpec.model_validate(
+    spec = MatmulSpec.model_validate(
         {
-            "batch": 1,
-            "input_tokens": 1,
-            "output_tokens": 1,
-            "precision": {"weights": "int8", "activations": "fp16", "kv_cache": "fp16"},
+            "id": "t",
+            "name": "t",
+            "family": "matmul",
+            "m": 4096,
+            "n": 4096,
+            "k": 4096,
+            "a_dtype": "fp16",
+            "b_dtype": "int8",
         }
     )
-    mixed = _only_op(analyze(_spec(4096, 4096, 4096), chip, deployment))
-    fp16 = _only_op(analyze(_spec(4096, 4096, 4096), chip, _deployment("fp16")))
+    assert spec.operand_dtype is DType.FP16
 
-    assert mixed.t_compute_s == pytest.approx(fp16.t_compute_s / 2, rel=1e-6)
+    mixed = _only_op(analyze(spec, chip, _deployment()))
+    fp16 = _only_op(analyze(_spec(4096, 4096, 4096, "fp16"), chip, _deployment()))
+
+    assert mixed.t_compute_s == pytest.approx(fp16.t_compute_s, rel=1e-6)
+    assert mixed.weight_bytes == pytest.approx(fp16.weight_bytes / 2)
+
+
+def test_result_width_changes_bytes_not_operations() -> None:
+    """int8 x int8 -> int32 does the same 2*M*N*K as int8 x int8 -> int8.
+
+    M=N=K=4096: 137.4 GOP either way. The result grows from 16.8 MB to 67.1 MB,
+    a 50.3 MB difference that shows up in traffic and nowhere else.
+    """
+    chip = idealised(load_chip("a100_80gb"))
+    narrow = _only_op(analyze(_spec(4096, 4096, 4096, "int8"), chip, _deployment()))
+    wide = _only_op(analyze(_spec(4096, 4096, 4096, "int8", out="int32"), chip, _deployment()))
+
+    assert wide.flops == pytest.approx(narrow.flops)
+    assert wide.t_compute_s == pytest.approx(narrow.t_compute_s)
+    assert wide.arithmetic_intensity < narrow.arithmetic_intensity
 
 
 def test_ideal_removes_only_the_deratings() -> None:

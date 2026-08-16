@@ -117,8 +117,8 @@ instead of 8 it would be 4.3 GB.
 
 Each model reports the arithmetic an operation performs and its **compulsory** traffic — every
 weight read once, every input read once, every output written once. Nothing here knows about a
-chip: tile re-reads, cache reuse and the systolic tail effect are `analysis/`'s job at M3
-(`docs/CORRECTIONS.md` D10). That is what makes every number below checkable with a calculator.
+chip: cache reuse and the systolic tail effect are `analysis/`'s job (`docs/CORRECTIONS.md` D10),
+and tile re-reads are not modelled at all in v1 (§6.2). That is what makes every number below checkable with a calculator.
 
 `OpCost` splits bytes by role because M3 treats them differently — weight traffic is what
 residency removes, activation traffic is what tiling affects, and `scratch` is what
@@ -249,17 +249,33 @@ ridge of 295 and chip_a's of 6168, so the whole network is memory-bound on eithe
 
 ---
 
-## 5b. GEMM expansion (`graph/gemm.py`)
+## 5b. Matmul expansion (`graph/matmul.py`)
 
-The smallest workload the engine expresses: one `[M, K] × [K, N] → [M, N]` operation, three
-tensors, no network around it. Its purpose is to interrogate the *machine* — where the ridge point
-falls, what the systolic tail costs, what `--ideal` does and does not change — with nothing else
-present to explain a number away. `M` folds batch in, as everywhere else.
+The smallest workload the engine expresses: one `A[M,K] × B[K,N] → C[M,N]`, three tensors, no
+network around it. Its purpose is to interrogate the *machine* — where the ridge point falls, what
+the systolic tail costs, what `--ideal` does and does not change — with nothing else present to
+explain a number away. `M` folds batch in, as everywhere else.
 
-It is a family rather than a hand-costed `custom` op because a `CustomOp` carries no shape, so the
-tail effect would silently vanish (`docs/CORRECTIONS.md` D17).
+It speaks matmul, not transformer: operands `A` and `B` and a result `C`, each with its own width,
+and `deployment.precision` is ignored entirely (`docs/CORRECTIONS.md` D18). It is a family rather
+than a hand-costed `custom` op because a `CustomOp` carries no shape, so the tail effect would
+silently vanish (D17).
 
-A100, fp16, `--ideal`, three shapes — the same chip, three different machines:
+**Widths.** The arithmetic runs at the **wider operand** — both enter the array through one
+datapath — and the result width is an **accumulator** width that changes bytes only, never
+operations:
+
+| A | B | C | operations | compulsory bytes | runs at |
+|---|---|---|---|---|---|
+| int8 | int8 | int8 | 137.4 GOP | 50.3 MB | int8, 624 TOP/s |
+| int8 | int8 | int32 | 137.4 GOP | 100.7 MB | int8, 624 TOP/s |
+| fp16 | fp16 | fp16 | 137.4 GOP | 100.7 MB | fp16, 312 TFLOP/s |
+| fp16 | int8 | fp16 | 137.4 GOP | 83.9 MB | **fp16**, 312 TFLOP/s |
+
+M=N=K=4096 throughout. The last row is the one that catches people: halving B's width saves 16.8 MB
+and not one nanosecond of arithmetic.
+
+**Shape.** A100, fp16, `--ideal`, three shapes — the same chip, three different machines:
 
 | M | intensity | shape util | verdict | latency |
 |---|---|---|---|---|
@@ -268,13 +284,18 @@ A100, fp16, `--ideal`, three shapes — the same chip, three different machines:
 | 1 | 1.0 OP/byte | **5.88%** = 1/17 | DRAM-bound | 71 µs |
 
 `N = K = 10000` throughout. The last row is the whole point: the arithmetic fell by 10000× but the
-weight traffic did not fall at all, and a 16-row array running one row wastes fifteen of them.
+traffic did not fall at all, and a 16-row array running one row wastes fifteen of them.
 
-`make plots` places these three, plus a model's prefill and decode, on the chip's roofline:
-[`plots/roofline-a100_80gb-fp16.png`](plots/roofline-a100_80gb-fp16.png). Note that the figure
-plots intensity against **DRAM** traffic rather than compulsory traffic, so residency moves a
-point to the right and a fully resident workload leaves the chart entirely — which is what
-[`plots/roofline-chip_a-int8.png`](plots/roofline-chip_a-int8.png) shows for a 4096³ GEMM on
+**Traffic is compulsory traffic.** Each operand is charged once — the traffic of a perfectly tiled
+schedule that reads every byte exactly once. Re-reads forced by a working set that does not fit
+on chip are **not** modelled; see §6.2. For a matmul that does not fit, the reported DRAM traffic
+is therefore a lower bound, and the reported latency with it.
+
+`make plots` places these on the chip's roofline:
+[`plots/roofline-a100_80gb-fp16.png`](plots/roofline-a100_80gb-fp16.png). The figure plots
+intensity against **DRAM** traffic rather than compulsory traffic, so residency moves a point to
+the right and a fully resident workload leaves the chart entirely — which is what
+[`plots/roofline-chip_a-int8.png`](plots/roofline-chip_a-int8.png) shows for a 4096³ matmul on
 55 MB of SRAM.
 
 ---
@@ -313,6 +334,37 @@ first, then the activation working set, then weights. What is left over as a sha
 Feasibility is `weights + KV + peak activations ≤ usable DRAM`. A failure returns a `Report` with
 `feasible: false` and fixes ordered by what the user gives up — precision, then context, then
 batch, then hardware — each naming the number it would have to reach.
+
+**Nothing is pinned on chip.** `r` is not a claim that some weights stay resident for the whole
+run while the rest are re-fetched every time; it is the fraction of `W` that a schedule need not
+stream from DRAM more than once. Everything else streams, tile by tile, and that is what double
+buffering overlaps.
+
+**What is *not* modelled: tile re-reads.** The traffic charged is compulsory traffic — each operand
+crossing DRAM exactly once — which is the traffic of an ideal tiled schedule, and a **lower bound**
+on what a real one moves. The communication-optimal blocked matmul over a fast memory holding `M`
+elements moves
+
+```
+Q >= 2·N³ / sqrt(M)        elements, for an N³ matmul     [Hong & Kung]
+```
+
+against a compulsory `3·N²`. The bound only bites once it exceeds compulsory traffic, which is
+where the operands stop fitting — a square tile of side `sqrt(M/3)` is the largest holding all
+three:
+
+| case | tile side | compulsory | tiled bound | ratio |
+|---|---|---|---|---|
+| chip_a, int8, N=4096 | 4282 | 50.3 MB | 18.5 MB | **1.0x — fits entirely** |
+| chip_a, int8, N=8192 | 4282 | 201 MB | 148 MB | 1.0x — bound not binding |
+| chip_a, int8, N=16384 | 4282 | 805 MB | 1.19 GB | **1.47×** |
+| A100, fp16, N=16384 | 3181 | 1.61 GB | 3.19 GB | **1.98×** |
+
+So the engine is exact while the working set fits — which covers every transformer projection in
+the shipped profiles, since `K×N` is at most a few hundred MB — and optimistic beyond it, by a
+factor that grows as `N/sqrt(M)`. Adding the re-read term is the natural next step for `analysis/`;
+it is out of v1 because it changes every DRAM-bound number in the repo and wants a measurement to
+sit against (`docs/PLAN.md` Session 5).
 
 ### 6.3 The per-operation roofline
 

@@ -84,17 +84,21 @@ Llama-3-8B  ·  NVIDIA H100 SXM5  ·  fp16  ·  batch 1  ·  2048 in / 256 out
   Confidence: medium (±20%) — decode weight traffic dominates; assumes no weight caching in L2
 ```
 
-Interrogate the machine rather than a network — one matrix multiply, no batch or context knobs,
-`M` folding the batch in:
+Interrogate the machine rather than a network — one matrix multiply, in matmul vocabulary
+(operands A and B, result C — no weights, no activations, no batch or context knobs; `M` folds the
+batch in):
 
 ```bash
-uv run bwz gemm --m 10000 --n 10000 --k 10000 --chip a100_80gb --ideal
+uv run bwz matmul -M 10000 -N 10000 -K 10000 --chip a100_80gb --dtype fp16 --ideal
 ```
 
 ```
-  arithmetic                2 TOP    2 x 10000 x 10000 x 10000
-  arithmetic dtype          fp16     tensor_core peak 312 TOP/s
-  intensity        3333.3 OP/byte    arithmetic / compulsory traffic
+       A 10000x10000 fp16  x  B 10000x10000 fp16  ->  C 10000x10000 fp16
+                          on NVIDIA A100 SXM4 80GB
+
+  operations                2 TOP    2 x 10000 x 10000 x 10000 — unchanged by the result width
+  arithmetic runs at        fp16     tensor_core peak 312 TOP/s
+  intensity        3333.3 OP/byte    operations / compulsory traffic
   ridge point       153.0 OP/byte    above it the chip is compute-bound
   shape utilisation        99.84%    systolic tail on a 16x16 array — geometry, not a derating
   t_dram                   264 µs
@@ -104,8 +108,22 @@ uv run bwz gemm --m 10000 --n 10000 --k 10000 --chip a100_80gb --ideal
 ```
 
 `--ideal` sets both efficiency de-ratings to 1.0, so every number above can be checked against the
-datasheet by hand. Drop `--m` to 1 and the same GEMM reports 5.88% utilisation — `1/17` of the
+datasheet by hand. Drop `-M` to 1 and the same matmul reports 5.88% utilisation — `1/17` of the
 array — and flips to DRAM-bound.
+
+Widths are per operand, and the result width is the **accumulator** width — it changes bytes only,
+never operations:
+
+```bash
+uv run bwz matmul -M 4096 -N 4096 -K 4096 -c a100_80gb --dtype int8               # all int8
+uv run bwz matmul -M 4096 -N 4096 -K 4096 -c a100_80gb --dtype int8 --out int32   # int32 accumulate
+uv run bwz matmul -M 4096 -N 4096 -K 4096 -c a100_80gb --dtype fp16 --out fp32    # all float
+uv run bwz matmul -M 4096 -N 4096 -K 4096 -c a100_80gb --a fp16 --b int8          # mixed operands
+```
+
+All four do the same 137.4 GOP. The int32 result quadruples C from 16.8 MB to 67.1 MB and halves
+the arithmetic intensity; the mixed-operand case runs at the **fp16** rate, because both operands
+share one datapath — the narrow side saves bytes and buys no throughput.
 
 Draw it:
 
