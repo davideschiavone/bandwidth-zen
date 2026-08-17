@@ -273,9 +273,12 @@ calculator: 664 parameters, 5280 operations over 4 tokens, with the derivation i
 header.
 
 ```bash
-uv run bwz run --model tiny_encoder --chip a100_80gb \
-  --input-tokens 4 --output-tokens 0 --phase prefill --show-ops 20 --ideal
+uv run bwz run --model tiny_encoder --chip a100_80gb --input-tokens 4 --show-ops 20 --ideal
 ```
+
+`--show-ops 20` just asks for more lines than the 14 operations there are. `--output-tokens` and
+`--phase` are not needed: an encoder has one phase, and the report says so in its assumptions if
+you ask for generation anyway.
 
 Add your own — chips and models are plain YAML:
 

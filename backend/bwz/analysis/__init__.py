@@ -30,7 +30,7 @@ from bwz.report import (
 from bwz.spec.deployment import DeploymentSpec
 from bwz.spec.hardware_spec import HardwareSpec
 from bwz.spec.loaders import AnyModelSpec
-from bwz.spec.model_spec import MatmulSpec, TransformerSpec
+from bwz.spec.model_spec import MatmulSpec, ModelFamily, TransformerSpec
 from bwz.units import format_bytes
 
 __all__ = [
@@ -295,7 +295,21 @@ def _assumptions(
             f"only, never operations. 2*M*N*K is the same at every result width."
         )
 
-    if isinstance(model, TransformerSpec):
+    if isinstance(model, TransformerSpec) and model.family is ModelFamily.TRANSFORMER_ENCODER:
+        # The deployment can ask for generation; an encoder has none to give, and
+        # silently dropping the request would be the kind of omission this drawer
+        # exists to prevent (D24).
+        out.append(
+            "Encoder: one bidirectional pass over all input_tokens, no LM head. "
+            + (
+                f"output_tokens={deployment.output_tokens} and phase="
+                f"{deployment.phase.value} are ignored — there is no decode phase."
+                if deployment.output_tokens > 0
+                else "There is no decode phase."
+            )
+        )
+
+    if isinstance(model, TransformerSpec) and model.family is ModelFamily.TRANSFORMER_DECODER:
         out.append("The LM head is computed for the last token only, as every serving stack does.")
         out.append(
             "Prefill attention FLOPs are halved for causal masking (docs/CORRECTIONS.md D8)."

@@ -32,9 +32,10 @@
 #   ==============================================================
 #   total                                                     5280 operations
 #
-# Check it with:
-#   bwz run --model tiny_encoder --chip a100_80gb --input-tokens 4 \
-#           --output-tokens 0 --phase prefill --show-ops 20 --ideal
+# Check it with (--show-ops 20 just asks for more lines than the 14 ops there are;
+# an encoder has one phase, so output_tokens and phase do not apply):
+#
+#   bwz run --model tiny_encoder --chip a100_80gb --input-tokens 4 --show-ops 20 --ideal
 id: tiny_encoder
 name: Tiny encoder (hand-countable)
 family: transformer_encoder

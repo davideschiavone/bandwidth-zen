@@ -670,6 +670,9 @@ integers — **664 parameters** and **5280 operations** over 4 tokens — with t
 the profile's own header and in `tests/unit/test_tiny_encoder.py`, which recomputes both from the
 dimensions rather than asserting what the engine happened to produce.
 
+A deployment may still ask an encoder for `output_tokens`; the request is ignored, and the
+assumptions drawer says so by name rather than dropping it silently.
+
 `rank_operations` (the `--show-ops` lines) now carries each operation's arithmetic and DRAM traffic
 alongside its time. On a model this small they tell different stories: seven operations cost 3 µs
 each and are all `LATENCY_BOUND`, while one of them does 1.02 kOP and another does none at all.
