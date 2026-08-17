@@ -40,6 +40,8 @@ plots:
 		--model gemma3_4b --tokens 512 \
 		--matmul 512,4096,4096 --matmul 128,4096,4096 --matmul 1,4096,4096
 	$(BACKEND) --group plots python scripts/plot_pipeline.py --html
+	$(BACKEND) --group plots python scripts/plot_pipeline.py \
+		--chip a100_80gb --chip metis_aipu --compare --model gemma3_4b -S 512 --html
 
 docker:
 	@echo "no-op until M4: docker compose lands with the API + frontend"

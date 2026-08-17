@@ -269,12 +269,35 @@ It draws one of three things, and the flags mirror the report commands above:
     --ideal --html --out ..
 ```
 
-`--chip` (repeatable) · `--matmul M,N,K` · `--model ID` · `--encoder` with `--hidden --heads
---head-dim --ffn --vocab` · `-S/--tokens` · `--weights` · `--ideal` · `--steps` how many bars ·
-`--zoom` how many in the second register · `--html` · `--html-steps` (256, finer than the PNG's 32)
-· `--out`.
+`--chip` (repeatable) · `--compare` · `--matmul M,N,K` · `--model ID` · `--encoder` with `--hidden
+--heads --head-dim --ffn --vocab` · `-S/--tokens` · `--weights` · `--ideal` · `--steps` how many
+bars · `--zoom` how many in the second register · `--html` · `--html-steps` (256, finer than the
+PNG's 32) · `--out`.
 
 The shape flags belong to `--encoder`; a profile already carries its dimensions.
+
+### `--compare` — two chips, one workload, one picture
+
+```bash
+… plot_pipeline.py --chip a100_80gb --chip metis_aipu --compare --model gemma3_4b -S 512 --html
+```
+
+The time axis is **shared and absolute**, so a bar three times as long took three times as long —
+here A100 9.06 ms against Metis 119 ms, stated as 13.15x rather than left to be measured off the
+ticks. Rows are **banded by chip** rather than aligned, because the two profiles declare different
+resources (A100: 3 memory levels, 2 engines; Metis: 4 and 2) and no correspondence between
+`cuda_core` and `dpu` exists to draw. Everything the per-chip figure does survives inside each band.
+
+Below the timeline, both rooflines on one chart. Both chips do the same 3.33 TOP over the same
+~3.8 GB — ~870 OP/byte — and land on **opposite sides of their own ridge point**: A100's ridge is
+306 OP/byte so it is compute-bound, Metis's is 6145 so it is DRAM-bandwidth-bound. Identical
+arithmetic, identical traffic, different limiter. That is what the head-to-head table in
+`bwz compare` cannot show.
+
+Works with `--matmul`, `--model` and `--encoder`, and with more than two chips. Every chip runs the
+same precision — enforced, not assumed, since A100 defaults to fp16 and Metis has no fp16 datapath
+at all. Without `--compare` each chip still gets its own figure with x normalised to its own span;
+both views are kept because they answer different questions.
 
 ### `plot_roofline.py` — where the workload sits
 
@@ -302,6 +325,7 @@ produced it and the commit it came from:
 | `machine-<chip>.png` | the three-element machine — which link carries a bandwidth number and which does not |
 | `timeline-<chip>-<dtype>.png` | where the time went, one row per hardware resource |
 | `timeline-<chip>-<dtype>.html` | the same, **zoomable**, with the roofline and the arithmetic below it |
+| `timeline-compare-<a>-vs-<b>-….{png,html}` | two chips, one workload, one shared absolute axis, both rooflines |
 
 ![A100 roofline](docs/plots/roofline-a100_80gb-fp16.png)
 
@@ -379,8 +403,18 @@ measurement yet, which is why no report claims better than medium confidence.
 
 ## Built-in profiles
 
-**Chips:** NVIDIA H100 SXM / A100 80GB, AMD MI300X, Google TPU v4, Jetson Orin, a generic
-edge NPU, a server CPU baseline. Each profile cites its datasheet in `source_url`.
+**Chips:** NVIDIA H100 SXM5 / A100 80GB / Jetson AGX Orin, AMD MI300X, the **Axelera Metis AIPU**,
+and `chip_a` / `chip_b`, a generic edge NPU and a hypothetical variant of it. Every profile
+describing a real product cites its source in `source_url`; the two that do not declare
+`hypothetical: true`, and any field that is an engineering estimate rather than a published figure
+names itself in `estimates:` and is propagated into the report's assumptions drawer.
+
+`metis_aipu` is the odd one out and worth reading as the worked example of that policy: its numbers
+come from an ISSCC 2024 paper rather than a datasheet, so compute and on-chip capacity are exact —
+`512x512 MACs / 8 bit-serial cycles x 0.8 GHz x 2 x 4 cores = 209.7 TOPS` against the paper's
+209.6, and 4x1 MiB + 4x4 MiB + 32 MiB = exactly the 52 MiB the paper states — while DRAM bandwidth
+is not published at all and is an inference from a 64-bit LPDDR4x bus at the JEDEC maximum. Which
+of its fields you can trust is written on the profile itself.
 
 **Models:** GPT-3, BERT-base, Llama-3-8B, Llama-2-70B, Mistral-7B, Mixtral-8x7B, Gemma-4,
 MobileNetV3, ViT-B/16, Stable Diffusion U-Net.

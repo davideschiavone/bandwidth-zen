@@ -32,7 +32,8 @@ TEMPLATE = """<!doctype html>
   :root {{
     --surface: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e; --ink-3: #8a8983;
     --grid: #e6e5e1; --box: #f2f1ed;
-    --dram: #2a78d6; --sram: #8a8983; --core: #eb6834; --idle: #e6e5e1;
+    --dram: #2a78d6; --sram: #8a8983; --core: #eb6834; --vector: #1baf7a;
+    --idle: #e6e5e1;
   }}
   * {{ box-sizing: border-box; }}
   body {{
@@ -52,6 +53,10 @@ TEMPLATE = """<!doctype html>
   .box.dram {{ border-color: var(--dram); }} .box.dram h2 {{ color: var(--dram); }}
   .box.sram {{ border-color: var(--sram); }} .box.sram h2 {{ color: var(--sram); }}
   .box.core {{ border-color: var(--core); }} .box.core h2 {{ color: var(--core); }}
+  .bandname {{ font-size: 11px; letter-spacing: .06em; color: var(--ink-2);
+               margin: 18px 0 7px; font-weight: 700; text-transform: uppercase; }}
+  .chipname {{ font-size: 13.5px; font-weight: 700; fill: var(--ink); }}
+  .chiprule {{ stroke-width: 2; }}
   .hint {{ font-size: 11.5px; color: var(--ink-3); margin: 0 0 10px; }}
   #wrap {{ position: relative; border-top: 1px solid var(--grid); padding-top: 12px; }}
   svg {{ display: block; width: 100%; touch-action: none; cursor: grab; }}
@@ -100,11 +105,11 @@ TEMPLATE = """<!doctype html>
 
 <h1>{title}</h1>
 <p class="sub">{subtitle}</p>
-<div class="boxes">{boxes}</div>
+{boxes}
 <p class="hint">Rows are hardware resources, not steps. <b>Wheel</b> zooms about the cursor ·
 <b>drag</b> pans · <b>double-click</b> resets · <b>hover</b> a bar for its own numbers.
 Filled bars on the DRAM row are loads, hollow ones are results written back.
-Grey rows are declared by the chip and unused by this model.</p>
+Grey rows are declared by the chip and unused by this model.{hint}</p>
 <div id="wrap"><svg id="chart"></svg><div id="tip"></div></div>
 
 <h2 class="section">Roofline — where this workload sits</h2>
@@ -124,8 +129,11 @@ to reproduce if you want to back-test the model. Click a row to open it.</p>
 <script>
 const DATA = {data};
 
-const LEFT = 210, RIGHT = 190, ROW = 42, TOP = 26, BOT = 30;
-const COLOUR = {{dram: "#2a78d6", sram: "#8a8983", core: "#eb6834"}};
+const LEFT = 252, RIGHT = 232, ROW = 42, TOP = 26, BOT = 30;
+// One entry per Lane, and it must stay that way: `vector` was missing while D28
+// was already emitting spans for it, so every norm and activation bar rendered
+// with an undefined fill. Grep the rendered DOM, not this file, to check.
+const COLOUR = {{dram: "#2a78d6", sram: "#8a8983", core: "#eb6834", vector: "#1baf7a"}};
 const svg = document.getElementById("chart");
 const tip = document.getElementById("tip");
 const wrap = document.getElementById("wrap");
@@ -185,14 +193,41 @@ function draw() {{
   DATA.rows.forEach((row, i) => {{
     const y0 = TOP + i * ROW;
     const end = {{x: LEFT - 12, "text-anchor": "end"}};
+
+    // A band header: which chip the rows below belong to. Rows cannot line up
+    // across chips — they declare different numbers of memory levels and compute
+    // units — so each chip keeps its own band rather than being forced into a
+    // shared row list (D29).
+    // The right-hand figure is often two lines ("3.82 GB @ 1.73 TB/s" and
+    // "LOAD … · STORE …"). SVG <text> ignores a newline, so it ran the two
+    // together and the tail fell off the edge; each line gets its own element,
+    // stacked about the row's centre.
+    const quantity = (cls) => (row.quantity || "").split("\\n").forEach((line, n, all) => {{
+      svg.appendChild(el("text", {{
+        class: cls, x: width - RIGHT + 12,
+        y: y0 + ROW / 2 + 4 + (n - (all.length - 1) / 2) * 12,
+      }}, line));
+    }});
+
+    if (row.header) {{
+      svg.appendChild(el("line", {{
+        class: "chiprule", x1: LEFT, x2: width - RIGHT,
+        y1: y0 + ROW - 8, y2: y0 + ROW - 8, style: "stroke:" + row.colour,
+      }}));
+      svg.appendChild(el("text",
+        {{...end, class: "chipname", y: y0 + 17, style: "fill:" + row.colour}}, row.title));
+      svg.appendChild(el("text", {{...end, class: "rowdetail", y: y0 + 29}}, row.detail));
+      svg.appendChild(el("text", {{...end, class: "rowdetail", y: y0 + 39}}, row.note));
+      quantity("rowqty");
+      return;
+    }}
+
     svg.appendChild(el("line",
       {{class: "rowline", x1: LEFT, x2: width - RIGHT, y1: y0 + ROW, y2: y0 + ROW}}));
     svg.appendChild(el("text", {{...end, class: "rowname", y: y0 + 17}}, row.title));
     svg.appendChild(el("text", {{...end, class: "rowdetail", y: y0 + 29}}, row.detail));
     svg.appendChild(el("text", {{...end, class: "rowdetail", y: y0 + 39}}, row.note));
-    svg.appendChild(el("text", {{
-      class: "rowqty" + (row.lane ? "" : " off"), x: width - RIGHT + 12, y: y0 + ROW / 2 + 4,
-    }}, row.quantity));
+    quantity("rowqty" + (row.lane ? "" : " off"));
 
     if (!row.lane) {{
       svg.appendChild(el("rect",
@@ -200,7 +235,7 @@ function draw() {{
       return;
     }}
     for (const s of DATA.spans) {{
-      if (s.lane !== row.lane) continue;
+      if (s.lane !== row.lane || s.panel !== row.panel) continue;
       if (s.end < view.lo || s.start > view.hi) continue;
       const x0 = Math.max(x(s.start), LEFT), x1 = Math.min(x(s.end), width - RIGHT);
       // Stores hollow, loads filled: the direction of DRAM traffic should be
@@ -299,39 +334,65 @@ function drawRoof() {{
     {{class: "rooftext", x: (RL + w - RR) / 2, y: RH - 4, "text-anchor": "middle"}},
     "arithmetic intensity — OP per byte of DRAM traffic"));
 
-  const path = (peak, bw, cls) => {{
+  // One roof per chip, drawn on the one chart so the ceilings can be read
+  // against each other. Colour is chip identity here (it is lane identity on the
+  // timeline above, which is why every mark below also carries a direct label);
+  // style stays datasheet-solid against derated-dashed.
+  const path = (peak, bw, cls, colour) => {{
     const knee = peak / bw;
     const pts = [[R.x_lo, Math.max(bw * R.x_lo, R.y_lo)], [knee, peak], [R.x_hi, peak]];
-    roof.appendChild(el("polyline", {{
+    const line = el("polyline", {{
       class: cls,
       points: pts.map(([a, b]) => px(a) + "," + py(b)).join(" "),
-    }}));
+    }});
+    if (colour) line.setAttribute("style", "stroke:" + colour);
+    roof.appendChild(line);
     return knee;
   }};
-  const knee = path(R.peak, R.bw, "roofline");
-  if (R.derated_peak !== R.peak || R.derated_bw !== R.bw) {{
-    path(R.derated_peak, R.derated_bw, "roofderated");
-  }}
 
-  roof.appendChild(el("line",
-    {{class: "roofguide", x1: px(knee), x2: px(knee), y1: RT, y2: RH - RB}}));
-  roof.appendChild(el("text",
-    {{class: "rooftext", x: px(knee) + 4, y: RT + 11}}, "ridge " + trim(knee) + " OP/byte"));
-  if (R.tail) {{
-    roof.appendChild(el("line",
-      {{class: "roofguide", x1: RL, x2: w - RR, y1: py(R.tail), y2: py(R.tail)}}));
-    roof.appendChild(el("text",
-      {{class: "rooftext", x: w - RR, y: py(R.tail) - 5, "text-anchor": "end"}},
-      "M=1 ceiling " + fmtRate(R.tail)));
-  }}
+  // Inline `style` rather than a `stroke`/`fill` attribute: the .roofline and
+  // .roofpoint class rules set those too, and a class rule beats a presentation
+  // attribute — which silently painted every chip's roof the same blue.
+  const paint = (node, prop, colour) => {{
+    node.setAttribute("style", prop + ":" + colour);
+    return node;
+  }};
+  // Past this far across the log axis a left-anchored label runs off the chart.
+  const crowded = v => Math.log10(v) > xs[0] + 0.55 * (xs[1] - xs[0]);
 
-  for (const p of R.points) {{
-    const dot = el("circle", {{class: "roofpoint", cx: px(p.ai), cy: py(p.achieved), r: 6}});
-    dot.dataset.tip = p.tip;
-    roof.appendChild(dot);
-    roof.appendChild(el("text",
-      {{class: "rooftext", x: px(p.ai) + 10, y: py(p.achieved) + 3}}, p.label));
-  }}
+  R.chips.forEach((c, index) => {{
+    const knee = path(c.peak, c.bw, "roofline", c.colour);
+    if (c.derated_peak !== c.peak || c.derated_bw !== c.bw) {{
+      path(c.derated_peak, c.derated_bw, "roofderated", c.colour);
+    }}
+    const ridge = el("line",
+      {{class: "roofguide", x1: px(knee), x2: px(knee), y1: RT, y2: RH - RB}});
+    roof.appendChild(paint(ridge, "stroke", c.colour));
+    const flip = crowded(knee);
+    roof.appendChild(paint(el("text", {{
+      class: "rooftext", x: px(knee) + (flip ? -4 : 4), y: RT + 11 + index * 12,
+      "text-anchor": flip ? "end" : "start",
+    }}, (R.chips.length > 1 ? c.name + " ridge " : "ridge ") + trim(knee) + " OP/byte"),
+      "fill", c.colour));
+    if (c.tail) {{
+      roof.appendChild(paint(el("line",
+        {{class: "roofguide", x1: RL, x2: w - RR, y1: py(c.tail), y2: py(c.tail)}}),
+        "stroke", c.colour));
+      roof.appendChild(paint(el("text",
+        {{class: "rooftext", x: RL + 5, y: py(c.tail) - 5, "text-anchor": "start"}},
+        "M=1 ceiling " + fmtRate(c.tail)), "fill", c.colour));
+    }}
+    for (const p of c.points) {{
+      const dot = el("circle", {{class: "roofpoint", cx: px(p.ai), cy: py(p.achieved), r: 6}});
+      dot.dataset.tip = p.tip;
+      roof.appendChild(paint(dot, "fill", c.colour));
+      const near = crowded(p.ai);
+      roof.appendChild(paint(el("text", {{
+        class: "rooftext", x: px(p.ai) + (near ? -10 : 10), y: py(p.achieved) + 3,
+        "text-anchor": near ? "end" : "start",
+      }}, R.chips.length > 1 ? c.name + " — " + p.label : p.label), "fill", c.colour));
+    }}
+  }});
 }}
 
 roof.addEventListener("mousemove", e => {{
@@ -360,6 +421,11 @@ class Box:
     heading: str
     headline: str
     detail: str
+    band: str = ""
+    """Which chip this box belongs to. Empty on a single-chip page; on a
+    comparison the boxes are grouped into one band per chip, because the three
+    quantities are only comparable within a chip and only meaningful side by side
+    across them."""
 
 
 def render(
@@ -368,19 +434,32 @@ def render(
     subtitle: str,
     footer: str,
     boxes: list[Box],
-    rows: list[dict[str, str | None]],
+    rows: list[dict[str, object]],
     spans: list[dict[str, object]],
     roofline: dict[str, object],
     explanations: list[dict[str, str]],
     total_s: float,
+    hint: str = "",
 ) -> str:
     """Build the page. Pure: returns text, writes nothing."""
-    boxes_html = "".join(
-        f'<div class="box {b.lane}"><h2>{b.heading}</h2>'
-        f'<div class="big">{b.headline}</div>'
-        f'<div class="det">{b.detail}</div></div>'
-        for b in boxes
-    )
+    parts: list[str] = []
+    band: str | None = None
+    for box in boxes:
+        if box.band != band:
+            if band is not None:
+                parts.append("</div>")
+            if box.band:
+                parts.append(f'<p class="bandname">{_escape(box.band)}</p>')
+            parts.append('<div class="boxes">')
+            band = box.band
+        parts.append(
+            f'<div class="box {box.lane}"><h2>{box.heading}</h2>'
+            f'<div class="big">{box.headline}</div>'
+            f'<div class="det">{box.detail}</div></div>'
+        )
+    if band is not None:
+        parts.append("</div>")
+    boxes_html = "".join(parts)
     data = json.dumps({"rows": rows, "spans": spans, "total": total_s, "roofline": roofline})
     ops_html = "".join(
         f'<details class="op"><summary>'
@@ -399,6 +478,7 @@ def render(
         boxes=boxes_html,
         data=data,
         explanations=ops_html,
+        hint=hint,
     )
 
 

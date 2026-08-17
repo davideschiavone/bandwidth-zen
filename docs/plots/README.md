@@ -23,6 +23,7 @@ in its own `plots` dependency group, so `make test` does not pull it in.
 | `timeline-<chip>-<dtype>.png` | `plot_pipeline.py` | Where the time went, per hardware resource, with the bytes and operations on each row |
 | `timeline-<chip>-<dtype>.html` | `plot_pipeline.py --html` | The same, **zoomable**, with the roofline for that run below it |
 | `timeline-<chip>-<model>-<phase>-<dtype>.*` | `plot_pipeline.py --model` | A network instead of a matmul, one figure per phase |
+| `timeline-compare-<a>-vs-<b>-….{png,html}` | `plot_pipeline.py --compare` | Two chips, one workload, **one shared absolute time axis**, plus both rooflines |
 
 **Figures are not the report.** These show where the time went; the numbers, their derivations and
 the assumptions drawer come from `bwz matmul` / `bwz run`, and the plot scripts print only
@@ -106,8 +107,51 @@ figure divides by. The one thing the picture adds is pipeline fill/drain, which 
 `max(load, compute)` omits; it is stated on the figure rather than folded in. See
 [`../MODEL.md`](../MODEL.md) §6.5 and [`../CORRECTIONS.md`](../CORRECTIONS.md) D19–D22.
 
+## Comparing two chips
+
+```bash
+cd backend
+uv run --group plots python scripts/plot_pipeline.py \
+  --chip a100_80gb --chip metis_aipu --compare --model gemma3_4b -S 512 --html
+```
+
+writes `timeline-compare-a100_80gb-vs-metis_aipu-gemma3_4b-{prefill,decode}-int8.{png,html}`.
+Comparison figures are **not committed** — `make plots` builds them, and the numbers quoted below
+come from that run.
+
+Three things differ from the per-chip figure, and nothing else does (`../CORRECTIONS.md` D29).
+
+**The time axis is shared and absolute.** A bar three times as long took three times as long. On
+Gemma-3-4B prefill at S=512, int8: A100 9.06 ms against Metis 119 ms, and the subtitle states the
+13.15x rather than leaving it to be measured off the ticks. The per-chip normalised view is kept,
+because it is the better view of one machine's internal balance — at 13x, the faster chip's whole
+run is 7% of a shared axis.
+
+**Rows are banded by chip, not aligned across chips.** They cannot be aligned: A100 declares 3
+memory levels and 2 compute units, Metis 4 and 2, `chip_a` 2 and 1, and there is no honest
+correspondence between `cuda_core` and `dpu`. Each band opens with a header row naming the machine
+and carrying its peak, DRAM bandwidth, on-chip capacity, its row counts and its total span with its
+verdict. Inside a band everything the single-chip figure does still holds.
+
+**A roofline register is added below.** The timeline shows what happened; this shows why it had to.
+Both chips do 3.33 TOP over ~3.8 GB — the same ~870 OP/byte — and land on opposite sides of their
+own ridge:
+
+| | peak | DRAM | ridge | this run | verdict |
+|---|---|---|---|---|---|
+| `a100_80gb` | 624 TOP/s | 2.04 TB/s | 306 OP/byte | 870.4 | **compute bound** |
+| `metis_aipu` | 210 TOP/s | 34.1 GB/s | 6145 OP/byte | 868.9 | **DRAM-bw bound** |
+
+Identical arithmetic, identical traffic, different limiter — which is the thing a table of
+latencies cannot show. Inside that panel **colour is the chip**, not the resource, which is stated
+on the panel; everywhere else in the figure colour keeps its lane meaning.
+
+The HTML comparison carries the same bands and the same shared axis, keeps wheel-zoom, drag-pan,
+double-click reset and per-bar hover, and renders **the arithmetic section once** — the operator
+list is a property of the workload, and the workload is the same on both machines.
+
 ## Adding a chip
 
 Both scripts take `--chip` and default to a pair that makes the contrast visible — a datacentre GPU
 and an edge NPU. The schedule is a property of the machine, so a new chip means a new figure rather
-than a new line on an existing one.
+than a new line on an existing one; `--compare` is the exception, and it bands rather than merges.
