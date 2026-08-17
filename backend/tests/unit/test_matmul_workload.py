@@ -13,7 +13,7 @@ from bwz.analysis import analyze, idealised
 from bwz.graph import GraphPhase, build_graph
 from bwz.graph.ops import MatmulAttrs, OpType
 from bwz.report import Bound, OpResult, Report
-from bwz.spec import DeploymentSpec, DType, MatmulSpec, load_chip
+from bwz.spec import DeploymentSpec, DType, MatmulSpec, load_chip, load_model
 
 
 def _spec(m: int, n: int, k: int, dtype: str = "fp16", out: str | None = None) -> MatmulSpec:
@@ -161,6 +161,41 @@ def test_result_width_changes_bytes_not_operations() -> None:
     assert wide.flops == pytest.approx(narrow.flops)
     assert wide.t_compute_s == pytest.approx(narrow.t_compute_s)
     assert wide.arithmetic_intensity < narrow.arithmetic_intensity
+
+
+def test_the_result_is_always_written_back() -> None:
+    """C has no on-chip consumer, so all of it crosses DRAM (D22).
+
+    10000^3 fp16 on A100: A and C are 400 MB of activations against 60.7 MB of
+    on-chip capacity, so activation residency is 15.2% — and applying that
+    discount to the *result* would keep 30.4 MB of the answer on a chip nobody
+    reads it from. Reads take the discount; the write does not.
+    """
+    chip = idealised(load_chip("a100_80gb"))
+    op = _only_op(analyze(_spec(10_000, 10_000, 10_000), chip, _deployment()))
+
+    assert op.dram_write_bytes == pytest.approx(200e6, rel=1e-6)
+    assert op.dram_read_bytes + op.dram_write_bytes == pytest.approx(op.dram_bytes)
+    # Reads are discounted, so they are below the 400 MB compulsory figure.
+    assert op.dram_read_bytes < 400e6
+
+
+def test_a_consumed_output_may_stay_on_chip() -> None:
+    """The same rule, the other way: a transformer's intermediate activation is
+    read by the next operation, so residency applies to it and it need not be
+    written at all.
+    """
+    chip = load_chip("a100_80gb")
+    deployment = DeploymentSpec.model_validate(
+        {"batch": 1, "input_tokens": 512, "output_tokens": 1}
+    )
+    report = analyze(load_model("llama3_8b"), chip, deployment)
+    decode = report.phase(GraphPhase.DECODE)
+    assert decode is not None
+
+    # Almost every tensor in a decode step feeds the next operator; only the
+    # logits leave. The write share is therefore tiny next to the read share.
+    assert decode.dram_write_bytes < 0.01 * decode.dram_read_bytes
 
 
 def test_ideal_removes_only_the_deratings() -> None:

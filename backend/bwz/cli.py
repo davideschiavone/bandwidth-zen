@@ -359,7 +359,7 @@ def _lane_table(trace: PipelineTrace) -> Table:
     busy = trace.busy_s
     concurrency = trace.concurrency
     descriptions = {
-        Lane.DRAM: "streaming operand tiles across the one modelled link",
+        Lane.DRAM: "operand tiles in, results out, across the one modelled link",
         Lane.SRAM: "tile buffers held from fetch to use",
         Lane.CORE: "arithmetic, plus one dispatch",
     }
@@ -492,10 +492,16 @@ def matmul(
         + ("" if out_dtype is None else " — widening accumulator"),
     )
     table.add_row(
-        "DRAM traffic",
-        format_bytes(op.dram_bytes),
-        "the three operands, less whatever stays on chip",
+        "DRAM reads",
+        format_bytes(op.dram_read_bytes),
+        "A and B, less whatever stays on chip",
     )
+    table.add_row(
+        "DRAM writes",
+        format_bytes(op.dram_write_bytes),
+        "C in full — nothing on chip consumes the result, so it must be written",
+    )
+    table.add_row("DRAM traffic", format_bytes(op.dram_bytes), "reads + writes")
     table.add_row(
         "intensity", f"{op.arithmetic_intensity:.1f} OP/byte", "operations / compulsory traffic"
     )

@@ -37,7 +37,7 @@ from timeline_html import Box, render
 
 import bwz
 from bwz.analysis import analyze, idealised, machine_model
-from bwz.analysis.pipeline import Lane, PipelineTrace, Span, build_trace
+from bwz.analysis.pipeline import Lane, PipelineTrace, Span, Stage, build_trace
 from bwz.graph import GraphPhase, build_graph
 from bwz.spec import DeploymentSpec, DType, HardwareSpec, MatmulSpec, load_chip
 from bwz.units import format_bandwidth, format_bytes, format_quantity, format_time
@@ -148,15 +148,19 @@ def _bars(ax: plt.Axes, rows: list[Row], spans: list[Span], window: tuple[float,
         for span in spans:
             if span.lane is not row.lane:
                 continue
+            # Stores are drawn hollow so the direction of DRAM traffic is
+            # visible at a glance: filled bars bring operands in, outlined bars
+            # take results out, and they never overlap because it is one port.
+            store = span.stage is Stage.STORE
             ax.add_patch(
                 Rectangle(
                     ((span.start_s - start) / width_s, index + 0.18),
                     max(span.duration_s / width_s, 0.0015),
                     0.64,
-                    facecolor=COLOUR[row.lane],
-                    edgecolor=SURFACE,
-                    linewidth=0.7,
-                    zorder=3,
+                    facecolor=SURFACE if store else COLOUR[row.lane],
+                    edgecolor=COLOUR[row.lane] if store else SURFACE,
+                    linewidth=1.1 if store else 0.7,
+                    zorder=4 if store else 3,
                 )
             )
 
@@ -191,9 +195,10 @@ def _boxes(trace: PipelineTrace, chip: HardwareSpec, dtype: DType) -> list[Box]:
     return [
         Box(
             "dram",
-            "COPIED FROM DRAM",
+            "MOVED OVER DRAM",
             format_bytes(totals[Lane.DRAM]),
-            f"{dram_rate} while active\n"
+            f"in {format_bytes(trace.direction_bytes[0])} · "
+            f"out {format_bytes(trace.direction_bytes[1])}\n{dram_rate} while active\n"
             f"{format_time(busy[Lane.DRAM])} — {busy[Lane.DRAM] / span:.0%} of the span",
         ),
         Box(
@@ -247,6 +252,7 @@ def write_html(
                 "lane": span.lane.value,
                 "start": span.start_s,
                 "end": span.end_s,
+                "store": span.stage is Stage.STORE,
                 "tip": _tip(span),
             }
             for span in trace.spans
@@ -281,7 +287,11 @@ def _quantity(row: Row, trace: PipelineTrace) -> str:
         if totals[Lane.DRAM] <= 0:
             return "0 B — nothing crossed"
         rate = totals[Lane.DRAM] / busy[Lane.DRAM] if busy[Lane.DRAM] else 0.0
-        return f"{format_bytes(totals[Lane.DRAM])} @ {format_bandwidth(rate)}"
+        reads, writes = trace.direction_bytes
+        return (
+            f"{format_bytes(totals[Lane.DRAM])} @ {format_bandwidth(rate)}\n"
+            f"in {format_bytes(reads)} · out {format_bytes(writes)}"
+        )
     if row.lane is Lane.SRAM:
         mean, peak = concurrency[Lane.SRAM]
         return f"{format_bytes(totals[Lane.SRAM])} in {peak} buffers (x{mean:.2f} avg)"
@@ -310,11 +320,12 @@ def _info_boxes(
     boxes = [
         (
             COLOUR[Lane.DRAM],
-            "COPIED FROM DRAM",
+            "MOVED OVER DRAM",
             format_bytes(totals[Lane.DRAM]),
+            f"in {format_bytes(trace.direction_bytes[0])} · "
+            f"out {format_bytes(trace.direction_bytes[1])}\n"
             f"{format_bandwidth(totals[Lane.DRAM] / busy[Lane.DRAM]) if busy[Lane.DRAM] else '—'}"
-            f" while active\n{format_time(busy[Lane.DRAM])} — {busy[Lane.DRAM] / span:.0%}"
-            f" of the span",
+            f" while active — {busy[Lane.DRAM] / span:.0%} of the span",
         ),
         (
             COLOUR[Lane.SRAM],

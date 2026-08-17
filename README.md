@@ -104,7 +104,9 @@ uv run bwz matmul -M 10000 -N 10000 -K 10000 --chip a100_80gb --dtype fp16 --ide
   intensity        3333.3 OP/byte    operations / compulsory traffic
   ridge point       153.0 OP/byte    above it the chip is compute-bound
   shape utilisation        99.84%    systolic tail on a 16x16 array — geometry, not a derating
-  t_dram                   264 µs
+  DRAM reads               370 MB    A and B, less whatever stays on chip
+  DRAM writes              200 MB    C in full — nothing on chip consumes it
+  t_dram                   279 µs
   t_compute               6.42 ms
   latency                 6.43 ms
   verdict           COMPUTE_BOUND

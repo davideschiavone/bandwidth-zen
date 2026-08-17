@@ -289,10 +289,26 @@ and not one nanosecond of arithmetic.
 `N = K = 10000` throughout. The last row is the whole point: the arithmetic fell by 10000× but the
 traffic did not fall at all, and a 16-row array running one row wastes fifteen of them.
 
-**Traffic is compulsory traffic.** Each operand is charged once — the traffic of a perfectly tiled
-schedule that reads every byte exactly once. Re-reads forced by a working set that does not fit
-on chip are **not** modelled; see §6.2. For a matmul that does not fit, the reported DRAM traffic
-is therefore a lower bound, and the reported latency with it.
+**Traffic is compulsory traffic, split by direction.** Each operand is charged once — the traffic
+of a perfectly tiled schedule that reads every byte exactly once — and reads and writes are charged
+separately, because they are not interchangeable:
+
+```
+read  = (1-r)·weight + (1-r_a)·(input + scratch)
+write = terminal_output + (1-r_a)·consumed_output
+```
+
+`terminal_output` is the share of the result that no later operation reads. For a standalone matmul
+that is all of `C`: it is the answer, so it must reach DRAM whatever the capacity, and discounting
+it by activation residency understated traffic (`docs/CORRECTIONS.md` D22). For a transformer's
+intermediate activation it is zero — the next operator consumes it on chip.
+
+The sharpest case: a 4096³ INT8 matmul on chip_a fetches **nothing** (55 MB of SRAM holds all of
+B) and still writes 16.8 MB.
+
+Re-reads forced by a working set that does not fit on chip are **not** modelled; see §6.2. For a
+matmul that does not fit, the reported DRAM traffic is therefore a lower bound, and the reported
+latency with it.
 
 `make plots` places these on the chip's roofline:
 [`plots/roofline-a100_80gb-fp16.png`](plots/roofline-a100_80gb-fp16.png). The figure plots
@@ -405,24 +421,26 @@ a buffer depth:
 
 ```
 depth            = 2 if double buffered else 1
-load_start(i)    = max(load_end(i-1), compute_end(i-depth))
+load_start(i)    = max(dram_free, store_end(i-depth))
 compute_start(i) = max(load_end(i), compute_end(i-1))
+store_start(i)   = max(compute_end(i), dram_free)
 ```
 
-The `compute_end(i-depth)` term is the buffer being *freed*. Drop it and the schedule quietly
-assumes infinite on-chip capacity, which is the thing capacity planning exists to prevent.
+`store_end(i-depth)` is the buffer being *freed* — a buffer is occupied until its result has been
+written out, not merely until the arithmetic ends. Drop that term and the schedule quietly assumes
+infinite on-chip capacity, which is the thing capacity planning exists to prevent.
 
-**What the schedule shows that the number hides.** Under double buffering it costs one extra step
-of the *non-binding* resource — fill when compute dominates, drain when DRAM does:
+The one port carries both directions, and **the next tile's fetch outranks this tile's
+write-back** — what a memory controller does with a write buffer. Drain stores first and the array
+stalls behind them, which silently cancels the double buffer: it did, in the first version, and
+SRAM occupancy fell from two buffers to one.
 
-```
-total = max(t_dram, t_compute) + min(t_dram, t_compute) / tiles
-```
-
-So `max(load, compute)` is the `tiles → ∞` limit, and the error it carries is
-`min(t_dram, t_compute)/tiles`. On a 4096³ fp16 matmul on A100 that is 720 ns against 635 µs
-(0.1%); on a decode projection, which is a handful of tiles, it is not small. Reported as
-`PipelineTrace.fill_drain_s` rather than folded into a latency. Without a double buffer the span is
+**What the schedule shows that the number hides.** Under double buffering it costs a load at the
+head and a store at the tail that nothing overlaps, so `max(load, compute)` is the `tiles → ∞`
+limit. The difference is reported as `PipelineTrace.fill_drain_s` — measured from the schedule
+rather than derived from a formula, so it cannot drift away from the scheduler — and it is 1.27 µs
+against 636 µs on a 4096³ fp16 matmul on A100 (0.2%). On a decode projection, which is a handful of
+tiles rather than thousands, it is not small. Without a double buffer the span is
 `t_dram + t_compute` exactly — there is nothing to hide when nothing overlaps.
 
 **A network does not pipeline against itself.** For anything but a single matmul the trace lays

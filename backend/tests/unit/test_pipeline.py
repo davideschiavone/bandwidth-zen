@@ -78,6 +78,7 @@ def test_lane_spans_sum_back_to_the_reported_terms() -> None:
     busy = trace.busy_s
 
     assert busy[Lane.DRAM] == pytest.approx(op.t_dram_s, rel=1e-9)
+    assert op.dram_read_bytes + op.dram_write_bytes == pytest.approx(op.dram_bytes)
     assert busy[Lane.CORE] == pytest.approx(op.t_compute_s + op.t_fixed_s, rel=1e-9)
 
 
@@ -142,24 +143,20 @@ def test_concurrency_reads_as_a_depth_not_a_duty_cycle() -> None:
     assert 1.9 < sram_mean <= 2.0
 
 
-def test_fill_drain_is_one_step_of_the_non_binding_resource() -> None:
-    """total = max(t_dram, t_compute) + min(t_dram, t_compute)/steps.
+def test_fill_drain_is_what_the_roofline_omits() -> None:
+    """The schedule costs more than `max(load, compute)` — a load at the head and
+    a store at the tail that nothing overlaps.
 
-    The roofline reports the max alone, so it is the steps -> infinity limit. On
-    a 10000^3 fp16 matmul over 64 drawn steps the omission is a fraction of a
-    percent; it is the *form* that matters, because a decode projection is a
-    handful of tiles rather than thousands.
+    The roofline reports the max alone, which is the many-tiles limit. Here it is
+    a fraction of a percent; on a decode projection, which is a handful of tiles
+    rather than thousands, it is not.
     """
     trace, report = _trace(_spec(10_000, 10_000, 10_000), "a100_80gb")
     op = report.phases[0].ops[0]
 
     assert op.t_dram_s > 0, "pick a shape that actually touches DRAM"
-    expected = min(op.t_dram_s, op.t_compute_s) / trace.steps
-    assert trace.fill_drain_s == pytest.approx(expected, rel=1e-9)
-    assert trace.total_s == pytest.approx(
-        max(op.t_dram_s, op.t_compute_s) + expected + op.t_fixed_s, rel=1e-9
-    )
     assert trace.total_s > trace.reported_latency_s
+    assert trace.fill_drain_s == pytest.approx(trace.total_s - trace.reported_latency_s, rel=1e-9)
 
 
 def test_operation_trace_reproduces_the_reported_latency_exactly() -> None:

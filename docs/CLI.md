@@ -65,9 +65,12 @@ uv run bwz matmul -M 10000 -N 10000 -K 10000 -c a100_80gb -d fp16 --ideal
 ```
 
 ```
+  DRAM reads                   370 MB
+  DRAM writes                  200 MB
   intensity            3333.3 OP/byte
   ridge point           153.0 OP/byte
   shape utilisation            99.84%
+  t_dram                       279 µs
   t_compute                   6.42 ms
   latency                     6.43 ms
   verdict               COMPUTE_BOUND
@@ -88,6 +91,8 @@ uv run bwz matmul -M 1 -N 10000 -K 10000 -c a100_80gb -d fp16 --ideal
 
 ```
   shape utilisation             5.88%
+  DRAM reads                   139 MB
+  DRAM writes                   20 kB
   latency                    71.3 µs
   verdict              DRAM_BW_BOUND
 ```
@@ -105,12 +110,16 @@ uv run bwz matmul -M 4096 -N 4096 -K 4096 -c a100_80gb -d fp16 --out fp32  --ide
 uv run bwz matmul -M 4096 -N 4096 -K 4096 -c a100_80gb --a fp16 --b int8   --ideal  # mixed
 ```
 
-| | operations | result C | intensity | latency |
-|---|---|---|---|---|
-| `int8 × int8 → int8` | 137 GOP | 16.8 MB | 2730.7 OP/byte | 224 µs |
-| `int8 × int8 → int32` | 137 GOP | **67.1 MB** | **1365.3 OP/byte** | 224 µs |
-| `fp16 × fp16 → fp32` | 137 GOP | 67.1 MB | 1024.0 OP/byte | 445 µs |
-| `fp16 × int8 → fp16` | 137 GOP | 33.6 MB | 1638.4 OP/byte | **445 µs** |
+| | operations | result C | DRAM read / written | intensity | latency |
+|---|---|---|---|---|---|
+| `int8 × int8 → int8` | 137 GOP | 16.8 MB | 0 B / 16.8 MB | 2730.7 OP/byte | 224 µs |
+| `int8 × int8 → int32` | 137 GOP | **67.1 MB** | 21.4 MB / 67.1 MB | **1365.3 OP/byte** | 224 µs |
+| `fp16 × fp16 → fp32` | 137 GOP | 67.1 MB | 46.9 MB / 67.1 MB | 1024.0 OP/byte | 445 µs |
+| `fp16 × int8 → fp16` | 137 GOP | 33.6 MB | 20 MB / 33.6 MB | 1638.4 OP/byte | **445 µs** |
+
+The read column shrinks as operands become resident; the write column never does. `C` is the
+answer, and on the first row A100 fetches **nothing** — both operands fit on chip — yet still
+writes all 16.8 MB of it (D22).
 
 Two rules, both visible above:
 
@@ -301,6 +310,7 @@ cd backend && uv run pytest tests/unit/test_pipeline.py::test_double_buffering_h
 | result width changes bytes only | §2.3 | `docs/CORRECTIONS.md` D18 |
 | mixed operands run at the wider | §2.3 | `docs/CORRECTIONS.md` D18 |
 | SRAM depth 1.97 of 2 buffers | §2.4 | `docs/MODEL.md` §6.5, D19 |
+| the result is always written back | §2.1, §2.3 | `docs/CORRECTIONS.md` D22 |
 | grey rows = the model's boundary | §5 | `docs/CORRECTIONS.md` D20 |
 | no Konata, no Kanata | — | `docs/CORRECTIONS.md` D21 |
 | 1.40% residency on chip_a | §3 | `docs/CORRECTIONS.md` D8, D15 |

@@ -77,6 +77,9 @@ class Stage(StrEnum):
     LOAD = "Ld"
     HOLD = "Hold"
     EXEC = "Ex"
+    STORE = "St"
+    """Writing the result back. A separate stage because it happens *after* the
+    arithmetic and shares the DRAM port with the next tile's load (D22)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,6 +172,14 @@ class PipelineTrace:
         return out
 
     @property
+    def direction_bytes(self) -> tuple[float, float]:
+        """``(read, written)`` over the DRAM lane. Two numbers rather than one
+        because a comparison cares which way the bus was busy."""
+        reads = sum(s.bytes_moved for s in self.spans if s.stage is Stage.LOAD)
+        writes = sum(s.bytes_moved for s in self.spans if s.stage is Stage.STORE)
+        return reads, writes
+
+    @property
     def concurrency(self) -> dict[Lane, tuple[float, int]]:
         """``(mean, peak)`` spans in flight per lane.
 
@@ -247,7 +258,11 @@ def _tile_trace(
     steps = min(tiles, max(1, max_steps))
     per_step = tiles / steps
 
-    load = result.t_dram_s / steps
+    # Split the DRAM time by direction: loads lead the arithmetic, stores trail
+    # it, and both queue on the one port.
+    traffic = result.dram_bytes or 1.0
+    load = result.t_dram_s * (result.dram_read_bytes / traffic) / steps
+    store = result.t_dram_s * (result.dram_write_bytes / traffic) / steps
     execute = result.t_compute_s / steps
     attrs = op.attrs
     assert isinstance(attrs, MatmulAttrs)
@@ -258,11 +273,13 @@ def _tile_trace(
     spans = _pipelined_tiles(
         [load] * steps,
         [execute] * steps,
+        [store] * steps,
         labels=[f"{label} [{i + 1}/{steps}]" for i in range(steps)],
         phase=phase.phase,
         dispatch_s=result.t_fixed_s,
         double_buffered=double_buffered,
-        bytes_per_step=[result.dram_bytes / steps] * steps,
+        bytes_per_step=[result.dram_read_bytes / steps] * steps,
+        stored_per_step=[result.dram_write_bytes / steps] * steps,
         flops_per_step=[result.flops / steps] * steps,
         # What one buffer holds: the B tile the array is stationary on, plus the
         # A rows streaming against it. Sized from the schedule, not asserted.
@@ -275,7 +292,10 @@ def _tile_trace(
         steps=steps,
         tiles=tiles,
         double_buffered=double_buffered,
-        fill_drain_s=(min(result.t_dram_s, result.t_compute_s) / steps if double_buffered else 0.0),
+        # Measured, not derived: with stores in the schedule the fill/drain is a
+        # load at the head plus a store at the tail, and a formula for it would
+        # be one more thing to keep in step with the scheduler.
+        fill_drain_s=max(0.0, max((s.end_s for s in spans), default=0.0) - result.latency_s),
         kind="tiles",
     )
 
@@ -330,7 +350,8 @@ def _operation_trace(
         phase=phase.phase,
         dispatch_s=dispatch,
         double_buffered=double_buffered,
-        bytes_per_step=[sum(r.dram_bytes for r in g) for g in groups],
+        bytes_per_step=[sum(r.dram_read_bytes for r in g) for g in groups],
+        stored_per_step=[sum(r.dram_write_bytes for r in g) for g in groups],
         flops_per_step=[sum(r.flops for r in g) for g in groups],
         resident_per_step=[max((r.weight_bytes for r in g), default=0.0) for g in groups],
     )
@@ -352,12 +373,14 @@ def _operation_trace(
 def _pipelined_tiles(
     loads: list[float],
     executes: list[float],
+    stores: list[float],
     *,
     labels: list[str],
     phase: GraphPhase,
     dispatch_s: float,
     double_buffered: bool,
     bytes_per_step: list[float],
+    stored_per_step: list[float],
     flops_per_step: list[float],
     resident_per_step: list[float],
 ) -> list[Span]:
@@ -374,16 +397,53 @@ def _pipelined_tiles(
         spans.append(Span(Lane.CORE, Stage.DISPATCH, "kernel dispatch", 0.0, dispatch_s, -1, phase))
 
     depth = 2 if double_buffered else 1
-    load_end = dispatch_s
+    dram_free = dispatch_s
     exec_end = dispatch_s
+    load_ends: list[float] = []
+    exec_starts: list[float] = []
     exec_ends: list[float] = []
+    store_ends: list[float] = []
+    store_starts: list[float] = []
+    load_starts: list[float] = []
+
+    def place_store(index: int) -> None:
+        """Drain one result, once it exists and once the port is free."""
+        nonlocal dram_free
+        start = max(exec_ends[index], dram_free)
+        store_starts.append(start)
+        dram_free = start + stores[index]
+        store_ends.append(dram_free)
+
     for i in range(steps):
-        freed = exec_ends[i - depth] if i >= depth else dispatch_s
-        load_start = max(load_end, freed)
+        # A buffer is free once its tile has been *written out*, not merely
+        # computed — the hold below runs to the store, so the reuse test must too.
+        freed = store_ends[i - depth] if i >= depth else dispatch_s
+        load_start = max(dram_free, freed)
         load_end = load_start + loads[i]
+        dram_free = load_end
+        load_starts.append(load_start)
+        load_ends.append(load_end)
+
         exec_start = max(load_end, exec_end)
         exec_end = exec_start + executes[i]
+        exec_starts.append(exec_start)
         exec_ends.append(exec_end)
+
+        # Issue order on the one port: the *next* tile's fetch outranks this
+        # tile's write-back, which is what a memory controller does with a write
+        # buffer. Draining stores first would stall the array behind them and
+        # quietly cancel the double buffer.
+        if i >= 1:
+            place_store(i - 1)
+    if steps:
+        place_store(steps - 1)
+
+    for i in range(steps):
+        load_start, load_end = load_starts[i], load_ends[i]
+        # Kept, not recomputed: `exec_ends[i] - executes[i]` can land a float
+        # hair before the previous span's end and read as an overlap.
+        exec_start, exec_end = exec_starts[i], exec_ends[i]
+        store_start, store_end = store_starts[i], store_ends[i]
 
         if loads[i] > 0:
             spans.append(
@@ -398,18 +458,18 @@ def _pipelined_tiles(
                     bytes_moved=bytes_per_step[i],
                 )
             )
-        # The tile occupies a buffer from the moment its fetch begins until the
-        # array is done with it. This lane is what makes double buffering
-        # visible: exactly `depth` bars overlap at any instant, so the SRAM row
-        # is busy for about `depth` times the span — which is the sense in which
-        # capacity, not bandwidth, is what SRAM contributes.
+        # A buffer is occupied from the moment its fetch begins until its result
+        # has been written out — not merely until the arithmetic ends. This lane
+        # is what makes double buffering visible: exactly `depth` bars overlap at
+        # any instant, which is the sense in which capacity, not bandwidth, is
+        # what SRAM contributes.
         spans.append(
             Span(
                 Lane.SRAM,
                 Stage.HOLD,
                 labels[i],
                 load_start,
-                exec_end,
+                store_end,
                 i,
                 phase,
                 resident_bytes=resident_per_step[i],
@@ -428,6 +488,19 @@ def _pipelined_tiles(
                     flops=flops_per_step[i],
                 )
             )
+        if stores[i] > 0:
+            spans.append(
+                Span(
+                    Lane.DRAM,
+                    Stage.STORE,
+                    labels[i],
+                    store_start,
+                    store_end,
+                    i,
+                    phase,
+                    bytes_moved=stored_per_step[i],
+                )
+            )
     return spans
 
 
@@ -441,6 +514,7 @@ def _serial_steps(
     dispatch_s: float,
     double_buffered: bool,
     bytes_per_step: list[float],
+    stored_per_step: list[float],
     flops_per_step: list[float],
     resident_per_step: list[float],
 ) -> list[Span]:
@@ -460,14 +534,20 @@ def _serial_steps(
     for i, (load, execute, duration) in enumerate(zip(loads, executes, durations, strict=True)):
         start = now
         end = start + duration
-        # Load leads, arithmetic trails: within a step the two overlap exactly as
-        # far as the double buffer allows, and the step ends when the arithmetic
-        # does.
-        load_end = start + load
-        exec_start = end - execute
+        # Within a step: operands in, arithmetic, result out. The step's length
+        # is the reported latency for those operations, so the three are placed
+        # inside it rather than summed — a decomposition, not a re-schedule.
+        share = stored_per_step[i] / ((bytes_per_step[i] + stored_per_step[i]) or 1.0)
+        store_time = load * share
+        load_time = load - store_time
+        load_end = start + load_time
+        store_start = end - store_time
+        # Clamped into the step: its length is the reported latency for these
+        # operations, and a decomposition may not run past what it decomposes.
+        exec_start = min(max(load_end, store_start - execute), max(start, end - execute))
         now = end
 
-        if load > 0:
+        if load_time > 0:
             spans.append(
                 Span(
                     Lane.DRAM,
@@ -499,10 +579,23 @@ def _serial_steps(
                     Stage.EXEC,
                     labels[i],
                     exec_start,
-                    end,
+                    exec_start + execute,
                     i,
                     phase,
                     flops=flops_per_step[i],
+                )
+            )
+        if store_time > 0:
+            spans.append(
+                Span(
+                    Lane.DRAM,
+                    Stage.STORE,
+                    labels[i],
+                    store_start,
+                    end,
+                    i,
+                    phase,
+                    bytes_moved=stored_per_step[i],
                 )
             )
     return spans

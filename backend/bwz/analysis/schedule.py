@@ -35,6 +35,11 @@ def run_phase(
     counting per-op verdicts: an operation that is latency-bound but takes 3 µs
     should not outvote one that is DRAM-bound and takes 3 ms.
     """
+    # A tensor no operation reads has to leave the chip: it is the answer. This
+    # is the only place the *shape of the graph* enters the traffic model, and it
+    # is why a standalone matmul writes all of C while a transformer's
+    # intermediate activation may write none of it (D22).
+    consumed = {name for op in graph.ops for name in op.inputs}
     results = tuple(
         op_roofline(
             op,
@@ -43,6 +48,9 @@ def run_phase(
             resident_fraction=resident_fraction,
             activation_resident_fraction=activation_resident_fraction,
             double_buffered=double_buffered,
+            terminal_output_bytes=sum(
+                graph.tensors[name].size_bytes for name in op.outputs if name not in consumed
+            ),
         )
         for op in graph.ops
     )
@@ -53,6 +61,8 @@ def run_phase(
     latency = sum(r.latency_s for r in results)
     flops = sum(r.flops for r in results)
     dram_bytes = sum(r.dram_bytes for r in results)
+    read_bytes = sum(r.dram_read_bytes for r in results)
+    write_bytes = sum(r.dram_write_bytes for r in results)
 
     achieved = flops / latency if latency > 0 else 0.0
     return PhaseResult(
@@ -60,6 +70,8 @@ def run_phase(
         latency_s=latency,
         flops=flops,
         dram_bytes=dram_bytes,
+        dram_read_bytes=read_bytes,
+        dram_write_bytes=write_bytes,
         t_dram_s=t_dram,
         t_compute_s=t_compute,
         t_fixed_s=t_fixed,

@@ -70,6 +70,12 @@ class OpResult:
     t_fixed_s: float
     latency_s: float
     bound: Bound
+    dram_read_bytes: float = 0.0
+    """Operands fetched from DRAM."""
+    dram_write_bytes: float = 0.0
+    """Results written back. Split from reads because the two are not
+    interchangeable: a write happens *after* the arithmetic that produced it, and
+    a result nothing on chip consumes must reach DRAM whatever the capacity."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,6 +124,8 @@ class PhaseResult:
     latency_s: float
     flops: float
     dram_bytes: float
+    dram_read_bytes: float
+    dram_write_bytes: float
     t_dram_s: float
     t_compute_s: float
     t_fixed_s: float

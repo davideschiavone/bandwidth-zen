@@ -77,6 +77,7 @@ TEMPLATE = """<!doctype html>
 <div class="boxes">{boxes}</div>
 <p class="hint">Rows are hardware resources, not steps. <b>Wheel</b> zooms about the cursor ·
 <b>drag</b> pans · <b>double-click</b> resets · <b>hover</b> a bar for its own numbers.
+Filled bars on the DRAM row are loads, hollow ones are results written back.
 Grey rows are declared by the chip and unused by this model.</p>
 <div id="wrap"><svg id="chart"></svg><div id="tip"></div></div>
 <footer>{footer}</footer>
@@ -163,9 +164,14 @@ function draw() {{
       if (s.lane !== row.lane) continue;
       if (s.end < view.lo || s.start > view.hi) continue;
       const x0 = Math.max(x(s.start), LEFT), x1 = Math.min(x(s.end), width - RIGHT);
+      // Stores hollow, loads filled: the direction of DRAM traffic should be
+      // readable without a legend, and they never overlap because it is one port.
+      const store = s.store;
       const rect = el("rect", {{
         x: x0, y: y0 + 7, width: Math.max(x1 - x0, 1.2), height: ROW - 16,
-        fill: COLOUR[row.lane], stroke: "var(--surface)", "stroke-width": 0.7,
+        fill: store ? "var(--surface)" : COLOUR[row.lane],
+        stroke: store ? COLOUR[row.lane] : "var(--surface)",
+        "stroke-width": store ? 1.2 : 0.7,
       }});
       rect.dataset.tip = s.tip;
       svg.appendChild(rect);

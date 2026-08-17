@@ -570,3 +570,51 @@ What was actually lost with Konata: nothing this project needs. What was gained 
 pinned-release script, a port allocator and a cache validator, all now deleted. The lesson worth
 keeping is that reaching for a third-party viewer imported its data model along with its features,
 and the data model was the part that did not fit.
+
+---
+
+## D22 — DRAM traffic is split by direction, and the result is always written back (2026-08-17)
+
+Asked where the write-back transactions were in the timeline. They were nowhere: every DRAM span
+was a `Ld`, drawn *before* the arithmetic, and `C`'s bytes were folded into those load bars. Three
+faults behind one question.
+
+**1. The result was discounted by activation residency.** `op_roofline` lumped inputs, outputs and
+scratch into one "activation" pool and applied `activation_resident_fraction` to all of it. For a
+transformer that is right — an intermediate activation really can stay on chip for the next
+operator to read. For a standalone matmul it is not: `C` is the answer, and nothing on chip
+consumes it. The 10000³ fp16 case on A100 kept 30.4 MB of the result on a chip nobody reads it
+from, understating traffic by 5.6%.
+
+Now `schedule.py` computes, per operation, the share of its outputs that **no later operation
+reads** — the only place the shape of the graph enters the traffic model — and `op_roofline`
+charges that share in full:
+
+```
+read  = (1-r)·weight + (1-r_a)·(input + scratch)
+write = terminal_output + (1-r_a)·consumed_output
+```
+
+The 10000³ goes from 539 MB to 570 MB (370 read + 200 written). The sharpest case is chip_a's
+4096³ INT8: it fetches **nothing**, because 55 MB of SRAM holds all of B, and still writes 16.8 MB.
+Its DRAM row read `0 B — nothing crossed` before, which was simply false.
+
+**2. The schedule had no store stage.** `Stage.STORE` now follows the arithmetic that produced it,
+on the same DRAM lane, and `OpResult`/`PhaseResult` carry `dram_read_bytes` and `dram_write_bytes`.
+The figures draw loads filled and stores hollow, so the direction is readable without a legend.
+
+**3. Ordering on the one port matters, and got it wrong first.** Making loads queue behind stores
+dropped SRAM occupancy from two buffers to one — the write-back of tile *i* delayed the fetch of
+tile *i+1*, cancelling the double buffer the capacity planner had granted. The fix is the policy a
+memory controller actually uses: **the next tile's fetch outranks this tile's write-back**, with
+the store draining afterwards. A buffer is also held until its result is written, not merely until
+the arithmetic ends, so the reuse test now keys on `store_end(i-depth)`.
+
+`fill_drain_s` is now measured from the schedule rather than derived from a formula, since with
+stores in it the head-and-tail cost is no longer one clean term.
+
+Not fixed, and still open: the capacity check counts only the **B tile** (`rows × cols × bytes` —
+512 B for A100 fp16). The A tile streaming through it and the C tile accumulating out of it are not
+counted, so "do the three tiles fit together" is not actually verified. At M=10000 the real working
+set is ~640 KB against the 512 B reserved. Nothing moves on the shipped profiles, but on a small
+buffer `double_buffered` could come back true when three tiles do not fit.

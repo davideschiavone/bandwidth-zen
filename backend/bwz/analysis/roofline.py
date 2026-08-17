@@ -138,6 +138,7 @@ def op_roofline(
     resident_fraction: float,
     activation_resident_fraction: float,
     double_buffered: bool,
+    terminal_output_bytes: float = 0.0,
 ) -> OpResult:
     """Predict one operation's latency and name what limits it.
 
@@ -146,10 +147,17 @@ def op_roofline(
     average". A ``LATENCY_BOUND`` operation is one where the dispatch costs more
     than the work.
     """
-    activation_bytes = cost.input_bytes + cost.output_bytes + cost.scratch_bytes
-    dram_bytes = (1.0 - resident_fraction) * cost.weight_bytes + (
+    # Reads and writes are charged separately because they are not
+    # interchangeable. `terminal_output_bytes` is the share of this operation's
+    # result that no later operation reads, and it must reach DRAM however much
+    # capacity there is: for a standalone matmul that is the whole of C, and
+    # discounting it by activation residency understated traffic (D22).
+    resident_output = max(0.0, cost.output_bytes - terminal_output_bytes)
+    read_bytes = (1.0 - resident_fraction) * cost.weight_bytes + (
         1.0 - activation_resident_fraction
-    ) * activation_bytes
+    ) * (cost.input_bytes + cost.scratch_bytes)
+    write_bytes = terminal_output_bytes + (1.0 - activation_resident_fraction) * resident_output
+    dram_bytes = read_bytes + write_bytes
     t_dram = dram_bytes / machine.effective_bandwidth_bytes_per_s
 
     utilisation = operation_utilisation(op, machine.unit)
@@ -170,6 +178,8 @@ def op_roofline(
         flops=cost.flops,
         weight_bytes=cost.weight_bytes,
         dram_bytes=dram_bytes,
+        dram_read_bytes=read_bytes,
+        dram_write_bytes=write_bytes,
         arithmetic_intensity=cost.arithmetic_intensity,
         utilization=utilisation,
         t_dram_s=t_dram,
