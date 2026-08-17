@@ -21,7 +21,8 @@ in its own `plots` dependency group, so `make test` does not pull it in.
 | `roofline-<chip>-<dtype>.png` | `plot_roofline.py` | The two ceilings, the ridge point, the M=1 tail line, and a set of workloads placed on them |
 | `machine-<chip>.png` | `plot_roofline.py` | The three-element machine (D5a) — DRAM, SRAM-as-capacity, array — and which link carries a bandwidth number |
 | `timeline-<chip>-<dtype>.png` | `plot_pipeline.py` | Where the time went, per hardware resource, with the bytes and operations on each row |
-| `timeline-<chip>-<dtype>.html` | `plot_pipeline.py --html` | The same, **zoomable** |
+| `timeline-<chip>-<dtype>.html` | `plot_pipeline.py --html` | The same, **zoomable**, with the roofline for that run below it |
+| `timeline-<chip>-<model>-<phase>-<dtype>.*` | `plot_pipeline.py --model` | A network instead of a matmul, one figure per phase |
 
 **Figures are not the report.** These show where the time went; the numbers, their derivations and
 the assumptions drawer come from `bwz matmul` / `bwz run`, and the plot scripts print only
@@ -40,8 +41,11 @@ xdg-open docs/plots/timeline-a100_80gb-fp16.html
 a **new tab in an existing window** rather than a new window.
 
 - **wheel** zooms about the cursor · **drag** pans · **double-click** resets
-- **hover** a bar for its own numbers: `1526 B tiles 16x16 [1/256] · 3 µs + 1.03 µs ·
-  2.11 MB @ 2.04 TB/s`
+- **hover** a bar and the tooltip names the transaction: `LOAD — operands in`,
+  `STORE — result written back`, `EXEC — matmul`, `HOLD — on chip`, each with its bytes or
+  operations and the rate
+- below the timeline, the same run's place on the **roofline**: both ceilings, the ridge point, the
+  M=1 tail line, and this workload as a labelled point
 
 It carries 256 steps against the PNG's 32 (`--html-steps`), because a static figure has to stay
 legible at one scale and a zoomable one does not.
@@ -67,14 +71,21 @@ declared depth, and `--ideal` leaves it exactly where it is.
 declares, not one row per step. That is the axis a comparison needs: "what was the memory system
 doing while the array worked" rather than "what happened to this tile".
 
-Three info boxes carry the headline quantities — bytes copied from DRAM and at what rate, bytes
-held on chip and in how many buffers, operations computed and at what fraction of peak — and each
-row repeats its own share to the right.
+Three info boxes carry the headline quantities, and each row repeats its own share to the right:
+
+- **MOVED OVER DRAM** — `LOAD 15 GB · STORE 322 kB`, the rate while active, and the share of the
+  span. The two directions are named because they are not interchangeable: a store happens after
+  the arithmetic that produced it, and a result nothing consumes must be written (D22).
+- **HELD ON CHIP** — bytes, in how many buffers, against capacity.
+- **COMPUTED — matmul 98% · attention 2%** — the operator families that did the arithmetic,
+  biggest first. "15.3 GOP" does not say whether that was one matmul or a decode step's worth of
+  matmul, attention and norms, and for a comparison the mixture is the point.
 
 **Grey rows are declared by the chip and unused by this model.** A100 has 40 MB of L2 and 6912 CUDA
 cores that the v1 roofline never spends; drawing them idle puts the model's boundary on the page
 instead of hiding it. Next to `chip_a`, whose 55 MB of SRAM holds all of operand B and whose DRAM
-row reads `0 B — nothing crossed`, that contrast *is* the architecture comparison.
+row reads `LOAD 0 B · STORE 16.8 MB` — it fetches nothing because 55 MB of SRAM holds all of B, and
+still has to write the answer out — that contrast *is* the architecture comparison.
 
 The right-hand figure carries a different unit per lane. DRAM and the array are single serial
 resources, so theirs is a **duty cycle** — the fraction of the span they were busy, never above
@@ -90,7 +101,7 @@ The spans are a **decomposition** of the reported latency, not a second model �
 `t_dram`, core busy to `t_compute + t_fixed`, and the tile count is the same one the utilisation
 figure divides by. The one thing the picture adds is pipeline fill/drain, which the roofline's
 `max(load, compute)` omits; it is stated on the figure rather than folded in. See
-[`../MODEL.md`](../MODEL.md) §6.5 and [`../CORRECTIONS.md`](../CORRECTIONS.md) D19–D21.
+[`../MODEL.md`](../MODEL.md) §6.5 and [`../CORRECTIONS.md`](../CORRECTIONS.md) D19–D22.
 
 ## Adding a chip
 

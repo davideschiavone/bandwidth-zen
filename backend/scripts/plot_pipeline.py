@@ -38,8 +38,10 @@ from timeline_html import Box, render
 import bwz
 from bwz.analysis import analyze, idealised, machine_model
 from bwz.analysis.pipeline import Lane, PipelineTrace, Span, Stage, build_trace
-from bwz.graph import GraphPhase, build_graph
-from bwz.spec import DeploymentSpec, DType, HardwareSpec, MatmulSpec, load_chip
+from bwz.analysis.roofline import compute_dtype
+from bwz.graph import GraphPhase, build_graph, build_graphs
+from bwz.report import Bound
+from bwz.spec import DeploymentSpec, DType, HardwareSpec, MatmulSpec, load_chip, load_model
 from bwz.units import format_bandwidth, format_bytes, format_quantity, format_time
 
 matplotlib.use("Agg")
@@ -54,6 +56,18 @@ BOX = "#f2f1ed"
 # buffer. Three roles, not eight, and every row is directly labelled.
 COLOUR = {Lane.DRAM: "#2a78d6", Lane.SRAM: "#8a8983", Lane.CORE: "#eb6834"}
 IDLE = "#e6e5e1"
+
+
+@dataclass(frozen=True)
+class Workload:
+    """What was run, and the four numbers the roofline needs to place it."""
+
+    name: str
+    trace: PipelineTrace
+    flops: float
+    dram_bytes: float
+    latency_s: float
+    bound: Bound
 
 
 @dataclass(frozen=True)
@@ -184,6 +198,22 @@ def _ticks(ax: plt.Axes, end: float, count: int) -> None:
     ax.set_xticklabels([format_time(f * end) for f in fractions], fontsize=8.5)
 
 
+def _op_mix(trace: PipelineTrace) -> str:
+    """The operator families that did the arithmetic, biggest first.
+
+    "137 GOP" does not say whether that was one matmul or a decode step's worth of
+    matmul, attention and norms, and for a comparison the mixture is the point.
+    """
+    rows = [(name, flops) for name, flops, _ in trace.work_by_op if flops > 0]
+    if not rows:
+        return "no arithmetic"
+    total = sum(flops for _, flops in rows) or 1.0
+    shown = [f"{name} {flops / total:.0%}" for name, flops in rows[:3] if flops / total >= 0.005]
+    if len(rows) == 1:
+        return rows[0][0]
+    return " · ".join(shown) if shown else rows[0][0]
+
+
 def _boxes(trace: PipelineTrace, chip: HardwareSpec, dtype: DType) -> list[Box]:
     """The three headline figures, shared by the PNG and the HTML."""
     totals, busy, concurrency = trace.totals, trace.busy_s, trace.concurrency
@@ -197,20 +227,21 @@ def _boxes(trace: PipelineTrace, chip: HardwareSpec, dtype: DType) -> list[Box]:
             "dram",
             "MOVED OVER DRAM",
             format_bytes(totals[Lane.DRAM]),
-            f"in {format_bytes(trace.direction_bytes[0])} · "
-            f"out {format_bytes(trace.direction_bytes[1])}\n{dram_rate} while active\n"
+            f"LOAD {format_bytes(trace.direction_bytes[0])} · "
+            f"STORE {format_bytes(trace.direction_bytes[1])}\n{dram_rate} while active\n"
             f"{format_time(busy[Lane.DRAM])} — {busy[Lane.DRAM] / span:.0%} of the span",
         ),
         Box(
             "sram",
             "HELD ON CHIP",
             format_bytes(totals[Lane.SRAM]),
-            f"{buffers} buffers x {format_bytes(totals[Lane.SRAM] / buffers)}\n"
+            f"{buffers} buffer{'s' if buffers != 1 else ''} x "
+            f"{format_bytes(totals[Lane.SRAM] / buffers)}\n"
             f"of {format_bytes(chip.on_chip_capacity_bytes)} capacity",
         ),
         Box(
             "core",
-            "COMPUTED",
+            f"COMPUTED — {_op_mix(trace)}",
             format_quantity(totals[Lane.CORE], "OP"),
             f"{format_quantity(core_rate, 'OP/s')} of {format_quantity(peak, 'OP/s')} peak\n"
             f"{format_time(busy[Lane.CORE])} — {busy[Lane.CORE] / span:.0%} of the span",
@@ -218,18 +249,60 @@ def _boxes(trace: PipelineTrace, chip: HardwareSpec, dtype: DType) -> list[Box]:
     ]
 
 
+def _roofline_data(chip: HardwareSpec, dtype: DType, work: Workload) -> dict[str, object]:
+    """The ceilings and this workload's place under them.
+
+    Both roofs are drawn: the datasheet one and, when the profile derates, the
+    fitted-constants one — the gap between them is the unfitted part of any
+    prediction. The point's x is intensity against **DRAM** traffic, not
+    compulsory traffic, so residency moves it right exactly as it does on the PNG.
+    """
+    datasheet = machine_model(idealised(chip), dtype)
+    derated = machine_model(chip, dtype)
+    dims = datasheet.unit.systolic_dims
+    tail = datasheet.effective_flops_per_s / (1 + dims[0]) if dims else 0.0
+
+    intensity = work.flops / work.dram_bytes if work.dram_bytes > 0 else 0.0
+    achieved = work.flops / work.latency_s if work.latency_s > 0 else 0.0
+    return {
+        "peak": datasheet.effective_flops_per_s,
+        "bw": datasheet.effective_bandwidth_bytes_per_s,
+        "derated_peak": derated.effective_flops_per_s,
+        "derated_bw": derated.effective_bandwidth_bytes_per_s,
+        "tail": tail,
+        "x_lo": 0.1,
+        "x_hi": max(1e4, intensity * 3 if intensity else 1e4),
+        "y_lo": datasheet.effective_flops_per_s / 3e3,
+        "y_hi": datasheet.effective_flops_per_s * 3,
+        "points": [
+            {
+                "ai": max(intensity, 0.11),
+                "achieved": max(achieved, 1.0),
+                "label": work.bound.value.replace("_", " ").lower(),
+                "tip": (
+                    f"{work.name}\n"
+                    f"{format_quantity(work.flops, 'OP')} over "
+                    f"{format_bytes(work.dram_bytes)} of DRAM traffic\n"
+                    f"{intensity:.1f} OP/byte · {format_quantity(achieved, 'OP/s')}\n"
+                    f"ridge {datasheet.ridge_point:.0f} OP/byte — {work.bound.value}"
+                ),
+            }
+        ],
+    }
+
+
 def write_html(
     chip: HardwareSpec,
     dtype: DType,
-    trace: PipelineTrace,
-    spec: MatmulSpec,
+    work: Workload,
     command: str,
     out: Path,
 ) -> None:
     """The same figure, zoomable, as one self-contained file."""
+    trace = work.trace
     rows = rows_for(chip, dtype)
     page = render(
-        title=f"{chip.name} — {spec.name} at {dtype.value}",
+        title=f"{chip.name} — {work.name} at {dtype.value}",
         subtitle=_subtitle(trace),
         footer=(
             f"bwz {bwz.__version__}{_git()} — every bar is a slice of the reported latency: "
@@ -247,6 +320,7 @@ def write_html(
             }
             for row in rows
         ],
+        roofline=_roofline_data(chip, dtype, work),
         spans=[
             {
                 "lane": span.lane.value,
@@ -290,14 +364,18 @@ def _quantity(row: Row, trace: PipelineTrace) -> str:
         reads, writes = trace.direction_bytes
         return (
             f"{format_bytes(totals[Lane.DRAM])} @ {format_bandwidth(rate)}\n"
-            f"in {format_bytes(reads)} · out {format_bytes(writes)}"
+            f"LOAD {format_bytes(reads)} · STORE {format_bytes(writes)}"
         )
     if row.lane is Lane.SRAM:
         mean, peak = concurrency[Lane.SRAM]
-        return f"{format_bytes(totals[Lane.SRAM])} in {peak} buffers (x{mean:.2f} avg)"
+        plural = "buffers" if peak != 1 else "buffer"
+        return f"{format_bytes(totals[Lane.SRAM])} in {peak} {plural} (x{mean:.2f} avg)"
     if row.lane is Lane.CORE:
         rate = totals[Lane.CORE] / busy[Lane.CORE] if busy[Lane.CORE] else 0.0
-        return f"{format_quantity(totals[Lane.CORE], 'OP')} @ {format_quantity(rate, 'OP/s')}"
+        return (
+            f"{format_quantity(totals[Lane.CORE], 'OP')} @ {format_quantity(rate, 'OP/s')}\n"
+            f"{_op_mix(trace)}"
+        )
     return "not used"
 
 
@@ -322,8 +400,8 @@ def _info_boxes(
             COLOUR[Lane.DRAM],
             "MOVED OVER DRAM",
             format_bytes(totals[Lane.DRAM]),
-            f"in {format_bytes(trace.direction_bytes[0])} · "
-            f"out {format_bytes(trace.direction_bytes[1])}\n"
+            f"LOAD {format_bytes(trace.direction_bytes[0])} · "
+            f"STORE {format_bytes(trace.direction_bytes[1])}\n"
             f"{format_bandwidth(totals[Lane.DRAM] / busy[Lane.DRAM]) if busy[Lane.DRAM] else '—'}"
             f" while active — {busy[Lane.DRAM] / span:.0%} of the span",
         ),
@@ -331,12 +409,13 @@ def _info_boxes(
             COLOUR[Lane.SRAM],
             "HELD ON CHIP",
             format_bytes(totals[Lane.SRAM]),
-            f"{buffers} buffers x {format_bytes(totals[Lane.SRAM] / buffers)}\n"
+            f"{buffers} buffer{'s' if buffers != 1 else ''} x "
+            f"{format_bytes(totals[Lane.SRAM] / buffers)}\n"
             f"of {format_bytes(chip.on_chip_capacity_bytes)} capacity",
         ),
         (
             COLOUR[Lane.CORE],
-            "COMPUTED",
+            f"COMPUTED — {_op_mix(trace)}",
             format_quantity(totals[Lane.CORE], "OP"),
             f"{format_quantity(core_rate, 'OP/s')} of {format_quantity(peak, 'OP/s')} peak\n"
             f"{format_time(busy[Lane.CORE])} — {busy[Lane.CORE] / span:.0%} of the span",
@@ -379,8 +458,7 @@ def _info_boxes(
 def draw(
     chip: HardwareSpec,
     dtype: DType,
-    trace: PipelineTrace,
-    spec: MatmulSpec,
+    work: Workload,
     command: str,
     out: Path,
     zoom_steps: int,
@@ -391,6 +469,7 @@ def draw(
     so every vertical position is derived from it rather than guessed as a
     fraction, which is what stops the second register from landing on the footer.
     """
+    trace = work.trace
     rows = rows_for(chip, dtype)
     row_h, header, gap, footer = 0.48, 3.05, 1.15, 1.05
     band = row_h * len(rows)
@@ -453,7 +532,7 @@ def draw(
     fig.text(
         0.038,
         y(0.50),
-        f"{chip.name} — {spec.name} at {dtype.value}",
+        f"{chip.name} — {work.name} at {dtype.value}",
         fontsize=16,
         fontweight="bold",
         color=INK,
@@ -523,7 +602,12 @@ def _subtitle(trace: PipelineTrace) -> str:
         if trace.coalesced
         else f"{trace.steps} tile steps. "
     )
-    if not trace.double_buffered:
+    if trace.kind == "operations":
+        buffering = (
+            "Operations do not pipeline against each other in this model (D5a), so the span is "
+            "the reported latency exactly."
+        )
+    elif not trace.double_buffered:
         buffering = "No double buffer: loads and arithmetic alternate."
     elif trace.fill_drain_s > 0:
         buffering = (
@@ -548,9 +632,7 @@ def _git() -> str:
     return f" @ {sha}"
 
 
-def build(
-    chip: HardwareSpec, m: int, n: int, k: int, dtype: DType, steps: int
-) -> tuple[PipelineTrace, MatmulSpec]:
+def build_matmul(chip: HardwareSpec, m: int, n: int, k: int, dtype: DType, steps: int) -> Workload:
     spec = MatmulSpec.model_validate(
         {
             "id": "p",
@@ -574,7 +656,49 @@ def build(
         double_buffered=report.memory.double_buffered,
         max_steps=steps,
     )
-    return trace, spec
+    op = report.phases[0].ops[0]
+    return Workload(spec.name, trace, op.flops, op.dram_bytes, op.latency_s, op.bound)
+
+
+def build_model(
+    chip: HardwareSpec, model_id: str, tokens: int, dtype: DType, steps: int
+) -> list[Workload]:
+    """One workload per phase: prefill and decode are different machines, so they
+    get different figures rather than being averaged onto one axis."""
+    model = load_model(model_id)
+    deployment = DeploymentSpec.model_validate(
+        {
+            "batch": 1,
+            "input_tokens": tokens,
+            "output_tokens": 1,
+            "precision": {"weights": dtype, "activations": dtype, "kv_cache": dtype},
+        }
+    )
+    report = analyze(model, chip, deployment)
+    if not report.feasible:
+        raise SystemExit(f"bwz: infeasible on {chip.id}: {report.infeasibility[0]}")
+    machine = machine_model(chip, compute_dtype(chip, dtype, dtype))
+    graphs = build_graphs(model, deployment)
+    out = []
+    for phase in report.phases:
+        trace = build_trace(
+            graphs[phase.phase],
+            phase,
+            machine,
+            double_buffered=report.memory.double_buffered,
+            max_steps=steps,
+        )
+        out.append(
+            Workload(
+                f"{model.name} {phase.phase.value} S={tokens}",
+                trace,
+                phase.flops,
+                phase.dram_bytes,
+                phase.latency_s,
+                phase.bound,
+            )
+        )
+    return out
 
 
 def _default_dtype(chip: HardwareSpec) -> DType:
@@ -588,6 +712,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--chip", action="append", default=None, help="Chip id; repeatable")
     parser.add_argument("--matmul", default="4096,4096,4096", metavar="M,N,K")
+    parser.add_argument(
+        "--model", default=None, help="Draw a model instead of a matmul; one figure per phase"
+    )
+    parser.add_argument("--tokens", type=int, default=512, help="Prefill length for --model")
     parser.add_argument("--weights", default=None, help="Precision; defaults per chip")
     parser.add_argument("--ideal", action="store_true", help="Both de-ratings at 1.0")
     parser.add_argument("--steps", type=int, default=32, help="Steps to draw")
@@ -606,33 +734,49 @@ def main() -> None:
     m, n, k = (int(part) for part in args.matmul.split(","))
     command = "uv run --group plots python " + " ".join(shlex.quote(a) for a in sys.argv)
 
+    def slug(chip: HardwareSpec, dtype: DType, work: Workload, index: int) -> str:
+        """File stem. A model gets one figure per phase, so the phase is in the name."""
+        if args.model is None:
+            return f"{chip.id}-{dtype.value}"
+        phase = work.trace.spans[0].phase.value if work.trace.spans else str(index)
+        return f"{chip.id}-{args.model}-{phase}-{dtype.value}"
+
     for chip_id in args.chip or ["a100_80gb", "chip_a"]:
         chip = load_chip(chip_id)
         if args.ideal:
             chip = idealised(chip)
         dtype = DType(args.weights) if args.weights else _default_dtype(chip)
-        trace, spec = build(chip, m, n, k, dtype, args.steps)
-        draw(
-            chip,
-            dtype,
-            trace,
-            spec,
-            command,
-            args.out / f"timeline-{chip.id}-{dtype.value}.png",
-            args.zoom,
+
+        coarse = (
+            build_model(chip, args.model, args.tokens, dtype, args.steps)
+            if args.model
+            else [build_matmul(chip, m, n, k, dtype, args.steps)]
         )
+        for index, work in enumerate(coarse):
+            draw(
+                chip,
+                dtype,
+                work,
+                command,
+                args.out / f"timeline-{slug(chip, dtype, work, index)}.png",
+                args.zoom,
+            )
         if args.html:
             # A separate, finer trace: the PNG stays readable at 32 steps while
             # the page has something to zoom into.
-            fine, _ = build(chip, m, n, k, dtype, args.html_steps)
-            write_html(
-                chip,
-                dtype,
-                fine,
-                spec,
-                command,
-                args.out / f"timeline-{chip.id}-{dtype.value}.html",
+            fine = (
+                build_model(chip, args.model, args.tokens, dtype, args.html_steps)
+                if args.model
+                else [build_matmul(chip, m, n, k, dtype, args.html_steps)]
             )
+            for index, work in enumerate(fine):
+                write_html(
+                    chip,
+                    dtype,
+                    work,
+                    command,
+                    args.out / f"timeline-{slug(chip, dtype, work, index)}.html",
+                )
 
 
 if __name__ == "__main__":

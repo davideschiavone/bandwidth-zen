@@ -618,3 +618,28 @@ Not fixed, and still open: the capacity check counts only the **B tile** (`rows 
 counted, so "do the three tiles fit together" is not actually verified. At M=10000 the real working
 set is ~640 KB against the 512 B reserved. Nothing moves on the shipped profiles, but on a small
 buffer `double_buffered` could come back true when three tiles do not fit.
+
+---
+
+## D23 — The timeline names its transactions, its operators, and carries the roofline (2026-08-17)
+
+Three additions, all from the same complaint: a bar with no label is a shape, not a measurement.
+
+**Direction is named, not implied.** The DRAM box and row read `LOAD 15 GB · STORE 322 kB`, and a
+hover gives `LOAD — operands in` or `STORE — result written back`. Filled bars are loads, hollow
+ones stores. D22 made the two quantities exist; this makes them readable.
+
+**The compute box names the operators.** `COMPUTED — matmul 98% · attention 2%`. "15.3 GOP" does
+not say whether that was one matmul or a decode step's worth of matmul, attention, norms and
+elementwise, and for a comparison the mixture is the point. `PipelineTrace.work_by_op` is built
+from the operation results rather than the drawn spans — coalescing 451 nodes into 57 blocks and
+taking each block's dominant family reported *only* matmul, which is exactly the information the
+box exists to avoid losing.
+
+**`--model` draws a network**, one figure per phase, which is what gives the breakdown something to
+break down. Llama-3-8B decode on A100: DRAM 92% busy against compute at 21%, `matmul 98% ·
+attention 2%`, `LOAD 15 GB · STORE 322 kB` — memory-bound, visibly, in one picture.
+
+**The HTML carries the roofline too.** Same page, below the timeline: both ceilings, the ridge
+point, the M=1 tail line, and the run as a labelled point with its intensity and achieved rate on
+hover. Two views of one run in one file — where the time went, and why it had to.

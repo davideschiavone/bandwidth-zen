@@ -247,8 +247,17 @@ uv run --group plots python scripts/plot_pipeline.py --chip h100_sxm --matmul 81
 
 `plot_roofline.py`: `--chip`, `--weights`, `--matmul M,N,K` (repeatable), `--model ID`
 (repeatable), `--tokens`, `--out`.
-`plot_pipeline.py`: `--chip` (repeatable), `--matmul M,N,K`, `--weights`, `--ideal`, `--steps`,
-`--zoom`, `--html`, `--html-steps`, `--out`.
+`plot_pipeline.py`: `--chip` (repeatable), `--matmul M,N,K`, `--model ID`, `--tokens`, `--weights`,
+`--ideal`, `--steps`, `--zoom`, `--html`, `--html-steps`, `--out`.
+
+`--model` draws a network instead of a matmul, one figure per phase — which is where the
+`COMPUTED — matmul 98% · attention 2%` breakdown earns itself:
+
+```bash
+uv run --group plots python scripts/plot_pipeline.py \
+  --chip a100_80gb --model llama3_8b --tokens 512 --html --out ..
+# timeline-a100_80gb-llama3_8b-{prefill,decode}-fp16.{png,html}
+```
 
 `--out` is relative to where you run the script, so from `backend/` a bare `--out ..` lands in the
 repo root and from the repo root it lands *outside* the repo — with a `wrote ../timeline-….png`
@@ -266,8 +275,10 @@ xdg-open /absolute/path/you/want/timeline-a100_80gb-fp16.html
 ```
 
 Rows are the same hardware resources as the PNG, but the time axis **zooms** (wheel, about the
-cursor), **pans** (drag) and **resets** (double-click), and every bar reports its own bytes, rate
-and duration on hover. One self-contained file: no server, no port, no download, no CDN — `file://`
+cursor), **pans** (drag) and **resets** (double-click), and every bar names its transaction on
+hover — `LOAD — operands in`, `STORE — result written back`, `EXEC — matmul` — with its bytes or
+operations and the rate. Below the timeline the page carries the **roofline** for the same run:
+both ceilings, the ridge point, the M=1 tail, and the workload as a labelled point. One self-contained file: no server, no port, no download, no CDN — `file://`
 is enough.
 
 `xdg-open` prints nothing and hands the file to a browser that may already be running, so look for

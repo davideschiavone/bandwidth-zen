@@ -68,6 +68,19 @@ TEMPLATE = """<!doctype html>
     background: #17171a; color: #fff; padding: 7px 10px; border-radius: 5px;
     font-size: 11.5px; line-height: 1.45; white-space: pre; z-index: 5;
   }}
+  h2.section {{ font-size: 15px; margin: 34px 0 4px; }}
+  #rwrap {{ position: relative; max-width: 760px; }}
+  #roof {{ display: block; width: 100%; }}
+  .roofline {{ fill: none; stroke: var(--dram); stroke-width: 2; }}
+  .roofderated {{ fill: none; stroke: var(--core); stroke-width: 2; stroke-dasharray: 6 4; }}
+  .roofguide {{ stroke: var(--ink-3); stroke-width: 1; stroke-dasharray: 2 3; fill: none; }}
+  .roofaxis {{ stroke: var(--grid); stroke-width: 1; }}
+  .rooftext {{ font-size: 10px; fill: var(--ink-2); }}
+  .roofpoint {{ fill: var(--ink); stroke: var(--surface); stroke-width: 2; }}
+  #rtip {{
+    position: absolute; pointer-events: none; opacity: 0; background: #17171a; color: #fff;
+    padding: 7px 10px; border-radius: 5px; font-size: 11.5px; white-space: pre; z-index: 5;
+  }}
   footer {{ margin-top: 22px; font-size: 11px; color: var(--ink-3); }}
   code {{ font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }}
 </style>
@@ -80,6 +93,13 @@ TEMPLATE = """<!doctype html>
 Filled bars on the DRAM row are loads, hollow ones are results written back.
 Grey rows are declared by the chip and unused by this model.</p>
 <div id="wrap"><svg id="chart"></svg><div id="tip"></div></div>
+
+<h2 class="section">Roofline — where this workload sits</h2>
+<p class="hint">Arithmetic intensity against achieved throughput, both log. The knee is the ridge
+point: left of it the chip is starved of bandwidth, right of it the array is the limit. The dotted
+line is the M=1 ceiling — array geometry, not a derating.</p>
+<div id="rwrap"><svg id="roof"></svg><div id="rtip"></div></div>
+
 <footer>{footer}</footer>
 
 <script>
@@ -219,8 +239,96 @@ svg.addEventListener("pointermove", e => {{
   }}
 }});
 svg.addEventListener("dblclick", () => {{ view = {{lo: 0, hi: DATA.total}}; draw(); }});
-addEventListener("resize", draw);
+// ---- roofline -------------------------------------------------------------
+// Same data as the report: the two ceilings from the machine model, the point
+// from this workload's own intensity and achieved rate.
+const R = DATA.roofline;
+const roof = document.getElementById("roof");
+const rtip = document.getElementById("rtip");
+const rwrap = document.getElementById("rwrap");
+const RL = 58, RR = 18, RT = 16, RB = 34, RH = 300;
+
+function fmtRate(v) {{
+  const u = [[1e15, "POP/s"], [1e12, "TOP/s"], [1e9, "GOP/s"], [1e6, "MOP/s"]];
+  for (const [scale, name] of u) if (v >= scale) return trim(v / scale) + " " + name;
+  return trim(v) + " OP/s";
+}}
+
+function drawRoof() {{
+  const w = roof.clientWidth || roof.parentNode.clientWidth || 700;
+  roof.setAttribute("height", RH);
+  while (roof.firstChild) roof.removeChild(roof.firstChild);
+
+  const xs = [Math.log10(R.x_lo), Math.log10(R.x_hi)];
+  const ys = [Math.log10(R.y_lo), Math.log10(R.y_hi)];
+  const px = v => RL + (Math.log10(v) - xs[0]) / (xs[1] - xs[0]) * (w - RL - RR);
+  const py = v => RT + (ys[1] - Math.log10(v)) / (ys[1] - ys[0]) * (RH - RT - RB);
+
+  for (let e = Math.ceil(xs[0]); e <= xs[1]; e++) {{
+    const x = px(Math.pow(10, e));
+    roof.appendChild(el("line", {{class: "roofaxis", x1: x, x2: x, y1: RT, y2: RH - RB}}));
+    roof.appendChild(el("text",
+      {{class: "rooftext", x, y: RH - RB + 13, "text-anchor": "middle"}}, "1e" + e));
+  }}
+  for (let e = Math.ceil(ys[0]); e <= ys[1]; e++) {{
+    const y = py(Math.pow(10, e));
+    roof.appendChild(el("line", {{class: "roofaxis", x1: RL, x2: w - RR, y1: y, y2: y}}));
+    roof.appendChild(el("text",
+      {{class: "rooftext", x: RL - 6, y: y + 3, "text-anchor": "end"}}, "1e" + e));
+  }}
+  roof.appendChild(el("text",
+    {{class: "rooftext", x: (RL + w - RR) / 2, y: RH - 4, "text-anchor": "middle"}},
+    "arithmetic intensity — OP per byte of DRAM traffic"));
+
+  const path = (peak, bw, cls) => {{
+    const knee = peak / bw;
+    const pts = [[R.x_lo, Math.max(bw * R.x_lo, R.y_lo)], [knee, peak], [R.x_hi, peak]];
+    roof.appendChild(el("polyline", {{
+      class: cls,
+      points: pts.map(([a, b]) => px(a) + "," + py(b)).join(" "),
+    }}));
+    return knee;
+  }};
+  const knee = path(R.peak, R.bw, "roofline");
+  if (R.derated_peak !== R.peak || R.derated_bw !== R.bw) {{
+    path(R.derated_peak, R.derated_bw, "roofderated");
+  }}
+
+  roof.appendChild(el("line",
+    {{class: "roofguide", x1: px(knee), x2: px(knee), y1: RT, y2: RH - RB}}));
+  roof.appendChild(el("text",
+    {{class: "rooftext", x: px(knee) + 4, y: RT + 11}}, "ridge " + trim(knee) + " OP/byte"));
+  if (R.tail) {{
+    roof.appendChild(el("line",
+      {{class: "roofguide", x1: RL, x2: w - RR, y1: py(R.tail), y2: py(R.tail)}}));
+    roof.appendChild(el("text",
+      {{class: "rooftext", x: w - RR, y: py(R.tail) - 5, "text-anchor": "end"}},
+      "M=1 ceiling " + fmtRate(R.tail)));
+  }}
+
+  for (const p of R.points) {{
+    const dot = el("circle", {{class: "roofpoint", cx: px(p.ai), cy: py(p.achieved), r: 6}});
+    dot.dataset.tip = p.tip;
+    roof.appendChild(dot);
+    roof.appendChild(el("text",
+      {{class: "rooftext", x: px(p.ai) + 10, y: py(p.achieved) + 3}}, p.label));
+  }}
+}}
+
+roof.addEventListener("mousemove", e => {{
+  const t = e.target.dataset && e.target.dataset.tip;
+  if (!t) {{ rtip.style.opacity = 0; return; }}
+  const box = rwrap.getBoundingClientRect();
+  rtip.textContent = t;
+  rtip.style.opacity = 1;
+  rtip.style.left = Math.min(e.clientX - box.left + 14, box.width - 240) + "px";
+  rtip.style.top = (e.clientY - box.top + 14) + "px";
+}});
+roof.addEventListener("mouseleave", () => {{ rtip.style.opacity = 0; }});
+
+addEventListener("resize", () => {{ draw(); drawRoof(); }});
 draw();
+drawRoof();
 </script>
 """
 
@@ -243,6 +351,7 @@ def render(
     boxes: list[Box],
     rows: list[dict[str, str | None]],
     spans: list[dict[str, object]],
+    roofline: dict[str, object],
     total_s: float,
 ) -> str:
     """Build the page. Pure: returns text, writes nothing."""
@@ -252,7 +361,7 @@ def render(
         f'<div class="det">{b.detail}</div></div>'
         for b in boxes
     )
-    data = json.dumps({"rows": rows, "spans": spans, "total": total_s})
+    data = json.dumps({"rows": rows, "spans": spans, "total": total_s, "roofline": roofline})
     return TEMPLATE.format(
         title=title, subtitle=subtitle, footer=footer, boxes=boxes_html, data=data
     )

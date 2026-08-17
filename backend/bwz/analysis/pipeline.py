@@ -99,6 +99,10 @@ class Span:
     end_s: float
     step: int
     phase: GraphPhase
+    op_type: str = ""
+    """Which operator family this span serves — ``matmul``, ``attention``, ``norm``…
+    A phase mixes them, and "what was computed" is a different question from "how
+    long did it take"."""
     bytes_moved: float = 0.0
     """DRAM lane: bytes crossing the one modelled link in this span."""
     flops: float = 0.0
@@ -138,6 +142,12 @@ class PipelineTrace:
     double-buffered, because then nothing overlaps and the sum is exact."""
     kind: str
     """``"tiles"`` for a single matmul, ``"operations"`` for a graph."""
+    work_by_op: tuple[tuple[str, float, float], ...] = ()
+    """``(op_type, operations, compute seconds)`` per operator family, biggest
+    first. Built from the operations themselves rather than from the drawn spans:
+    coalescing 451 nodes into 57 blocks would otherwise report only whichever
+    family dominates each block, and the mixture is the point — a decode step is
+    matmul *and* attention *and* norms."""
 
     @property
     def coalesced(self) -> bool:
@@ -220,6 +230,22 @@ def tile_count(op: Operation, machine: MachineModel) -> int:
     return (padded(op.attrs.k, rows) // rows) * (padded(op.attrs.n, cols) // cols)
 
 
+def _work_by_op(results: tuple[OpResult, ...]) -> tuple[tuple[str, float, float], ...]:
+    """Arithmetic and compute time per operator family, biggest first."""
+    totals: dict[str, list[float]] = {}
+    for result in results:
+        entry = totals.setdefault(result.op_type.value, [0.0, 0.0])
+        entry[0] += result.flops
+        entry[1] += result.t_compute_s
+    return tuple(
+        sorted(
+            ((name, flops, seconds) for name, (flops, seconds) in totals.items()),
+            key=lambda row: row[1],
+            reverse=True,
+        )
+    )
+
+
 def build_trace(
     graph: ComputeGraph,
     phase: PhaseResult,
@@ -275,6 +301,7 @@ def _tile_trace(
         [execute] * steps,
         [store] * steps,
         labels=[f"{label} [{i + 1}/{steps}]" for i in range(steps)],
+        op_types=[op.op_type.value] * steps,
         phase=phase.phase,
         dispatch_s=result.t_fixed_s,
         double_buffered=double_buffered,
@@ -297,6 +324,7 @@ def _tile_trace(
         # be one more thing to keep in step with the scheduler.
         fill_drain_s=max(0.0, max((s.end_s for s in spans), default=0.0) - result.latency_s),
         kind="tiles",
+        work_by_op=_work_by_op((result,)),
     )
 
 
@@ -330,6 +358,10 @@ def _operation_trace(
         g[0].op_id if len(g) == 1 else f"{g[0].op_id} .. {g[-1].op_id}  ({len(g)} ops)"
         for g in groups
     ]
+    # The family that dominates the group's arithmetic — a coalesced block is
+    # usually a run of like operators, and naming the biggest is more honest than
+    # naming the first.
+    op_types = [max(g, key=lambda r: r.flops).op_type.value if g else "" for g in groups]
 
     # A group's duration is the SUM of its members' latencies, not the latency of
     # their summed terms: coalescing must not silently re-schedule the ops it
@@ -347,6 +379,7 @@ def _operation_trace(
         executes,
         durations=durations,
         labels=labels,
+        op_types=op_types,
         phase=phase.phase,
         dispatch_s=dispatch,
         double_buffered=double_buffered,
@@ -367,6 +400,7 @@ def _operation_trace(
         # latency exactly.
         fill_drain_s=0.0,
         kind="operations",
+        work_by_op=_work_by_op(tuple(results)),
     )
 
 
@@ -376,6 +410,7 @@ def _pipelined_tiles(
     stores: list[float],
     *,
     labels: list[str],
+    op_types: list[str],
     phase: GraphPhase,
     dispatch_s: float,
     double_buffered: bool,
@@ -455,6 +490,7 @@ def _pipelined_tiles(
                     load_end,
                     i,
                     phase,
+                    op_type=op_types[i],
                     bytes_moved=bytes_per_step[i],
                 )
             )
@@ -472,6 +508,7 @@ def _pipelined_tiles(
                 store_end,
                 i,
                 phase,
+                op_type=op_types[i],
                 resident_bytes=resident_per_step[i],
             )
         )
@@ -485,6 +522,7 @@ def _pipelined_tiles(
                     exec_end,
                     i,
                     phase,
+                    op_type=op_types[i],
                     flops=flops_per_step[i],
                 )
             )
@@ -498,6 +536,7 @@ def _pipelined_tiles(
                     store_end,
                     i,
                     phase,
+                    op_type=op_types[i],
                     bytes_moved=stored_per_step[i],
                 )
             )
@@ -510,6 +549,7 @@ def _serial_steps(
     *,
     durations: list[float],
     labels: list[str],
+    op_types: list[str],
     phase: GraphPhase,
     dispatch_s: float,
     double_buffered: bool,
@@ -557,6 +597,7 @@ def _serial_steps(
                     load_end,
                     i,
                     phase,
+                    op_type=op_types[i],
                     bytes_moved=bytes_per_step[i],
                 )
             )
@@ -569,6 +610,7 @@ def _serial_steps(
                 end,
                 i,
                 phase,
+                op_type=op_types[i],
                 resident_bytes=resident_per_step[i],
             )
         )
@@ -582,6 +624,7 @@ def _serial_steps(
                     exec_start + execute,
                     i,
                     phase,
+                    op_type=op_types[i],
                     flops=flops_per_step[i],
                 )
             )
@@ -595,6 +638,7 @@ def _serial_steps(
                     end,
                     i,
                     phase,
+                    op_type=op_types[i],
                     bytes_moved=stored_per_step[i],
                 )
             )
