@@ -213,6 +213,11 @@ Flags: `--chips`, `--models` (comma-separated), `--batch`, `--input-tokens`, `--
 
 ## 5. Figures
 
+**The figures are not the report.** `bwz matmul` and `bwz run` print the numbers, their derivations
+and the assumptions drawer (§2, §3); the plot scripts write files and print only `wrote …`. Two
+commands, on purpose — `make plots` runs the scripts several times and a wall of tables per chip
+would drown it.
+
 ```bash
 make plots        # from the repo root — regenerates all of docs/plots/
 ```
@@ -236,14 +241,35 @@ uv run --group plots python scripts/plot_pipeline.py --chip h100_sxm --matmul 81
 `plot_pipeline.py`: `--chip` (repeatable), `--matmul M,N,K`, `--weights`, `--ideal`, `--steps`,
 `--zoom`, `--html`, `--html-steps`, `--out`.
 
-The `.html` is the one to open when you want to *look around* rather than glance: rows are the same
-hardware resources, but the time axis zooms (wheel), pans (drag), resets (double-click), and every
-bar reports its own bytes, rate and duration on hover. One self-contained file, no server and no
-viewer to install.
+`--out` is relative to where you run the script, so from `backend/` a bare `--out ..` lands in the
+repo root and from the repo root it lands *outside* the repo — with a `wrote ../timeline-….png`
+line that looks right either way. Pass an absolute path when it matters.
 
-The pipeline figure gives every declared memory level and compute unit its own row, with the bytes
-moved, the achieved bandwidth and the operations retired written beside it — and draws grey the
-resources this model never uses. See [`plots/README.md`](plots/README.md) for how to read it.
+### The zoomable page
+
+```bash
+cd backend
+uv run --group plots python scripts/plot_pipeline.py \
+  --chip a100_80gb --matmul 10000,10000,10000 --ideal --html \
+  --out /absolute/path/you/want
+
+xdg-open /absolute/path/you/want/timeline-a100_80gb-fp16.html
+```
+
+Rows are the same hardware resources as the PNG, but the time axis **zooms** (wheel, about the
+cursor), **pans** (drag) and **resets** (double-click), and every bar reports its own bytes, rate
+and duration on hover. One self-contained file: no server, no port, no download, no CDN — `file://`
+is enough.
+
+`xdg-open` prints nothing and hands the file to a browser that may already be running, so look for
+a new **tab in an existing window**. `google-chrome <file>` or `firefox <file>` work too.
+
+`--html-steps` (default 256) sets the page's resolution independently of `--steps` (default 32),
+which governs the PNG: a static figure has to stay legible at one scale and a zoomable one does not.
+
+The timeline gives every declared memory level and compute unit its own row, with the bytes moved,
+the achieved bandwidth and the operations retired written beside it — and draws grey the resources
+this model never uses. See [`plots/README.md`](plots/README.md) for how to read it.
 
 ---
 
@@ -275,5 +301,7 @@ cd backend && uv run pytest tests/unit/test_pipeline.py::test_double_buffering_h
 | result width changes bytes only | §2.3 | `docs/CORRECTIONS.md` D18 |
 | mixed operands run at the wider | §2.3 | `docs/CORRECTIONS.md` D18 |
 | SRAM depth 1.97 of 2 buffers | §2.4 | `docs/MODEL.md` §6.5, D19 |
+| grey rows = the model's boundary | §5 | `docs/CORRECTIONS.md` D20 |
+| no Konata, no Kanata | — | `docs/CORRECTIONS.md` D21 |
 | 1.40% residency on chip_a | §3 | `docs/CORRECTIONS.md` D8, D15 |
 | traffic is a lower bound when the working set does not fit | every report's assumptions | `docs/MODEL.md` §6.2 |

@@ -430,8 +430,11 @@ operations end to end, overlapping load and compute only *within* one, because t
 own schedule (D5a). Its span therefore equals the reported latency exactly.
 
 ```
-make plots        # docs/plots/timeline-<chip>-<dtype>.png
+make plots        # docs/plots/timeline-<chip>-<dtype>.{png,html}
 ```
+
+The `.html` is the same figure with a zoomable time axis, in one self-contained file
+(`docs/plots/README.md`).
 
 The figure's rows are **hardware resources** — every memory level and compute unit the profile
 declares — with bytes, bandwidth and operations written on each, because that is the axis an

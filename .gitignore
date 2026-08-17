@@ -19,3 +19,8 @@ node_modules/
 
 # Local agent settings
 .claude/settings.local.json
+
+# Figures written outside docs/plots/ while exploring a shape. The tracked ones
+# come from `make plots`; ad-hoc ones at the repo root do not.
+/timeline-*.png
+/timeline-*.html

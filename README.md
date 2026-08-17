@@ -131,8 +131,13 @@ share one datapath — the narrow side saves bytes and buys no throughput.
 See where the time went — one figure per chip, since the schedule is a property of the machine:
 
 ```bash
-make plots        # → docs/plots/ (PNGs, plus a zoomable timeline-*.html per chip)
+make plots        # → docs/plots/
 ```
+
+That writes, per chip: the roofline, the machine diagram, and the resource timeline as both a PNG
+and a **zoomable** self-contained `timeline-*.html` (wheel to zoom, drag to pan, hover a bar for
+its bytes and rate). The figures are separate from the text report above — see
+[`docs/CLI.md`](docs/CLI.md) §5.
 
 ![A100 roofline](docs/plots/roofline-a100_80gb-fp16.png)
 

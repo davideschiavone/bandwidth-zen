@@ -104,6 +104,7 @@ Nothing in `analysis/` may import from `api/`. Nothing in `graph/` may import fr
 | A new model family | `spec/model_spec.py` + `graph/<family>.py`, dispatched in `graph/builder.py` | `docs/SCHEMA.md`, `docs/MODEL.md`, golden test |
 | A new dtype | `spec/dtypes.py` only — widths are definitions, not calibration | `docs/SCHEMA.md` dtype lists |
 | A figure | `backend/scripts/plot_*.py`, never inside `bwz/` | `docs/plots/README.md`, `make plots` |
+| An interactive view | `backend/scripts/timeline_html.py` — one self-contained file, no CDN, no server, no third-party viewer | `docs/plots/README.md` |
 | A CLI command or flag | `cli.py` | `docs/CLI.md` — with real output, not a description |
 | A new UI panel | `frontend/src/components/` | `Dashboard.tsx`, vitest |
 
@@ -131,6 +132,8 @@ These are known-good behaviours. If a change breaks one, the change is wrong.
   weight-dtype rule and is wrong for W8A16; see `docs/CORRECTIONS.md` D18.)
 - A pipeline trace must never be faster than the report it illustrates. Spans are slices of
   `t_dram`/`t_compute`/`t_fixed` and sum back to them (D19).
+- Figure rows are **hardware resources** read off the chip profile, and a resource the model does
+  not use is drawn grey with the reason rather than omitted (D20).
 - TP=8 across NVLink on a 7B model at batch 1 → comms is a large fraction of the critical path;
   speedup is well below 8×.
 - Doubling DRAM bandwidth never increases predicted latency. INT8 is never slower than FP16 on
