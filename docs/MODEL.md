@@ -344,6 +344,45 @@ This is the largest single correction the engine applies, and it is separate fro
 multiplicative with — the achieved-throughput derating in `calibration.py`. See D14 for what it
 does to the D8 conclusions.
 
+#### Wave occupancy — how many of the chip's arrays the work can reach
+
+The three terms above describe **one** array. A chip declares `count` of them, and
+`peak_flops_per_s` multiplies by `count`, which assumes every array always has a tile. A fourth
+term charges the times it does not (D30):
+
+```
+tiles      = ceil(K/rows) · ceil(N/cols) · independent
+waves      = ceil(tiles / units)
+occupancy  = tiles / (waves · units)
+```
+
+`independent` is 1 for a matmul or convolution and `batch × heads` for attention, whose heads are
+separate GEMMs that fill the arrays alongside each other.
+
+| case | tiles / units | occupancy |
+|---|---|---|
+| 100³ on Metis (4 AI cores) | 1 / 4 | **0.25** — one core works, three idle |
+| 100³ on A100 (432 tensor cores) | 49 / 432 | **0.113** |
+| 600³ on Metis | 4 / 4 | 1.00 |
+| 4096³ on A100 | 65536 / 432 | 0.998 |
+
+Negligible on a large GEMM by construction and dominant on a small one, which is why the aggregate
+peak alone cannot compare two chips on anything small.
+
+### 6.1a Weight residency in the array itself
+
+A systolic array that stores no weights — an NVIDIA tensor core reads every operand from the
+register file — has no residency limit of its own. A **digital in-memory-compute** array does: a
+weight cannot join a MAC until it has been written into a bank. `ComputeUnit.weight_sets` records
+how many array-sized tiles one unit holds, and `resident_tile_capacity() = count × weight_sets` how
+many the chip holds.
+
+Metis declares 4 weight sets across 4 AI cores: **16 tiles resident, 4 computing.** An operation
+needing more must re-write the arrays as it runs — a 4096³ INT8 matmul is 64 tiles, so 48 reloads.
+The **capacity** is modelled and reported; the **time** for those reloads is not, because charging
+it needs a bandwidth on the L1→IMC path and v1 has no on-chip bandwidth term (D5a, D5b, D30). The
+assumptions drawer says so on every report.
+
 ### 6.2 Capacity planning and residency
 
 On-chip capacity is allocated where it removes the most DRAM traffic (D15): the double buffer

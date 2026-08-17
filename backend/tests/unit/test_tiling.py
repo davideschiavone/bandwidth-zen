@@ -9,6 +9,7 @@ from bwz.analysis.tiling import (
     operation_utilisation,
     padded,
     systolic_utilisation,
+    wave_occupancy,
 )
 from bwz.graph.ops import MatmulAttrs, Operation, OpType
 from bwz.spec import load_chip
@@ -96,3 +97,61 @@ def test_double_buffering_needs_room_for_two_tiles() -> None:
     assert double_buffering_fits(1_000_000, 300_000, 400_000) is False
     assert double_buffering_fits(1_000_000, 999_998, 1) is True
     assert double_buffering_fits(1_000_000, 999_999, 1) is False, "1 spare byte, 2 needed"
+
+
+def test_wave_occupancy_is_one_when_the_work_fills_the_arrays() -> None:
+    """No loss when tiles divide evenly, and none at all on a single-array chip."""
+    assert wave_occupancy(tiles=16, units=4) == 1.0
+    assert wave_occupancy(tiles=4, units=4) == 1.0
+    assert wave_occupancy(tiles=1, units=1) == 1.0
+    assert wave_occupancy(tiles=1_000_000, units=1) == 1.0
+
+
+def test_wave_occupancy_charges_the_empty_slots_of_the_last_wave() -> None:
+    """5 tiles on 4 arrays is two waves, the second holding one tile: 5/8."""
+    assert wave_occupancy(tiles=5, units=4) == pytest.approx(5 / 8)
+    # Metis: one 512x512 weight tile occupies one of four AI cores.
+    assert wave_occupancy(tiles=1, units=4) == pytest.approx(0.25)
+
+
+def test_a_small_matmul_cannot_reach_all_of_metis() -> None:
+    """The correction D30 exists for, on the shipped profile.
+
+    A 100x100x100 INT8 matmul is a single 512x512 weight tile. Metis has four AI
+    cores; one takes the tile and three have nothing to do, so the chip's real
+    ceiling on this shape is a quarter of its 209.7 TOPS. Before D30 the engine
+    multiplied one array's throughput by four and reported the whole chip busy.
+
+        shape utilisation  = (100/512)^2 x (100/612) = 0.6233%
+        wave occupancy     = 1 tile / (1 wave x 4 arrays) = 25%
+        chip utilisation   = 0.1558%
+    """
+    unit = load_chip("metis_aipu").compute_units[0]
+    assert unit.count == 4
+    shape = systolic_utilisation(100, 100, 100, 512, 512)
+    chip = systolic_utilisation(100, 100, 100, 512, 512, units=unit.count)
+
+    assert shape == pytest.approx(0.006233, rel=1e-3)
+    assert chip == pytest.approx(shape * 0.25, rel=1e-9)
+    assert chip == pytest.approx(0.0015583, rel=1e-3)
+
+
+def test_metis_holds_sixteen_weight_tiles_and_runs_four() -> None:
+    """Table C: 4 weight sets per AI core, 4 cores.
+
+    A D-IMC weight cannot join a MAC until it has been written into a bank, so
+    this is a hard residency limit and not a cache hint: 16 tiles fit, 4 compute
+    at once, and a matmul needing more re-writes the array as it goes.
+    """
+    unit = load_chip("metis_aipu").compute_units[0]
+    assert (unit.count, unit.weight_sets) == (4, 4)
+    assert unit.resident_tile_capacity() == 16
+
+    # A 4096-cubed INT8 matmul is ceil(4096/512)^2 = 64 tiles: four times what
+    # the arrays hold, so 48 tiles must be re-written mid-operation.
+    assert 64 - unit.resident_tile_capacity() == 48
+
+    # A tensor core stores no weights at all, so its capacity is just its arrays.
+    tensor_core = load_chip("a100_80gb").compute_units[0]
+    assert tensor_core.weight_sets == 1
+    assert tensor_core.resident_tile_capacity() == 432

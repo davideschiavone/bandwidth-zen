@@ -38,6 +38,7 @@ compute_units:                  # at least one
     dtype_multipliers: {fp8: 2.0, int8: 2.0, tf32: 0.5}   # keys must be in supported_dtypes
     structured_sparsity_speedup: 2.0    # default 1.0
     systolic_dims: [16, 16]             # optional; drives the M3 tail-effect model
+    weight_sets: 1                      # array-sized weight tiles ONE unit holds; default 1
     dataflow: ws                        # ws | os | rs, default ws
 
 memory:                         # innermost first, level numbers ascending, no duplicates
@@ -56,6 +57,13 @@ interconnect:                   # optional; unused until M5
   intra_node: {name: NVLink 4, bandwidth_bytes_per_s: 4.5e+11, latency_s: 2.0e-6, topology: fully_connected}
   inter_node: {name: IB NDR,   bandwidth_bytes_per_s: 5.0e+10, latency_s: 5.0e-6, topology: fat_tree}
 ```
+
+**`weight_sets`** is how many array-sized weight tiles **one** unit holds at once, and it is a
+statement about whether the array stores weights at all. Leave it at 1 for anything that reads its
+operands per instruction — every NVIDIA and AMD profile here does, because a tensor core has no
+persistent weight store. Set it only for in-memory compute, where a weight cannot join a MAC until
+it has been written into a bank: `metis_aipu` declares 4, so its 4 AI cores hold 16 tiles and run
+4 (`docs/CORRECTIONS.md` D30).
 
 **Enums.** `dataflow`: `ws | os | rs`. `topology`: `fully_connected | ring | mesh | fat_tree |
 switched`. `supported_dtypes` and `dtype_multipliers` keys: `fp32 | tf32 | fp16 | bf16 | fp8 |

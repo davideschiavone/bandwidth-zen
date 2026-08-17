@@ -31,7 +31,43 @@ def padded(extent: int, tile: int) -> int:
     return math.ceil(extent / tile) * tile
 
 
-def systolic_utilisation(m: int, k: int, n: int, rows: int, cols: int) -> float:
+def wave_occupancy(tiles: int, units: int) -> float:
+    """Fraction of the chip's arrays kept busy, averaged over the run.
+
+    A chip with *units* arrays runs *units* weight tiles at once and no more, so
+    ``tiles`` tiles take ``ceil(tiles / units)`` waves and the last wave is
+    partly empty::
+
+        waves     = ceil(tiles / units)
+        occupancy = tiles / (waves * units)
+
+    This is the loss the aggregate peak hides. ``peak_flops_per_s`` multiplies one
+    array's throughput by ``count``, which silently assumes every array always has
+    a tile to work on — true for a 4096-cubed GEMM, false for a small one. Metis
+    has four AI cores; a matmul with a single 512x512 weight tile occupies **one**
+    of them and the other three idle, so its real ceiling is a quarter of the
+    209.7 TOPS the datasheet quotes (docs/CORRECTIONS.md D30).
+
+    Returns 1.0 for a single-unit chip, which is what makes this a refinement
+    rather than a rewrite: the term only exists where a profile declares more
+    than one array.
+    """
+    if units <= 1 or tiles <= 0:
+        return 1.0
+    waves = math.ceil(tiles / units)
+    return tiles / (waves * units)
+
+
+def systolic_utilisation(
+    m: int,
+    k: int,
+    n: int,
+    rows: int,
+    cols: int,
+    *,
+    units: int = 1,
+    independent: int = 1,
+) -> float:
     """Fraction of a ``rows x cols`` array a ``[M,K]x[K,N]`` GEMM keeps busy.
 
     A weight-stationary array holds a ``rows x cols`` slice of the weight matrix
@@ -58,13 +94,21 @@ def systolic_utilisation(m: int, k: int, n: int, rows: int, cols: int) -> float:
     This is the single largest correction the engine applies at batch 1, and it
     is why a decode step on an edge NPU is nowhere near its TOPS number even
     when the weights are entirely on chip.
+
+    A **fourth** loss applies when the chip has more than one array. ``units`` is
+    how many run concurrently and ``independent`` how many copies of this GEMM
+    exist to spread across them — one for a matmul or a convolution, ``batch x
+    heads`` for attention, whose heads are genuinely separate GEMMs. See
+    :func:`wave_occupancy`. Both default to the single-array case, so a profile
+    that declares one unit gets exactly the three-term result above.
     """
     if rows <= 0 or cols <= 0:
         return 1.0
     k_efficiency = k / padded(k, rows)
     n_efficiency = n / padded(n, cols)
     m_efficiency = m / (m + rows)
-    return k_efficiency * n_efficiency * m_efficiency
+    tiles = (padded(k, rows) // rows) * (padded(n, cols) // cols) * max(independent, 1)
+    return k_efficiency * n_efficiency * m_efficiency * wave_occupancy(tiles, units)
 
 
 def operation_utilisation(op: Operation, unit: ComputeUnit) -> float:
@@ -81,7 +125,9 @@ def operation_utilisation(op: Operation, unit: ComputeUnit) -> float:
     rows, cols = unit.systolic_dims
 
     if isinstance(op.attrs, MatmulAttrs):
-        return systolic_utilisation(op.attrs.m, op.attrs.k, op.attrs.n, rows, cols)
+        return systolic_utilisation(
+            op.attrs.m, op.attrs.k, op.attrs.n, rows, cols, units=unit.count
+        )
 
     if isinstance(op.attrs, ConvAttrs):
         # im2col view: M is the output pixel count, K the filter volume,
@@ -89,13 +135,22 @@ def operation_utilisation(op: Operation, unit: ComputeUnit) -> float:
         conv = op.attrs
         m = conv.batch * conv.out_height * conv.out_width
         k = (conv.in_channels // conv.groups) * conv.kernel_h * conv.kernel_w
-        return systolic_utilisation(m, k, conv.out_channels, rows, cols)
+        return systolic_utilisation(m, k, conv.out_channels, rows, cols, units=unit.count)
 
     if isinstance(op.attrs, AttentionAttrs):
         # Two GEMMs per head: [q_len, head_dim] x [head_dim, kv_len] and back.
+        # Every (batch, head) pair is an independent GEMM, so they fill the
+        # arrays alongside each other — counting only one head's tiles would
+        # report a 64-head attention as leaving a 4-core NPU idle.
         attention = op.attrs
         return systolic_utilisation(
-            attention.q_len, attention.head_dim, attention.kv_len, rows, cols
+            attention.q_len,
+            attention.head_dim,
+            attention.kv_len,
+            rows,
+            cols,
+            units=unit.count,
+            independent=attention.batch * attention.heads,
         )
 
     return 1.0

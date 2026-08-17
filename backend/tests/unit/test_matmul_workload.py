@@ -10,6 +10,7 @@ from __future__ import annotations
 import pytest
 
 from bwz.analysis import analyze, idealised
+from bwz.analysis.tiling import systolic_utilisation
 from bwz.graph import GraphPhase, build_graph
 from bwz.graph.ops import MatmulAttrs, OpType
 from bwz.report import Bound, OpResult, Report
@@ -75,21 +76,29 @@ def test_a100_10k_cube_matches_the_datasheet_by_hand() -> None:
     compulsory   = 3 x 10000^2 x 2 bytes = 6.000e8 bytes  (fp16, three operands)
     intensity    = 2.000e12 / 6.000e8    = 3333 OP/byte
     peak fp16    = 312.0e12 OP/s         (A100 datasheet, tensor core)
-    t_compute    = 2.000e12 / (312.0e12 x 0.9984) = 6.42 ms
+    t_compute    = 2.000e12 / (312.0e12 x 0.9984 x 0.99914) = 6.42 ms
 
     The 0.9984 is the systolic tail on a 16x16 array at M=10000
     (10000/10016), which --ideal does not remove because it is geometry.
     An intensity of 3333 against a ridge point of 153 is compute-bound by
     more than 20x, which no plausible calibration constant can flip.
+
+    The 0.99914 is wave quantisation across the 432 tensor cores (D30):
+    ``ceil(10000/16)^2 = 625^2 = 390 625`` tiles over 432 arrays is 905 waves,
+    and 390 625 / (905 x 432) leaves the last wave 78% full. Negligible here by
+    construction — a 390 625-tile GEMM fills any chip — and dominant on a small
+    one, which is the point of carrying it.
     """
     report = analyze(
         _spec(10_000, 10_000, 10_000), idealised(load_chip("a100_80gb")), _deployment()
     )
     op = _only_op(report)
+    tail, waves = 10_000 / 10_016, 390_625 / (905 * 432)
 
     assert op.flops == pytest.approx(2.0e12)
     assert op.arithmetic_intensity == pytest.approx(3333.3, rel=1e-3)
-    assert op.utilization == pytest.approx(10_000 / 10_016, rel=1e-6)
+    assert op.utilization == pytest.approx(tail * waves, rel=1e-6)
+    assert waves == pytest.approx(0.99914, rel=1e-4)
     assert op.t_compute_s == pytest.approx(6.42e-3, rel=1e-2)
     assert op.bound is Bound.COMPUTE_BOUND
 
@@ -100,11 +109,18 @@ def test_m_equals_one_reproduces_the_tail_effect() -> None:
     This is the sanity check CLAUDE.md names for the utilisation model, and the
     reason a matmul is a family rather than a hand-costed custom op — a CustomOp
     carries no shape, so this number would silently come back as 100%.
+
+    Since D30 the chip-level figure also carries wave quantisation, so the pure
+    ``1/17`` is asserted where it lives — on the array — and the chip's value is
+    that times the 390 625-tile wave occupancy. Keeping both on the page is the
+    point: the first is geometry of one array, the second is how many arrays the
+    work could reach.
     """
     report = analyze(_spec(1, 10_000, 10_000), idealised(load_chip("a100_80gb")), _deployment())
     op = _only_op(report)
 
-    assert op.utilization == pytest.approx(1 / 17, rel=1e-6)
+    assert systolic_utilisation(1, 10_000, 10_000, 16, 16) == pytest.approx(1 / 17, rel=1e-6)
+    assert op.utilization == pytest.approx(1 / 17 * 390_625 / (905 * 432), rel=1e-6)
     assert op.arithmetic_intensity == pytest.approx(1.0, rel=1e-2)
     assert op.bound is Bound.DRAM_BW_BOUND
 

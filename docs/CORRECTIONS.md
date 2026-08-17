@@ -893,3 +893,88 @@ capacity planner granted, so the box is measuring one thing and labelling it ano
 on the unmodified script for any `--model` whose largest operator exceeds SRAM, and fixing it is a
 semantics change in `analysis/pipeline.py` (either charge the tiled working set or rename the
 quantity), which deserves its own decision rather than being folded into a figure change.
+
+---
+
+## D30 — A chip is *n* arrays, not one big one, and an IMC array owns its weights (2026-08-17)
+
+Two related errors, both surfaced by reading a `--compare` figure and asking why a 100-cubed matmul
+looked the way it did. Both come from one shortcut: `peak_flops_per_s` multiplies **one** array's
+throughput by `count`, and everything downstream then reasons as if the chip were a single array of
+`count x rows x cols` PEs. It is not.
+
+### 1. Work reaches the arrays in waves, and the last wave is partly empty
+
+`systolic_utilisation` modelled one array's shape efficiency exactly and then let the aggregate peak
+assume every array always had a tile to work on. For a 4096-cubed GEMM that is true. For a small one
+it is badly false:
+
+```
+waves     = ceil(tiles / units)
+occupancy = tiles / (waves * units)
+```
+
+Metis has **four** AI cores. A 100x100x100 INT8 matmul is `ceil(100/512)^2` = **one** 512x512 weight
+tile, so one core takes it and three idle — the chip's real ceiling on that shape is a quarter of
+the 209.7 TOPS the datasheet quotes, on top of the 0.62% shape utilisation it already paid.
+
+The correction is large where it should be and vanishes where it should:
+
+| shape | a100 tiles / units | a100 util | metis tiles / units | metis util |
+|---|---|---|---|---|
+| 100^3 | 49 / 432 | 68.72% -> **7.80%** | 1 / 4 | 0.623% -> **0.156%** |
+| 600^3 | 1444 / 432 | 94.86% -> **79.27%** | 4 / 4 | 18.52% unchanged |
+| 4096^3 | 65536 / 432 | 99.61% -> **99.42%** | 64 / 4 | 88.89% unchanged |
+
+It also **changes the comparison it was found in**. A100 against Metis on a 100-cubed matmul went
+from 312x to **74x**, because A100 — 432 tensor cores that 49 tiles cannot fill — loses more to wave
+quantisation than Metis does, and A100's verdict on that shape flips `DRAM_BW_BOUND` ->
+`COMPUTE_BOUND`. At 4096-cubed the ratio is 1.7x, finally in the neighbourhood of the 3.0x
+peak-TOPS ratio rather than two orders away from it. That is the sense in which the model could not
+compare real performance before.
+
+Attention passes `independent = batch x heads`, because every head is a genuinely separate GEMM and
+they fill the arrays alongside each other. Counting one head's tiles would have reported a 64-head
+attention as leaving a 4-core NPU idle.
+
+Two goldens moved, both A100 at 10000-cubed and both by 0.086%: `390 625 / (905 x 432) = 0.99914`.
+The CLAUDE.md sanity check "M=1 on a 128x128 array is about 1/128" is now asserted where it belongs,
+on `systolic_utilisation` itself, with the chip-level figure asserted as that times occupancy. Both
+numbers stay on the page, because they are different claims.
+
+### 2. A D-IMC array can only compute on weights that are inside it
+
+`ComputeUnit.weight_sets` (Metis: 4 — Table C's "512 x 512 x 4 weight sets", which is exactly the
+1 MiB of IMC per core) and `resident_tile_capacity() = count x weight_sets` = **16 tiles held, 4
+computing**. A hard constraint, not a cache hint: a digital in-memory-compute weight cannot take
+part in a MAC until it has been written into a bank.
+
+**NVIDIA is not the same, and the datasheet says so.** The A100 whitepaper puts tensor-core operands
+in the register file, fed from shared memory — 192 KB combined L1/SMEM per SM, SMEM configurable to
+164 KB, RF 256 KB/SM — and `cp.async` exists to stage global into SMEM "eliminating the need for
+intermediate register file (RF) usage". There is no persistent weight store in the array at all,
+which is exactly why a GPU can stream 16 GB of weights per token and Metis cannot. So `weight_sets`
+stays 1 on every GPU profile and the term is inert there by physics, not by omission.
+
+**Modelled: the capacity. Not modelled: the reload time.** A 4096-cubed INT8 matmul on Metis is 64
+tiles against 16 resident, so 48 tiles — 12.6 MB — must be re-written into the arrays mid-operation.
+Charging that needs a bandwidth on the L1-to-IMC path, and v1 has no on-chip bandwidth term by
+explicit decision (D5a, D5b). The paper publishes the *activation* feed (512 bits/cycle/core from
+L1) but not the weight-write port. So the reload capacity is disclosed in `report.assumptions` and
+the time is not charged. Trigger to revisit: a published weight-write bandwidth, at which point D5b
+reopens with a sourced number instead of an estimate.
+
+**Why the activation stream is not a separate term.** The input feeder takes 512 one-bit activations
+per cycle per core and accumulates over 8 cycles — 512 INT8 activations per 8 cycles, which is
+exactly one MVM. The feed is rate-matched to the array by construction, so streaming A adds no time
+beyond the arithmetic it feeds; charging it would be double counting. What A *does* cost is DRAM
+traffic when it does not fit on chip, which `op_roofline` already charges as `input_bytes`.
+
+### Still open
+
+`double_buffering_fits` is now known to be vacuous. It tests two array-sized tiles against the whole
+on-chip capacity (52 MB on Metis, 60.7 MB on A100), and tiles are array-sized by construction, so it
+cannot fail on a shipped profile. Tested against the store the array can really compute from, it
+also passes — 164 KiB of SMEM holds 328 A100 tiles, 1 MiB of D-IMC holds exactly 4. The verdicts
+were right for the wrong reason. Replacing it with the reload model above is the real fix, and waits
+on the same missing bandwidth.

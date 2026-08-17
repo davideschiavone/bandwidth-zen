@@ -280,6 +280,26 @@ def _assumptions(
         f"Achieved-throughput derating and shape utilisation are applied separately and multiply; "
         f"a batch-1 GEMM on a {machine.unit.systolic_dims} array loses far more to shape than to "
         f"derating.",
+        (
+            f"{machine.unit.name} is {machine.unit.count} arrays, and work reaches them a wave of "
+            f"{machine.unit.count} weight tiles at a time: an operation with fewer tiles than "
+            f"that leaves the rest idle, and the last wave of any operation is partly empty. "
+            f"Charged as wave occupancy in the utilisation (D30) — without it the aggregate peak "
+            f"silently assumes every array always has a tile."
+            if machine.unit.count > 1
+            else f"{machine.unit.name} is a single array, so there is no wave quantisation."
+        ),
+        (
+            f"{machine.unit.name} holds {machine.unit.weight_sets} weight tiles per array and "
+            f"{machine.unit.resident_tile_capacity()} across the chip. An in-memory-compute "
+            f"weight cannot join a MAC until it has been written into a bank, so an operation "
+            f"needing more tiles than that must re-write the array as it runs. The time for those "
+            f"re-writes is not charged: it would need an on-chip bandwidth term, which the v1 "
+            f"machine model does not have (D5b, D30)."
+            if machine.unit.weight_sets > 1
+            else f"{machine.unit.name} stores no weights of its own — operands are read per "
+            f"instruction — so there is no weight-residency limit on the array itself (D30)."
+        ),
         "Peak activation footprint assumes an allocator that frees each tensor the instant its "
         "last reader completes — optimistic.",
         "A phase costs the sum of its operations; no overlap is modelled between one kernel's "

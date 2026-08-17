@@ -33,6 +33,12 @@ compute_units:
     supported_dtypes: [int8]         # Table C: weights 8-bit, activations 8-bit. Only.
     dtype_multipliers: {int8: 0.125} # bit-serial: 8 cycles per INT8 activation
     systolic_dims: [512, 512]
+    # Table C: "512 x 512 x 4 weight sets", 1 MiB of IMC per core = exactly four
+    # 512x512 INT8 tiles. The array computes with one at a time, so the SoC holds
+    # 4 x 4 = 16 tiles and runs 4 of them; the paper states weight sets are
+    # "independently addressed for write or compute" with "simultaneous
+    # computation and weight reloading on different weight sets" (D30).
+    weight_sets: 4
     dataflow: ws
   # The DPU: "a data processing unit (DPU) for element-wise vector operations and
   # activations". Distinct silicon from the MVM engine, so norms, requantisation

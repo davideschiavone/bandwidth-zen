@@ -69,6 +69,11 @@ class ComputeUnit(SpecModel):
     systolic_dims: tuple[int, int] | None = Field(
         default=None, description="Rows x columns of the PE array; drives the M3 tail-effect model"
     )
+    weight_sets: int = Field(
+        default=1,
+        gt=0,
+        description="Array-sized weight tiles ONE unit holds at once. Metis declares 4.",
+    )
     dataflow: Dataflow = Dataflow.WEIGHT_STATIONARY
 
     @model_validator(mode="after")
@@ -96,6 +101,20 @@ class ComputeUnit(SpecModel):
     def supports(self, dtype: DType) -> bool:
         """True if this unit can execute *dtype* at all."""
         return dtype in self.supported_dtypes
+
+    def resident_tile_capacity(self) -> int:
+        """Weight tiles the whole chip holds in its arrays at once.
+
+        For an in-memory-compute array this is a hard constraint rather than a
+        cache hint: a D-IMC weight cannot take part in a MAC until it has been
+        *written into a bank*. Metis has 4 weight sets per AI core and 4 cores,
+        so 16 tiles are resident and 4 compute at any instant; a matmul needing
+        more than 16 must re-write the array as it goes (docs/CORRECTIONS.md
+        D30). Chips whose arrays hold no persistent weights — an NVIDIA tensor
+        core reads every operand from the register file — leave ``weight_sets``
+        at 1, and the figure is then just the number of arrays.
+        """
+        return self.count * self.weight_sets
 
     def peak_flops_per_s(self, clock_hz: float, dtype: DType, *, sparsity: bool = False) -> float:
         """Peak throughput in OP/s: ``count x MACs/cycle x clock x multiplier x 2``.
