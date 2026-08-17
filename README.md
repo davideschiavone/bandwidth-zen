@@ -114,6 +114,16 @@ uv run bwz matmul -M 10000 -N 10000 -K 10000 --chip a100_80gb --dtype fp16 --ide
 datasheet by hand. Drop `-M` to 1 and the same matmul reports 5.88% utilisation — `1/17` of the
 array — and flips to DRAM-bound.
 
+**To see that same run instead of reading it** — one row per hardware resource, zoomable:
+
+```bash
+uv run --group plots python scripts/plot_pipeline.py \
+  --chip a100_80gb --matmul 10000,10000,10000 --ideal --html --out ..
+xdg-open ../timeline-a100_80gb-fp16.html
+```
+
+More in [Figures](#figures).
+
 Widths are per operand, and the result width is the **accumulator** width — it changes bytes only,
 never operations:
 
@@ -127,8 +137,6 @@ uv run bwz matmul -M 4096 -N 4096 -K 4096 -c a100_80gb --a fp16 --b int8        
 All four do the same 137.4 GOP. The int32 result quadruples C from 16.8 MB to 67.1 MB and halves
 the arithmetic intensity; the mixed-operand case runs at the **fp16** rate, because both operands
 share one datapath — the narrow side saves bytes and buys no throughput.
-
-To *see* where the time went rather than read it, `make plots` — see [Figures](#figures).
 
 Sweep and take the Pareto frontier:
 
@@ -147,6 +155,28 @@ docker compose up      # http://localhost:5173
 ---
 
 ## Figures
+
+**The same run, as numbers and then as a picture.** Three lines, from `backend/`:
+
+```bash
+# 1. the numbers
+uv run bwz matmul -M 10000 -N 10000 -K 10000 --chip a100_80gb --dtype fp16 --ideal
+
+# 2. the picture of that same run
+uv run --group plots python scripts/plot_pipeline.py \
+  --chip a100_80gb --matmul 10000,10000,10000 --ideal --html --out ..
+
+# 3. open it
+xdg-open ../timeline-a100_80gb-fp16.html
+```
+
+The first prints the report — 2 TOP, 539 MB of DRAM traffic, 6.43 ms, `COMPUTE_BOUND`. The second
+writes `timeline-a100_80gb-fp16.png` and a zoomable `.html` beside it. Note the shape is
+`-M 10000 -N 10000 -K 10000` for the report and `--matmul 10000,10000,10000` for the plot: one is a
+workload, the other is a list of shapes to draw.
+
+`--out ..` puts them in the repo root, where they are gitignored. To regenerate the committed
+figures instead:
 
 ```bash
 make plots        # → docs/plots/
