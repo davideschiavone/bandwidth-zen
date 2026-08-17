@@ -237,7 +237,9 @@ uv run --group plots python scripts/plot_pipeline.py --chip h100_sxm --matmul 81
 `plot_pipeline.py`: `--chip` (repeatable), `--matmul M,N,K`, `--weights`, `--ideal`, `--steps`,
 `--zoom`, `--kanata`, `--out`.
 
-See [`plots/README.md`](plots/README.md) for how to read the output.
+The pipeline figure gives every declared memory level and compute unit its own row, with the bytes
+moved, the achieved bandwidth and the operations retired written beside it — and draws grey the
+resources this model never uses. See [`plots/README.md`](plots/README.md) for how to read it.
 
 ---
 

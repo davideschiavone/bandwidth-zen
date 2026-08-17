@@ -503,3 +503,37 @@ at total scale one step of a 65 536-tile matmul is a hairline. The x axis is nor
 total time in both, which is what makes two chips comparable when their absolute times differ by
 orders of magnitude. Kanata has no cycle here — a tick is `total/resolution`, stated in the file
 header.
+
+
+---
+
+## D20 — The pipeline figure is resource-centric, not instruction-centric (2026-08-17)
+
+D19 shipped the trace with a Kanata log as its headline output. Konata draws one row per
+instruction with stages inside it, which is right for a CPU pipeline and wrong here: it answers
+"what happened to this tile" when the question a comparison asks is "what was the memory system
+doing while the array worked". User verdict (2026-08-17): *"it doesn't give us the insights … you
+must explicitly dedicate a DRAM row for the copy … with the BW and number of BYTES being copied as
+an info box"*. Correct.
+
+Decision: `scripts/plot_pipeline.py` is now the primary output and its **rows are hardware
+resources read off the chip profile** — every memory level and every compute unit — with the
+quantity written beside each: bytes and achieved bandwidth on the DRAM row, bytes and buffer count
+on the on-chip row, operations and achieved rate on the compute row, plus three headline boxes
+above. `Span` gained `bytes_moved`, `flops` and `resident_bytes` so the figure reads the report's
+own quantities rather than recomputing them; a test asserts they match.
+
+**Resources the model does not use are drawn grey rather than omitted.** A100 declares L1, L2, HBM,
+432 tensor cores and 6912 CUDA cores; v1 spends HBM's bandwidth, L1's capacity and the tensor
+cores, and nothing else. Two of five rows are therefore idle with the reason on them — "declared,
+not modelled — the roofline is flat (D5)" and "idle — peak is the max over units, not the sum".
+Putting the model's boundary on the page beats hiding it, and against `chip_a` — three rows, DRAM
+reading `0 B — nothing crossed` because 55 MB of SRAM holds all of B — the contrast is the
+comparison the figure exists for.
+
+The Kanata log stays, demoted to `--kanata`: Konata remains a good viewer for step-level detail,
+and `make konata` still opens it. It is no longer what the figure is *for*.
+
+Layout note, since it cost two attempts: row counts vary by chip (five for A100, three for
+`chip_a`), so every vertical position is now derived in **inches** from the row count and converted
+once. Guessing figure fractions put the second register on top of the footer.

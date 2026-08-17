@@ -22,7 +22,7 @@ in its own `plots` dependency group, so `make test` does not pull it in.
 |---|---|---|
 | `roofline-<chip>-<dtype>.png` | `plot_roofline.py` | The two ceilings, the ridge point, the M=1 tail line, and a set of workloads placed on them |
 | `pipeline-<chip>.png` | `plot_roofline.py` | The three-element machine (D5a) — DRAM, SRAM-as-capacity, array — and which link carries a bandwidth number |
-| `pipeline-matmul-<chip>-<dtype>.png` | `plot_pipeline.py` | The tile schedule: which resource is busy when, at total scale and zoomed |
+| `pipeline-matmul-<chip>-<dtype>.png` | `plot_pipeline.py` | Where the time went, per hardware resource, with the bytes and operations on each row |
 | `pipeline-matmul-<chip>-<dtype>.kanata` | `plot_pipeline.py --kanata` | The same schedule as a Kanata log, for [Konata](https://github.com/shioyadan/Konata) |
 
 Open either `.kanata` file — or both at once, side by side — with:
@@ -49,8 +49,20 @@ declared depth, and `--ideal` leaves it exactly where it is.
 
 ## Reading the pipeline
 
-Three lanes: DRAM (the one modelled link), on-chip SRAM (capacity — tiles in flight), and the
-array. The x axis is normalised to the total time in both registers, which is what makes two chips
+**Rows are resources, read off the chip profile** — every memory level and every compute unit the
+profile declares, not one row per step. That is the axis a comparison needs: "what was the memory
+system doing while the array worked" rather than "what happened to this tile".
+
+Three info boxes carry the headline quantities — bytes copied from DRAM and at what rate, bytes
+held on chip and in how many buffers, operations computed and at what fraction of peak — and each
+row repeats its own share to the right.
+
+**Grey rows are declared by the chip and unused by this model.** A100 has 40 MB of L2 and 6912 CUDA
+cores that the v1 roofline never spends; drawing them idle puts the model's boundary on the page
+instead of hiding it. Next to `chip_a`, whose 55 MB of SRAM holds all of operand B and whose DRAM
+row reads `0 B — nothing crossed`, that contrast *is* the architecture comparison.
+
+The x axis is normalised to the total time in both registers, which is what makes two chips
 comparable when their absolute times differ by orders of magnitude; absolute figures are on the
 ticks.
 

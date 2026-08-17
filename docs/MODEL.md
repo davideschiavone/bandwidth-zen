@@ -432,9 +432,14 @@ own schedule (D5a). Its span therefore equals the reported latency exactly.
 Two outputs, same data:
 
 ```
-bwz matmul -M 4096 -N 4096 -K 4096 -c a100_80gb --kanata run.kanata   # open in Konata
-make plots                                                            # docs/plots/pipeline-matmul-*.png
+make plots                                                          # docs/plots/pipeline-matmul-*.png
+bwz matmul -M 4096 -N 4096 -K 4096 -c a100_80gb --kanata run.kanata # step detail, for Konata
 ```
+
+The figure's rows are **hardware resources** — every memory level and compute unit the profile
+declares — with bytes, bandwidth and operations written on each, because that is the axis an
+architecture comparison needs (`docs/CORRECTIONS.md` D20). The Kanata log is instruction-centric
+and remains available for per-step inspection.
 
 ![A100 tile schedule](plots/pipeline-matmul-a100_80gb-fp16.png)
 

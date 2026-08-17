@@ -1,24 +1,23 @@
-"""Draw the resource schedule behind a chip's latency — the Konata view, offline.
-
-One figure per chip, because the schedule is a property of the machine: the same
-matmul is a compute-bound staircase on A100 and a DRAM-starved one on an edge NPU
-with a tenth the bandwidth, and that difference is the thing worth seeing.
+"""Where the time went, on which piece of hardware — one figure per chip.
 
     uv run --group plots python scripts/plot_pipeline.py --chip a100_80gb
 
-Two registers, stacked:
+**Rows are resources, not steps.** Konata's view is instruction-centric — one row
+per tile step, stages within the row — which answers "what happened to this tile"
+and not "what was the memory system doing while the array worked". For comparing
+two architectures only the second question matters, so this figure gives every
+declared memory level and every declared compute unit its own row and writes the
+quantity beside it: bytes moved and at what rate, operations retired and at what
+fraction of peak, how much the buffers hold.
 
-- **the whole run**, one bar per lane at total scale — where the time went;
-- **the first few steps**, zoomed, so the double-buffered overlap is visible at
-  all. At total scale a tile step of a 390 625-tile matmul is a hairline.
+Rows come from the chip profile, so the picture shows what the machine *has*, and
+a resource the v1 model does not use is drawn grey rather than quietly omitted.
+A100 declares L1, L2 and HBM plus tensor and CUDA cores; only HBM (bandwidth), L1
+(capacity) and the tensor cores carry anything here, and the grey rows are
+exactly where the model's boundary lies.
 
-The x-axis is normalised to the total time, which is what makes two chips
-comparable at a glance: the shapes can be laid side by side even when the
-absolute times differ by three orders of magnitude. Absolute figures are printed
-on the bars.
-
-Same data as ``--kanata``; this is the version that does not need Konata
-installed.
+Two registers: the whole run at total scale, and the first steps zoomed, since at
+total scale one step of a 65 536-tile matmul is a hairline.
 """
 
 from __future__ import annotations
@@ -28,11 +27,12 @@ import shlex
 import subprocess
 import sys
 import textwrap
+from dataclasses import dataclass
 from pathlib import Path
 
 import matplotlib
 import matplotlib.pyplot as plt
-from matplotlib.patches import Rectangle
+from matplotlib.patches import FancyBboxPatch, Rectangle
 
 import bwz
 from bwz.analysis import analyze, idealised, machine_model
@@ -40,7 +40,7 @@ from bwz.analysis.pipeline import Lane, PipelineTrace, Span, build_trace
 from bwz.graph import GraphPhase, build_graph
 from bwz.kanata import to_kanata
 from bwz.spec import DeploymentSpec, DType, HardwareSpec, MatmulSpec, load_chip
-from bwz.units import format_bytes, format_quantity, format_time
+from bwz.units import format_bandwidth, format_bytes, format_quantity, format_time
 
 matplotlib.use("Agg")
 
@@ -49,23 +49,404 @@ INK = "#0b0b0b"
 INK_SECONDARY = "#52514e"
 INK_MUTED = "#8a8983"
 GRID = "#e6e5e1"
-# Slots 1 and 2 of the documented categorical palette, plus a muted neutral for
-# the buffer. Three lanes, and every bar is directly labelled, so colour is
-# reinforcing identity rather than carrying it alone.
-LANE_COLOUR = {Lane.DRAM: "#2a78d6", Lane.SRAM: "#8a8983", Lane.CORE: "#eb6834"}
-LANE_TITLE = {
-    Lane.DRAM: "DRAM",
-    Lane.SRAM: "on-chip SRAM",
-    Lane.CORE: "compute array",
-}
-LANE_LEGEND = (
-    "DRAM = the one modelled link · SRAM = capacity, tile buffers in flight · array = arithmetic"
-)
+BOX = "#f2f1ed"
+# Slots 1 and 2 of the documented categorical palette, plus a neutral for the
+# buffer. Three roles, not eight, and every row is directly labelled.
+COLOUR = {Lane.DRAM: "#2a78d6", Lane.SRAM: "#8a8983", Lane.CORE: "#eb6834"}
+IDLE = "#e6e5e1"
+
+
+@dataclass(frozen=True)
+class Row:
+    """One hardware resource, drawn whether or not this workload touches it."""
+
+    title: str
+    detail: str
+    lane: Lane | None
+    """The trace lane whose spans belong on this row, or None for a resource the
+    model declares and never uses — the rows that show where it stops."""
+    note: str = ""
+
+
+def rows_for(chip: HardwareSpec, dtype: DType) -> list[Row]:
+    """Resource rows, read off the chip profile.
+
+    The v1 machine is three elements (``docs/CORRECTIONS.md`` D5a): the deepest
+    memory level supplies bandwidth, the shallowest supplies capacity, the
+    fastest compute unit supplies TOPS. Everything else a profile declares is
+    drawn idle with the reason, which is more honest than leaving it out — an
+    A100 has 40 MB of L2 this model never spends, and that omission is worth
+    seeing next to a chip whose SRAM is the whole story.
+    """
+    rows: list[Row] = []
+    deepest = chip.memory[-1]
+    shallowest = chip.memory[0]
+    governing = max(
+        (u for u in chip.compute_units if u.supports(dtype)),
+        key=lambda u: u.peak_flops_per_s(chip.clock_hz, dtype),
+    )
+
+    for level in reversed(chip.memory):
+        detail = (
+            f"{format_bytes(level.capacity_bytes)} · "
+            f"{format_bandwidth(level.bandwidth_bytes_per_s)}"
+        )
+        if level is deepest:
+            rows.append(Row(level.name, detail, Lane.DRAM, "the only bandwidth ceiling (D5a)"))
+        elif level is shallowest:
+            rows.append(
+                Row(level.name, detail, Lane.SRAM, "capacity only — no bandwidth term (D5b)")
+            )
+        else:
+            rows.append(
+                Row(level.name, detail, None, "declared, not modelled — the roofline is flat (D5)")
+            )
+
+    for unit in chip.compute_units:
+        geometry = (
+            f"{unit.systolic_dims[0]}x{unit.systolic_dims[1]} array"
+            if unit.systolic_dims
+            else f"{unit.ops_per_cycle_per_unit:g} MAC/cycle"
+        )
+        detail = f"{unit.count} x {geometry}"
+        if unit is governing:
+            peak = unit.peak_flops_per_s(chip.clock_hz, dtype)
+            rows.append(
+                Row(
+                    unit.name,
+                    detail,
+                    Lane.CORE,
+                    f"peak {format_quantity(peak, 'OP/s')} at {dtype.value}",
+                )
+            )
+        elif unit.supports(dtype):
+            rows.append(
+                Row(unit.name, detail, None, "idle — peak is the max over units, not the sum")
+            )
+        else:
+            rows.append(Row(unit.name, detail, None, f"idle — no {dtype.value} datapath"))
+    return rows
+
+
+def _bars(ax: plt.Axes, rows: list[Row], spans: list[Span], window: tuple[float, float]) -> None:
+    """One rectangle per span, on its resource's row, x normalised to *window*."""
+    start, end = window
+    width_s = (end - start) or 1.0
+    for index, row in enumerate(rows):
+        if row.lane is None:
+            ax.add_patch(
+                Rectangle(
+                    (0, index + 0.34),
+                    1,
+                    0.32,
+                    facecolor=IDLE,
+                    edgecolor="none",
+                    zorder=1,
+                )
+            )
+            continue
+        for span in spans:
+            if span.lane is not row.lane:
+                continue
+            ax.add_patch(
+                Rectangle(
+                    ((span.start_s - start) / width_s, index + 0.18),
+                    max(span.duration_s / width_s, 0.0015),
+                    0.64,
+                    facecolor=COLOUR[row.lane],
+                    edgecolor=SURFACE,
+                    linewidth=0.7,
+                    zorder=3,
+                )
+            )
+
+
+def _row_axis(ax: plt.Axes, rows: list[Row]) -> None:
+    ax.set_ylim(len(rows), 0)
+    ax.set_xlim(0, 1)
+    ax.set_yticks([i + 0.5 for i in range(len(rows))])
+    ax.set_yticklabels([""] * len(rows))  # titles are drawn explicitly, with their detail
+    ax.set_facecolor(SURFACE)
+    ax.tick_params(colors=INK_SECONDARY, labelsize=8.5, length=0)
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+    ax.grid(True, axis="x", color=GRID, lw=0.8, zorder=0)
+    ax.set_axisbelow(True)
+
+
+def _ticks(ax: plt.Axes, end: float, count: int) -> None:
+    fractions = [i / (count - 1) for i in range(count)]
+    ax.set_xticks(fractions)
+    ax.set_xticklabels([format_time(f * end) for f in fractions], fontsize=8.5)
+
+
+def _quantity(row: Row, trace: PipelineTrace) -> str:
+    """What went through this resource. The part an instruction-centric view
+    cannot give: a row means nothing for a comparison until it carries a number."""
+    totals, busy, concurrency = trace.totals, trace.busy_s, trace.concurrency
+    if row.lane is Lane.DRAM:
+        if totals[Lane.DRAM] <= 0:
+            return "0 B — nothing crossed"
+        rate = totals[Lane.DRAM] / busy[Lane.DRAM] if busy[Lane.DRAM] else 0.0
+        return f"{format_bytes(totals[Lane.DRAM])} @ {format_bandwidth(rate)}"
+    if row.lane is Lane.SRAM:
+        mean, peak = concurrency[Lane.SRAM]
+        return f"{format_bytes(totals[Lane.SRAM])} in {peak} buffers (x{mean:.2f} avg)"
+    if row.lane is Lane.CORE:
+        rate = totals[Lane.CORE] / busy[Lane.CORE] if busy[Lane.CORE] else 0.0
+        return f"{format_quantity(totals[Lane.CORE], 'OP')} @ {format_quantity(rate, 'OP/s')}"
+    return "not used"
+
+
+def _info_boxes(
+    fig: plt.Figure,
+    trace: PipelineTrace,
+    chip: HardwareSpec,
+    dtype: DType,
+    top_in: float,
+    fig_h: float,
+) -> None:
+    """The three numbers a comparison turns on: what was copied, what was held,
+    what was computed — each with its rate and its share of the span."""
+    totals, busy, concurrency = trace.totals, trace.busy_s, trace.concurrency
+    span = trace.total_s or 1.0
+    peak = machine_model(chip, dtype).peak_flops_per_s
+    buffers = max(concurrency[Lane.SRAM][1], 1)
+    core_rate = totals[Lane.CORE] / busy[Lane.CORE] if busy[Lane.CORE] else 0.0
+
+    boxes = [
+        (
+            COLOUR[Lane.DRAM],
+            "COPIED FROM DRAM",
+            format_bytes(totals[Lane.DRAM]),
+            f"{format_bandwidth(totals[Lane.DRAM] / busy[Lane.DRAM]) if busy[Lane.DRAM] else '—'}"
+            f" while active\n{format_time(busy[Lane.DRAM])} — {busy[Lane.DRAM] / span:.0%}"
+            f" of the span",
+        ),
+        (
+            COLOUR[Lane.SRAM],
+            "HELD ON CHIP",
+            format_bytes(totals[Lane.SRAM]),
+            f"{buffers} buffers x {format_bytes(totals[Lane.SRAM] / buffers)}\n"
+            f"of {format_bytes(chip.on_chip_capacity_bytes)} capacity",
+        ),
+        (
+            COLOUR[Lane.CORE],
+            "COMPUTED",
+            format_quantity(totals[Lane.CORE], "OP"),
+            f"{format_quantity(core_rate, 'OP/s')} of {format_quantity(peak, 'OP/s')} peak\n"
+            f"{format_time(busy[Lane.CORE])} — {busy[Lane.CORE] / span:.0%} of the span",
+        ),
+    ]
+
+    box_h = 1.05
+    for index, (colour, heading, headline, detail) in enumerate(boxes):
+        x = 0.038 + index * 0.312
+
+        def at(offset_in: float, base: float = top_in) -> float:
+            return 1.0 - (base + offset_in) / fig_h
+
+        fig.patches.append(
+            FancyBboxPatch(
+                (x, at(box_h)),
+                0.286,
+                box_h / fig_h,
+                boxstyle="round,pad=0.004,rounding_size=0.006",
+                transform=fig.transFigure,
+                facecolor=BOX,
+                edgecolor=colour,
+                linewidth=1.4,
+                zorder=1,
+            )
+        )
+        fig.text(x + 0.014, at(0.26), heading, fontsize=8, color=colour, fontweight="bold")
+        fig.text(x + 0.014, at(0.62), headline, fontsize=17, color=INK, fontweight="bold")
+        fig.text(
+            x + 0.014,
+            at(0.74),
+            detail,
+            fontsize=8,
+            color=INK_SECONDARY,
+            linespacing=1.5,
+            va="top",
+        )
+
+
+def draw(
+    chip: HardwareSpec,
+    dtype: DType,
+    trace: PipelineTrace,
+    spec: MatmulSpec,
+    command: str,
+    out: Path,
+    zoom_steps: int,
+) -> None:
+    """Lay the figure out in inches and convert once.
+
+    Row count varies with the chip — A100 declares five resources, chip_a three —
+    so every vertical position is derived from it rather than guessed as a
+    fraction, which is what stops the second register from landing on the footer.
+    """
+    rows = rows_for(chip, dtype)
+    row_h, header, gap, footer = 0.48, 3.05, 1.15, 1.05
+    band = row_h * len(rows)
+    fig_w, fig_h = 13.0, header + band + gap + band + footer
+    fig = plt.figure(figsize=(fig_w, fig_h), dpi=160, facecolor=SURFACE)
+
+    def y(inches_from_top: float) -> float:
+        return 1.0 - inches_from_top / fig_h
+
+    left, width = 2.55 / fig_w, (fig_w - 2.55 - 2.85) / fig_w
+    top = fig.add_axes((left, y(header + band), width, band / fig_h))
+    bottom = fig.add_axes((left, y(header + 2 * band + gap), width, band / fig_h))
+
+    zoom = min(zoom_steps, trace.steps)
+    cutoff = max((s.end_s for s in trace.spans if s.step < zoom), default=trace.total_s)
+
+    _bars(top, rows, list(trace.spans), (0.0, trace.total_s))
+    _row_axis(top, rows)
+    _ticks(top, trace.total_s, 5)
+    _bars(bottom, rows, [s for s in trace.spans if s.start_s < cutoff], (0.0, cutoff))
+    _row_axis(bottom, rows)
+    _ticks(bottom, cutoff, 3)
+
+    for axes in (top, bottom):
+        for index, row in enumerate(rows):
+            centre = index + 0.5
+            axes.text(
+                -0.012,
+                centre - 0.03,
+                row.title,
+                transform=axes.get_yaxis_transform(),
+                ha="right",
+                va="bottom",
+                fontsize=9.5,
+                color=INK,
+                fontweight="bold",
+            )
+            axes.text(
+                -0.012,
+                centre + 0.04,
+                f"{row.detail}\n{row.note}",
+                transform=axes.get_yaxis_transform(),
+                ha="right",
+                va="top",
+                fontsize=6.6,
+                color=INK_MUTED,
+                linespacing=1.3,
+            )
+    for index, row in enumerate(rows):
+        top.text(
+            1.015,
+            index + 0.5,
+            _quantity(row, trace),
+            transform=top.get_yaxis_transform(),
+            va="center",
+            fontsize=8.5,
+            color=INK if row.lane is not None else INK_MUTED,
+        )
+
+    fig.text(
+        0.038,
+        y(0.50),
+        f"{chip.name} — {spec.name} at {dtype.value}",
+        fontsize=16,
+        fontweight="bold",
+        color=INK,
+    )
+    fig.text(0.038, y(0.84), _subtitle(trace), fontsize=10, color=INK_SECONDARY)
+    _info_boxes(fig, trace, chip, dtype, 1.15, fig_h)
+    fig.text(
+        0.038,
+        y(header - 0.52),
+        "Every resource the profile declares — the whole run",
+        fontsize=11,
+        fontweight="bold",
+        color=INK,
+    )
+    fig.text(
+        0.038,
+        y(header - 0.28),
+        "Grey rows are declared by the chip and unused by this model: that is where its "
+        "boundary lies.",
+        fontsize=8.5,
+        color=INK_MUTED,
+    )
+    fig.text(
+        0.038,
+        y(header + band + gap - 0.52),
+        f"First {zoom} steps — {format_time(cutoff)} of it",
+        fontsize=11,
+        fontweight="bold",
+        color=INK,
+    )
+    fig.text(
+        0.038,
+        y(header + band + gap - 0.28),
+        "A load and the previous tile's arithmetic overlap exactly as far as capacity "
+        "allowed a second buffer.",
+        fontsize=8.5,
+        color=INK_MUTED,
+    )
+
+    for offset, line in enumerate(textwrap.wrap(f"$ {command}", width=132)):
+        fig.text(
+            0.038,
+            y(fig_h - 0.62 + 0.20 * offset),
+            line,
+            fontsize=8.5,
+            color=INK_SECONDARY,
+            family="monospace",
+        )
+    fig.text(
+        0.038,
+        y(fig_h - 0.22),
+        f"bwz {bwz.__version__}{_git()} — every bar is a slice of the reported latency: "
+        f"the DRAM row sums to t_dram and the compute row to t_compute.",
+        fontsize=8,
+        color=INK_MUTED,
+    )
+
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out, facecolor=SURFACE)
+    plt.close(fig)
+    print(f"wrote {out}")
+
+
+def _subtitle(trace: PipelineTrace) -> str:
+    steps = (
+        f"{trace.steps} steps drawn, coalesced from {trace.tiles} tiles. "
+        if trace.coalesced
+        else f"{trace.steps} tile steps. "
+    )
+    if not trace.double_buffered:
+        buffering = "No double buffer: loads and arithmetic alternate."
+    elif trace.fill_drain_s > 0:
+        buffering = (
+            f"Double buffered — the reported latency omits {format_time(trace.fill_drain_s)} "
+            f"of pipeline fill/drain."
+        )
+    else:
+        buffering = (
+            "Double buffered, but nothing crosses DRAM to overlap, so the span is the reported "
+            "latency exactly."
+        )
+    return f"Span {format_time(trace.total_s)}. {steps}{buffering}"
+
+
+def _git() -> str:
+    try:
+        sha = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True, check=True
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return ""
+    return f" @ {sha}"
 
 
 def build(
     chip: HardwareSpec, m: int, n: int, k: int, dtype: DType, steps: int
-) -> tuple[PipelineTrace, MatmulSpec, dict[str, float]]:
+) -> tuple[PipelineTrace, MatmulSpec]:
     spec = MatmulSpec.model_validate(
         {
             "id": "p",
@@ -82,266 +463,21 @@ def build(
     report = analyze(spec, chip, deployment)
     if not report.feasible:
         raise SystemExit(f"bwz: infeasible on {chip.id}: {report.infeasibility[0]}")
-
-    machine = machine_model(chip, spec.operand_dtype)
     trace = build_trace(
         build_graph(spec, deployment, GraphPhase.STATIC),
         report.phases[0],
-        machine,
+        machine_model(chip, spec.operand_dtype),
         double_buffered=report.memory.double_buffered,
         max_steps=steps,
     )
-    op = report.phases[0].ops[0]
-    facts = {
-        "flops": op.flops,
-        "dram_bytes": op.dram_bytes,
-        "utilization": op.utilization,
-        "peak": machine.peak_flops_per_s,
-        "on_chip": chip.on_chip_capacity_bytes,
-        "bandwidth": chip.dram.bandwidth_bytes_per_s,
-        "resident": report.memory.resident_fraction,
-    }
-    return trace, spec, facts
+    return trace, spec
 
 
-def _bars(ax: plt.Axes, spans: list[Span], span_s: float, *, origin: float = 0.0) -> None:
-    """One row per lane, one rectangle per span, x normalised to *span_s*."""
-    for span in spans:
-        row = list(Lane).index(span.lane)
-        x0 = (span.start_s - origin) / span_s
-        width = max(span.duration_s / span_s, 0.0015)
-        ax.add_patch(
-            Rectangle(
-                (x0, row + 0.18),
-                width,
-                0.64,
-                facecolor=LANE_COLOUR[span.lane],
-                edgecolor=SURFACE,
-                linewidth=0.8,
-                zorder=3,
-            )
-        )
-
-
-def _idle_note(ax: plt.Axes, spans: list[Span]) -> None:
-    """Say so when a lane never runs. An empty row reads as a rendering failure;
-    "nothing crossed DRAM" is a result, and on an NPU holding all of B it is the
-    headline result."""
-    busy_lanes = {span.lane for span in spans}
-    for row, lane in enumerate(Lane):
-        if lane not in busy_lanes:
-            ax.text(
-                0.5,
-                row + 0.5,
-                "idle — nothing crossed this link",
-                ha="center",
-                va="center",
-                fontsize=8.5,
-                color=INK_MUTED,
-                style="italic",
-            )
-
-
-def _lane_axis(ax: plt.Axes) -> None:
-    ax.set_ylim(len(Lane), 0)
-    ax.set_yticks([i + 0.5 for i in range(len(Lane))])
-    ax.set_yticklabels([LANE_TITLE[lane] for lane in Lane], fontsize=9.5, color=INK)
-    ax.set_facecolor(SURFACE)
-    ax.tick_params(colors=INK_SECONDARY, labelsize=8.5, length=0)
-    for spine in ax.spines.values():
-        ax.spines[spine.spine_type].set_visible(False)
-    ax.grid(True, axis="x", color=GRID, lw=0.8, zorder=0)
-    ax.set_axisbelow(True)
-
-
-def draw(
-    chip: HardwareSpec,
-    trace: PipelineTrace,
-    spec: MatmulSpec,
-    facts: dict[str, float],
-    command: str,
-    out: Path,
-    zoom_steps: int,
-) -> None:
-    fig = plt.figure(figsize=(11.5, 6.6), dpi=160, facecolor=SURFACE)
-    top = fig.add_axes((0.135, 0.600, 0.76, 0.175))
-    bottom = fig.add_axes((0.135, 0.255, 0.76, 0.175))
-
-    # -- whole run ---------------------------------------------------------
-    _bars(top, list(trace.spans), trace.total_s)
-    _idle_note(top, list(trace.spans))
-    _lane_axis(top)
-    top.set_xlim(0, 1)
-    top.set_xticks([0, 0.25, 0.5, 0.75, 1.0])
-    top.set_xticklabels(
-        [format_time(f * trace.total_s) for f in (0, 0.25, 0.5, 0.75, 1.0)], fontsize=8.5
-    )
-    # DRAM and the array are serial resources, so their occupancy is a duty cycle.
-    # SRAM is n buffers, so the same ratio is a depth — labelling both "%" made
-    # two-tiles-resident read as "196% busy".
-    concurrency = trace.concurrency
-    for row, lane in enumerate(Lane):
-        mean, peak = concurrency[lane]
-        label = f"x{mean:.2f} of {peak}" if lane is Lane.SRAM else f"{mean:.0%}"
-        top.text(
-            1.008,
-            row + 0.5,
-            label,
-            transform=top.get_yaxis_transform(),
-            va="center",
-            fontsize=9,
-            color=INK_SECONDARY,
-        )
-
-    # -- zoom --------------------------------------------------------------
-    zoom = min(zoom_steps, trace.steps)
-    cutoff = max(
-        (s.end_s for s in trace.spans if s.step < zoom),
-        default=trace.total_s,
-    )
-    window = [s for s in trace.spans if s.start_s < cutoff]
-    _bars(bottom, window, cutoff)
-    _idle_note(bottom, window)
-    _lane_axis(bottom)
-    bottom.set_xlim(0, 1)
-    bottom.set_xticks([0, 0.5, 1.0])
-    bottom.set_xticklabels([format_time(f * cutoff) for f in (0, 0.5, 1.0)], fontsize=8.5)
-
-    _headings(fig, chip, trace, spec, facts, zoom, cutoff)
-    for offset, line in enumerate(textwrap.wrap(f"$ {command}", width=118)):
-        fig.text(
-            0.045,
-            0.105 - 0.028 * offset,
-            line + (" \\" if offset == 0 and len(command) > 116 else ""),
-            fontsize=8.5,
-            color=INK_SECONDARY,
-            family="monospace",
-        )
-    fig.text(
-        0.045,
-        0.038,
-        f"bwz {bwz.__version__}{_git()} — spans are a decomposition of the reported latency, "
-        f"not a second model.",
-        fontsize=8,
-        color=INK_MUTED,
-    )
-
-    out.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out, facecolor=SURFACE)
-    plt.close(fig)
-    print(f"wrote {out}")
-
-
-def _headings(
-    fig: plt.Figure,
-    chip: HardwareSpec,
-    trace: PipelineTrace,
-    spec: MatmulSpec,
-    facts: dict[str, float],
-    zoom: int,
-    cutoff: float,
-) -> None:
-    fig.text(
-        0.045,
-        0.948,
-        f"{chip.name} — {spec.name} at {spec.operand_dtype.value}",
-        fontsize=15,
-        fontweight="bold",
-        color=INK,
-    )
-    fig.text(
-        0.045,
-        0.898,
-        f"{format_quantity(facts['flops'], 'OP')} against "
-        f"{format_bytes(facts['dram_bytes'])} of DRAM traffic; "
-        f"{format_bytes(facts['on_chip'])} on chip holds "
-        f"{facts['resident']:.0%} of operand B. Span {format_time(trace.total_s)}.",
-        fontsize=10,
-        color=INK_SECONDARY,
-    )
-    fig.text(
-        0.045,
-        0.860,
-        f"{trace.steps} steps"
-        + (f" drawn, coalesced from {trace.tiles} tiles" if trace.coalesced else " (tiles)")
-        + f"; double buffered: {'yes' if trace.double_buffered else 'no'}"
-        + (
-            f"; fill/drain {format_time(trace.fill_drain_s)} on top of the reported "
-            f"{format_time(trace.reported_latency_s)}"
-            if trace.fill_drain_s > 0
-            else "; span equals the reported latency"
-        ),
-        fontsize=10,
-        color=INK_SECONDARY,
-    )
-
-    fig.text(0.045, 0.806, "The whole run", fontsize=11, fontweight="bold", color=INK)
-    fig.text(
-        0.135,
-        0.782,
-        LANE_LEGEND,
-        fontsize=8.5,
-        color=INK_MUTED,
-    )
-    fig.text(
-        0.135,
-        0.532,
-        textwrap.fill(
-            "x normalised to the total, so two chips can be laid side by side. Right-hand "
-            "figures: DRAM and the array are serial resources, so theirs is a duty cycle; SRAM "
-            "is n buffers, so theirs is a depth.",
-            width=108,
-        ),
-        fontsize=8.5,
-        color=INK_MUTED,
-        va="top",
-        linespacing=1.5,
-    )
-
-    fig.text(
-        0.045,
-        0.470,
-        f"First {zoom} steps, zoomed",
-        fontsize=11,
-        fontweight="bold",
-        color=INK,
-    )
-    fig.text(
-        0.135,
-        0.200,
-        textwrap.fill(_zoom_caption(trace, cutoff), width=108),
-        fontsize=8.5,
-        color=INK_MUTED,
-        va="top",
-        linespacing=1.5,
-    )
-
-
-def _zoom_caption(trace: PipelineTrace, cutoff: float) -> str:
-    """What the zoom is showing — which depends on whether DRAM ran at all."""
-    head = f"{format_time(cutoff)} of it. "
-    if all(span.lane is not Lane.DRAM for span in trace.spans):
-        return (
-            head + "Operand B is entirely on chip, so there is no load to overlap: the array "
-            "runs back to back and SRAM holds two tiles only because the schedule keeps a "
-            "spare buffer."
-        )
-    if trace.double_buffered:
-        return (
-            head + "A load and the previous tile's arithmetic overlap exactly because capacity "
-            "held two tiles; SRAM is two deep throughout."
-        )
-    return head + "Capacity held one tile, so each load waits for the previous tile's arithmetic."
-
-
-def _git() -> str:
-    try:
-        sha = subprocess.run(
-            ["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True, check=True
-        ).stdout.strip()
-    except (OSError, subprocess.CalledProcessError):
-        return ""
-    return f" @ {sha}"
+def _default_dtype(chip: HardwareSpec) -> DType:
+    for candidate in (DType.FP16, DType.INT8, DType.BF16, DType.FP32):
+        if chip.supports(candidate):
+            return candidate
+    return chip.compute_units[0].supported_dtypes[0]
 
 
 def main() -> None:
@@ -363,15 +499,13 @@ def main() -> None:
         chip = load_chip(chip_id)
         if args.ideal:
             chip = idealised(chip)
-        # Default to the widest dtype the chip actually has a unit for, so an
-        # INT8-only NPU is not asked to do fp16 and declared infeasible.
         dtype = DType(args.weights) if args.weights else _default_dtype(chip)
-        trace, spec, facts = build(chip, m, n, k, dtype, args.steps)
+        trace, spec = build(chip, m, n, k, dtype, args.steps)
         draw(
             chip,
+            dtype,
             trace,
             spec,
-            facts,
             command,
             args.out / f"pipeline-matmul-{chip.id}-{dtype.value}.png",
             args.zoom,
@@ -382,13 +516,6 @@ def main() -> None:
                 to_kanata(trace, title=f"{spec.name} on {chip.name}"), encoding="utf-8"
             )
             print(f"wrote {target}")
-
-
-def _default_dtype(chip: HardwareSpec) -> DType:
-    for candidate in (DType.FP16, DType.INT8, DType.BF16, DType.FP32):
-        if chip.supports(candidate):
-            return candidate
-    return chip.compute_units[0].supported_dtypes[0]
 
 
 if __name__ == "__main__":

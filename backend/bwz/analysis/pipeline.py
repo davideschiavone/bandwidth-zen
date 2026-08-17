@@ -81,7 +81,13 @@ class Stage(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class Span:
-    """One resource busy over one interval."""
+    """One resource busy over one interval, and how much work that was.
+
+    The quantity matters as much as the interval: "DRAM was busy 4% of the span"
+    is a much weaker statement than "DRAM moved 539 MB at 2.04 TB/s", and only
+    the second lets two architectures be compared. Each lane carries the quantity
+    that is meaningful for it and leaves the others at zero.
+    """
 
     lane: Lane
     stage: Stage
@@ -90,10 +96,26 @@ class Span:
     end_s: float
     step: int
     phase: GraphPhase
+    bytes_moved: float = 0.0
+    """DRAM lane: bytes crossing the one modelled link in this span."""
+    flops: float = 0.0
+    """Core lane: operations retired in this span."""
+    resident_bytes: float = 0.0
+    """SRAM lane: bytes this buffer holds while occupied."""
 
     @property
     def duration_s(self) -> float:
         return self.end_s - self.start_s
+
+    @property
+    def rate_bytes_per_s(self) -> float:
+        """Achieved bandwidth over this span, which is the effective rate by
+        construction — the span was derived from it."""
+        return self.bytes_moved / self.duration_s if self.duration_s > 0 else 0.0
+
+    @property
+    def rate_flops_per_s(self) -> float:
+        return self.flops / self.duration_s if self.duration_s > 0 else 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,6 +139,18 @@ class PipelineTrace:
     @property
     def coalesced(self) -> bool:
         return self.tiles > self.steps
+
+    @property
+    def totals(self) -> dict[Lane, float]:
+        """The quantity each lane accounts for: bytes for DRAM, operations for the
+        core, peak bytes held for SRAM (a stock, not a flow — it does not sum)."""
+        out = {
+            Lane.DRAM: sum(s.bytes_moved for s in self.spans),
+            Lane.CORE: sum(s.flops for s in self.spans),
+            Lane.SRAM: max((s.resident_bytes for s in self.spans), default=0.0)
+            * max(self.concurrency[Lane.SRAM][1], 1),
+        }
+        return out
 
     @property
     def busy_s(self) -> dict[Lane, float]:
@@ -228,6 +262,11 @@ def _tile_trace(
         phase=phase.phase,
         dispatch_s=result.t_fixed_s,
         double_buffered=double_buffered,
+        bytes_per_step=[result.dram_bytes / steps] * steps,
+        flops_per_step=[result.flops / steps] * steps,
+        # What one buffer holds: the B tile the array is stationary on, plus the
+        # A rows streaming against it. Sized from the schedule, not asserted.
+        resident_per_step=[result.weight_bytes / tiles * per_step] * steps,
     )
     return PipelineTrace(
         spans=tuple(spans),
@@ -291,6 +330,9 @@ def _operation_trace(
         phase=phase.phase,
         dispatch_s=dispatch,
         double_buffered=double_buffered,
+        bytes_per_step=[sum(r.dram_bytes for r in g) for g in groups],
+        flops_per_step=[sum(r.flops for r in g) for g in groups],
+        resident_per_step=[max((r.weight_bytes for r in g), default=0.0) for g in groups],
     )
     return PipelineTrace(
         spans=tuple(spans),
@@ -315,6 +357,9 @@ def _pipelined_tiles(
     phase: GraphPhase,
     dispatch_s: float,
     double_buffered: bool,
+    bytes_per_step: list[float],
+    flops_per_step: list[float],
+    resident_per_step: list[float],
 ) -> list[Span]:
     """Software-pipeline the tiles of ONE operation, per the constraints above.
 
@@ -341,15 +386,48 @@ def _pipelined_tiles(
         exec_ends.append(exec_end)
 
         if loads[i] > 0:
-            spans.append(Span(Lane.DRAM, Stage.LOAD, labels[i], load_start, load_end, i, phase))
+            spans.append(
+                Span(
+                    Lane.DRAM,
+                    Stage.LOAD,
+                    labels[i],
+                    load_start,
+                    load_end,
+                    i,
+                    phase,
+                    bytes_moved=bytes_per_step[i],
+                )
+            )
         # The tile occupies a buffer from the moment its fetch begins until the
         # array is done with it. This lane is what makes double buffering
         # visible: exactly `depth` bars overlap at any instant, so the SRAM row
         # is busy for about `depth` times the span — which is the sense in which
         # capacity, not bandwidth, is what SRAM contributes.
-        spans.append(Span(Lane.SRAM, Stage.HOLD, labels[i], load_start, exec_end, i, phase))
+        spans.append(
+            Span(
+                Lane.SRAM,
+                Stage.HOLD,
+                labels[i],
+                load_start,
+                exec_end,
+                i,
+                phase,
+                resident_bytes=resident_per_step[i],
+            )
+        )
         if executes[i] > 0:
-            spans.append(Span(Lane.CORE, Stage.EXEC, labels[i], exec_start, exec_end, i, phase))
+            spans.append(
+                Span(
+                    Lane.CORE,
+                    Stage.EXEC,
+                    labels[i],
+                    exec_start,
+                    exec_end,
+                    i,
+                    phase,
+                    flops=flops_per_step[i],
+                )
+            )
     return spans
 
 
@@ -362,6 +440,9 @@ def _serial_steps(
     phase: GraphPhase,
     dispatch_s: float,
     double_buffered: bool,
+    bytes_per_step: list[float],
+    flops_per_step: list[float],
+    resident_per_step: list[float],
 ) -> list[Span]:
     """Lay operations end to end, overlapping load and compute only *within* one.
 
@@ -387,10 +468,43 @@ def _serial_steps(
         now = end
 
         if load > 0:
-            spans.append(Span(Lane.DRAM, Stage.LOAD, labels[i], start, load_end, i, phase))
-        spans.append(Span(Lane.SRAM, Stage.HOLD, labels[i], start, end, i, phase))
+            spans.append(
+                Span(
+                    Lane.DRAM,
+                    Stage.LOAD,
+                    labels[i],
+                    start,
+                    load_end,
+                    i,
+                    phase,
+                    bytes_moved=bytes_per_step[i],
+                )
+            )
+        spans.append(
+            Span(
+                Lane.SRAM,
+                Stage.HOLD,
+                labels[i],
+                start,
+                end,
+                i,
+                phase,
+                resident_bytes=resident_per_step[i],
+            )
+        )
         if execute > 0:
-            spans.append(Span(Lane.CORE, Stage.EXEC, labels[i], exec_start, end, i, phase))
+            spans.append(
+                Span(
+                    Lane.CORE,
+                    Stage.EXEC,
+                    labels[i],
+                    exec_start,
+                    end,
+                    i,
+                    phase,
+                    flops=flops_per_step[i],
+                )
+            )
     return spans
 
 

@@ -103,6 +103,24 @@ def test_double_buffering_holds_exactly_two_tiles() -> None:
     assert depth == 2
 
 
+def test_totals_match_the_report() -> None:
+    """The quantities on the figure are the report's, not a recount.
+
+    A picture that says "39.9 MB moved" while the report says something else is
+    worse than no picture, so the bars carry the report's own bytes and
+    operations (D19).
+    """
+    trace, report = _trace(_spec(10_000, 10_000, 10_000), "a100_80gb")
+    op = report.phases[0].ops[0]
+    totals = trace.totals
+
+    assert totals[Lane.DRAM] == pytest.approx(op.dram_bytes, rel=1e-9)
+    assert totals[Lane.CORE] == pytest.approx(op.flops, rel=1e-9)
+    # SRAM is a stock, not a flow: what the buffers hold at once, bounded by the
+    # capacity the planner granted.
+    assert 0 < totals[Lane.SRAM] <= load_chip("a100_80gb").on_chip_capacity_bytes
+
+
 def test_concurrency_reads_as_a_depth_not_a_duty_cycle() -> None:
     """SRAM occupancy is ~2 because two buffers are held, not because a resource
     was busy 198% of the time.
