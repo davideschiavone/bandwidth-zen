@@ -682,3 +682,28 @@ assumptions drawer says so by name rather than dropping it silently.
 `rank_operations` (the `--show-ops` lines) now carries each operation's arithmetic and DRAM traffic
 alongside its time. On a model this small they tell different stories: seven operations cost 3 µs
 each and are all `LATENCY_BOUND`, while one of them does 1.02 kOP and another does none at all.
+
+
+---
+
+## D26 — The page carries the arithmetic it claims (2026-08-17)
+
+A performance model nobody has calibrated is only worth what its arithmetic can be checked against.
+The HTML timeline now ends with every operation written out four ways: operand shapes, the algebra,
+the flop count as an expression, and a pseudo-C loop nest carrying the real extents.
+
+```
+layer0.q_proj   A[4,8] x B[8,8] -> C[4,8]                      512 OP
+                C[m,n] = Σ_k A[m,k] · B[k,n]
+                2·M·N·K = 2·4·8·8 = 512
+                for (m = 0; m < 4; ++m) …
+```
+
+`bwz/explain.py` is pure and holds no counts of its own: the numbers come from
+`operators.base.cost_of`, and `check()` asserts every printed expression evaluates to the cost the
+engine actually used. A test runs it over every operation of every shipped profile in both phases,
+so the prose cannot drift from the model — which is the failure mode that would make the whole
+feature worse than useless.
+
+The pseudo-C is meant to compile if pasted, so it carries no nested `/* */` (C forbids them) and a
+test enforces that too. Indices and extents are real; types and memory layout are not.

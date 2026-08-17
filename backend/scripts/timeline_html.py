@@ -69,6 +69,19 @@ TEMPLATE = """<!doctype html>
     font-size: 11.5px; line-height: 1.45; white-space: pre; z-index: 5;
   }}
   h2.section {{ font-size: 15px; margin: 34px 0 4px; }}
+  details.op {{ border: 1px solid var(--grid); border-radius: 6px; margin: 6px 0;
+                background: var(--box); }}
+  details.op > summary {{ cursor: pointer; padding: 8px 12px; font-size: 12.5px;
+                          display: flex; gap: 14px; flex-wrap: wrap; align-items: baseline; }}
+  .op-id {{ font-weight: 600; min-width: 155px; }}
+  .op-shapes {{ font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px;
+                color: var(--ink-2); }}
+  .op-ops {{ margin-left: auto; color: var(--ink-3); font-size: 11.5px; }}
+  .op-body {{ padding: 0 12px 12px; }}
+  .op-body p {{ margin: 2px 0 8px; font-size: 12px; color: var(--ink-2); }}
+  .op-body pre {{ margin: 0; padding: 10px 12px; background: var(--surface);
+                  border: 1px solid var(--grid); border-radius: 5px; overflow-x: auto;
+                  font-size: 11.5px; line-height: 1.45; }}
   #rwrap {{ position: relative; max-width: 760px; }}
   #roof {{ display: block; width: 100%; }}
   .roofline {{ fill: none; stroke: var(--dram); stroke-width: 2; }}
@@ -99,6 +112,12 @@ Grey rows are declared by the chip and unused by this model.</p>
 point: left of it the chip is starved of bandwidth, right of it the array is the limit. The dotted
 line is the M=1 ceiling — array geometry, not a derating.</p>
 <div id="rwrap"><svg id="roof"></svg><div id="rtip"></div></div>
+
+<h2 class="section">The arithmetic, operation by operation</h2>
+<p class="hint">Shapes, algebra, the flop count as an expression, and a loop nest that performs
+exactly it. The counts are the engine's own and the text is checked against them, so this is what
+to reproduce if you want to back-test the model. Click a row to open it.</p>
+{explanations}
 
 <footer>{footer}</footer>
 
@@ -352,6 +371,7 @@ def render(
     rows: list[dict[str, str | None]],
     spans: list[dict[str, object]],
     roofline: dict[str, object],
+    explanations: list[dict[str, str]],
     total_s: float,
 ) -> str:
     """Build the page. Pure: returns text, writes nothing."""
@@ -362,6 +382,27 @@ def render(
         for b in boxes
     )
     data = json.dumps({"rows": rows, "spans": spans, "total": total_s, "roofline": roofline})
-    return TEMPLATE.format(
-        title=title, subtitle=subtitle, footer=footer, boxes=boxes_html, data=data
+    ops_html = "".join(
+        f'<details class="op"><summary>'
+        f'<span class="op-id">{e["op_id"]}</span>'
+        f'<span class="op-shapes">{_escape(e["shapes"])}</span>'
+        f'<span class="op-ops">{e["arithmetic_short"]}</span></summary>'
+        f'<div class="op-body"><p><b>{_escape(e["algebra"])}</b></p>'
+        f"<p>{_escape(e['arithmetic'])}</p>"
+        f"<pre>{_escape(e['code'])}</pre></div></details>"
+        for e in explanations
     )
+    return TEMPLATE.format(
+        title=title,
+        subtitle=subtitle,
+        footer=footer,
+        boxes=boxes_html,
+        data=data,
+        explanations=ops_html,
+    )
+
+
+def _escape(text: str) -> str:
+    """Minimal HTML escaping. The pseudo-C is full of ``<`` in loop conditions,
+    which would otherwise open a tag and swallow the rest of the listing."""
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")

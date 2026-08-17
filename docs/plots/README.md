@@ -46,6 +46,9 @@ a **new tab in an existing window** rather than a new window.
   operations and the rate
 - below the timeline, the same run's place on the **roofline**: both ceilings, the ridge point, the
   M=1 tail line, and this workload as a labelled point
+- below that, **the arithmetic operation by operation** — operand shapes, the algebra, the flop
+  count as an expression (`2·M·N·K = 2·4·8·8 = 512`) and a pseudo-C loop nest with the real extents,
+  so the model can be back-tested against code rather than trusted
 
 It carries 256 steps against the PNG's 32 (`--html-steps`), because a static figure has to stay
 legible at one scale and a zoomable one does not.

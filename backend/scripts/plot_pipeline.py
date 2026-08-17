@@ -39,6 +39,7 @@ import bwz
 from bwz.analysis import analyze, idealised, machine_model
 from bwz.analysis.pipeline import Lane, PipelineTrace, Span, Stage, build_trace
 from bwz.analysis.roofline import compute_dtype
+from bwz.explain import Explanation, explain_graph
 from bwz.graph import GraphPhase, build_graph, build_graphs
 from bwz.report import Bound
 from bwz.spec import DeploymentSpec, DType, HardwareSpec, MatmulSpec, load_chip, load_model
@@ -64,6 +65,7 @@ class Workload:
 
     name: str
     trace: PipelineTrace
+    explanations: tuple[Explanation, ...]
     flops: float
     dram_bytes: float
     latency_s: float
@@ -346,6 +348,17 @@ def write_html(
             for row in rows
         ],
         roofline=_roofline_data(chip, dtype, work),
+        explanations=[
+            {
+                "op_id": e.op_id,
+                "shapes": e.shapes,
+                "algebra": e.algebra,
+                "arithmetic": e.arithmetic,
+                "arithmetic_short": format_quantity(e.flops, "OP"),
+                "code": e.code,
+            }
+            for e in work.explanations
+        ],
         spans=[
             {
                 "lane": span.lane.value,
@@ -691,15 +704,18 @@ def build_matmul(chip: HardwareSpec, m: int, n: int, k: int, dtype: DType, steps
     report = analyze(spec, chip, deployment)
     if not report.feasible:
         raise SystemExit(f"bwz: infeasible on {chip.id}: {report.infeasibility[0]}")
+    graph = build_graph(spec, deployment, GraphPhase.STATIC)
     trace = build_trace(
-        build_graph(spec, deployment, GraphPhase.STATIC),
+        graph,
         report.phases[0],
         machine_model(chip, spec.operand_dtype),
         double_buffered=report.memory.double_buffered,
         max_steps=steps,
     )
     op = report.phases[0].ops[0]
-    return Workload(spec.name, trace, op.flops, op.dram_bytes, op.latency_s, op.bound)
+    return Workload(
+        spec.name, trace, explain_graph(graph), op.flops, op.dram_bytes, op.latency_s, op.bound
+    )
 
 
 def build_model(
@@ -734,6 +750,7 @@ def build_model(
             Workload(
                 f"{model.name} {phase.phase.value} S={tokens}",
                 trace,
+                explain_graph(graphs[phase.phase]),
                 phase.flops,
                 phase.dram_bytes,
                 phase.latency_s,
