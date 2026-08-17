@@ -61,9 +61,12 @@ import bwz
 from bwz.analysis import analyze, idealised, machine_model
 from bwz.analysis.pipeline import Lane, PipelineTrace, Span, Stage, build_trace
 from bwz.analysis.roofline import MATRIX_OP_TYPES, compute_dtype
+from bwz.deploy import check as check_deployment
+from bwz.deploy import deployment_of
 from bwz.explain import Explanation, explain_graph
 from bwz.graph import GraphPhase, build_graph, build_graphs
-from bwz.report import Bound
+from bwz.graph.ops import Operation
+from bwz.report import Bound, PhaseResult
 from bwz.spec import (
     AnyModelSpec,
     DeploymentSpec,
@@ -113,6 +116,11 @@ class Workload:
     dram_bytes: float
     latency_s: float
     bound: Bound
+    phase: PhaseResult | None = None
+    """The phase this trace decomposes; the deployment listing reads its bytes."""
+    operation: Operation | None = None
+    """The single matmul, when there is one, so the listing can quote the same
+    tile count the schedule and the utilisation model both divide by."""
 
 
 @dataclass(frozen=True)
@@ -545,6 +553,31 @@ def _roofline_data(roofs: list[Roof]) -> dict[str, object]:
     }
 
 
+def _deployments(panels: list[Panel]) -> list[dict[str, str]]:
+    """One loop-nest listing per chip — the section a comparison must not merge.
+
+    Every constant is checked against the schedule before it reaches the page
+    (``deploy.check``), on the same reasoning as ``explain.check``: a listing
+    that disagreed with the timeline above it would be believed.
+    """
+    out: list[dict[str, str]] = []
+    for panel in panels:
+        work = panel.work
+        if work.phase is None:
+            continue
+        listing = deployment_of(
+            panel.chip,
+            machine_model(panel.chip, panel.dtype),
+            work.phase,
+            work.trace,
+            workload=f"{work.name} at {panel.dtype.value}",
+            operation=work.operation,
+        )
+        check_deployment(listing, work.trace)
+        out.append({"title": listing.title, "code": listing.code})
+    return out
+
+
 def write_html(panels: list[Panel], command: str, out: Path) -> None:
     """The same figure, zoomable, as one self-contained file.
 
@@ -602,6 +635,7 @@ def write_html(panels: list[Panel], command: str, out: Path) -> None:
             for index, panel in enumerate(panels)
             for span in panel.work.trace.spans
         ],
+        deployments=_deployments(panels),
         total_s=total,
         hint=(
             " Rows are banded by chip and the time axis is <b>shared and absolute</b>, so a bar "
@@ -1170,7 +1204,15 @@ def build_matmul(chip: HardwareSpec, m: int, n: int, k: int, dtype: DType, steps
     )
     op = report.phases[0].ops[0]
     return Workload(
-        spec.name, trace, explain_graph(graph), op.flops, op.dram_bytes, op.latency_s, op.bound
+        spec.name,
+        trace,
+        explain_graph(graph),
+        op.flops,
+        op.dram_bytes,
+        op.latency_s,
+        op.bound,
+        phase=report.phases[0],
+        operation=graph.ops[0],
     )
 
 
@@ -1260,6 +1302,7 @@ def _workloads_for(
                 phase.dram_bytes,
                 phase.latency_s,
                 phase.bound,
+                phase=phase,
             )
         )
     return out

@@ -99,6 +99,11 @@ TEMPLATE = """<!doctype html>
     position: absolute; pointer-events: none; opacity: 0; background: #17171a; color: #fff;
     padding: 7px 10px; border-radius: 5px; font-size: 11.5px; white-space: pre; z-index: 5;
   }}
+  h3.deploy {{ font-size: 12.5px; margin: 18px 0 6px; color: var(--ink-2); }}
+  pre.deploy {{ margin: 0; padding: 12px 14px; background: var(--box);
+                border: 1px solid var(--grid); border-radius: 6px; overflow-x: auto;
+                font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+                font-size: 11.5px; line-height: 1.5; }}
   footer {{ margin-top: 22px; font-size: 11px; color: var(--ink-3); }}
   code {{ font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }}
 </style>
@@ -118,6 +123,13 @@ Grey rows are declared by the chip and unused by this model.{hint}</p>
 point: left of it the chip is starved of bandwidth, right of it the array is the limit. The dotted
 line is the M=1 ceiling — array geometry, not a derating.</p>
 <div id="rwrap"><svg id="roof"></svg><div id="rtip"></div></div>
+
+<h2 class="section">How it is deployed on the chip</h2>
+<p class="hint">The loop nest this model actually schedules, per chip — how B is cut into
+array-sized tiles, how many arrays take a wave of them at once, whether a tile has to be written
+into the array before it can compute, and where the loads and stores sit around it. Every constant
+is read back out of the schedule drawn above, so this and the timeline cannot disagree.</p>
+{deployments}
 
 <h2 class="section">The arithmetic, operation by operation</h2>
 <p class="hint">Shapes, algebra, the flop count as an expression, and a loop nest that performs
@@ -452,6 +464,7 @@ def render(
     roofline: dict[str, object],
     explanations: list[dict[str, str]],
     total_s: float,
+    deployments: list[dict[str, str]] | None = None,
     hint: str = "",
 ) -> str:
     """Build the page. Pure: returns text, writes nothing."""
@@ -484,6 +497,14 @@ def render(
         f"<pre>{_escape(e['code'])}</pre></div></details>"
         for e in explanations
     )
+    # One listing per chip, unlike the arithmetic: how the work reaches the
+    # silicon is exactly what differs between two machines running the same
+    # workload, so this is the section a comparison must NOT render once.
+    deploy_html = "".join(
+        f'<h3 class="deploy">{_escape(d["title"])}</h3>'
+        f'<pre class="deploy">{_escape(d["code"])}</pre>'
+        for d in deployments or []
+    )
     return TEMPLATE.format(
         title=title,
         subtitle=subtitle,
@@ -491,6 +512,7 @@ def render(
         boxes=boxes_html,
         data=data,
         explanations=ops_html,
+        deployments=deploy_html,
         hint=hint,
     )
 

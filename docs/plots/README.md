@@ -47,6 +47,12 @@ a **new tab in an existing window** rather than a new window.
   operations and the rate
 - below the timeline, the same run's place on the **roofline**: both ceilings, the ridge point, the
   M=1 tail line, and this workload as a labelled point
+- below that, **how it is deployed on the chip** — a pseudo-C loop nest **per chip** showing how B
+  is cut into array-sized tiles, how many arrays take a wave of them at once, whether a tile must be
+  written into the array before it can compute, and where the loads and stores sit around it. Every
+  constant is read back out of the schedule drawn above and checked against it, so the listing and
+  the timeline cannot disagree (D32). Rendered once per chip, unlike the arithmetic, because the
+  mapping is exactly what differs between two machines
 - below that, **the arithmetic operation by operation** — operand shapes, the algebra, the flop
   count as an expression (`2·M·N·K = 2·4·8·8 = 512`) and a pseudo-C loop nest with the real extents,
   so the model can be back-tested against code rather than trusted

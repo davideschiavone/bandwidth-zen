@@ -1031,3 +1031,49 @@ Charging the reload of weight tiles beyond `resident_tile_capacity()` still wait
 bandwidth (D30). With B drawn as its own bar, a reader can now *see* 67.1 MB of operand B crossing
 DRAM on every invocation of a matmul whose 16 array-resident tiles could have held a quarter of it —
 which makes the missing term harder to forget, and is an argument for closing it.
+
+---
+
+## D32 — The page says how the workload reaches the silicon, per chip (2026-08-17)
+
+The HTML carried two derived sections: the timeline (what happened when) and the arithmetic (D26 —
+what was computed). Neither answers *how the work is mapped onto this particular chip*, which after
+D30/D31 is where the two machines actually differ. Asked for a pseudo-code section reflecting the
+pipeline, and it belongs next to the figure rather than in prose someone has to keep in step.
+
+`bwz/deploy.py` emits a loop nest per chip: how B is cut into array-sized tiles, how many arrays
+take a wave of them at once, whether a tile must be **written into** the array before it can
+compute, and where the loads and stores sit around it — with the real extents and the real
+per-wave byte counts.
+
+**Same contract as `explain.py`, and for the same reason.** Pure, holds no counts of its own, and
+`check()` asserts the listing's constants are the schedule's before it reaches the page: `waves ==
+trace.tiles`, `waves == ceil(tiles / units)`, and `tiles` from the same `tile_count()` the schedule
+and the utilisation model both divide by. A listing that disagreed with the timeline above it would
+be worse than no listing, because a reader would believe it.
+
+**Rendered once per chip, unlike the arithmetic.** D29 renders the operator list once on a
+comparison because it is a property of the workload and identical on both machines. This is the
+exact opposite: the mapping is what differs, so merging it would delete the content.
+
+**No vendor knowledge in the emitter.** Every branch is driven by a field the profile declares, so
+the module never learns what an NVIDIA or an Axelera part is:
+
+| declared | emitted |
+|---|---|
+| `weight_sets > 1` | `WEIGHT_SETS`, a set rotation, and an `imc_write` that "must land before the array can use it" |
+| `weight_sets == 1` | no write at all, and "the array stores no weights: both operands are re-read per instruction" |
+| dtype multiplier < 1 | `SUB_CYCLES` and an inner loop — 8 for Metis's INT8 0.125, absent at fp16 |
+| `systolic_dims` | `ROWS`/`COLS` and the tile nest; a profile without one falls through to the sequence listing |
+
+On 8192-cubed INT8 the two listings say, from the same emitter: Metis **256 tiles over 4 arrays ->
+64 waves**, 16 chip-resident, so **240 re-written**; A100 **262 144 tiles over 432 arrays -> 607
+waves**, no residency limit. That contrast is the deployment difference in six lines.
+
+A graph of operations gets a different listing — a sequence with no cross-operation overlap, which
+is what the model actually does (D5a) — and says so rather than pretending to a tile nest it does
+not have. `Deployment.kind` records which, because the wave relation `check()` enforces only holds
+for the tiled form.
+
+The pseudo-C carries no nested `/* */`, and a test enforces it on every shipped chip, on the same
+grounds as D26: it is meant to survive being pasted.
