@@ -386,7 +386,8 @@ def _lane_table(trace: PipelineTrace) -> Table:
     descriptions = {
         Lane.DRAM: "operand tiles in, results out, across the one modelled link",
         Lane.SRAM: "tile buffers held from fetch to use",
-        Lane.CORE: "arithmetic, plus one dispatch",
+        Lane.CORE: "matrix arithmetic, plus the dispatches",
+        Lane.VECTOR: "norms, activations, residuals — not the matrix engine",
     }
     for lane in Lane:
         mean, peak = concurrency[lane]
@@ -394,7 +395,7 @@ def _lane_table(trace: PipelineTrace) -> Table:
             occupancy = f"{mean:.2f} of {peak} buf" if peak else "—"
         else:
             occupancy = f"{mean:.0%} of span"
-        table.add_row(lane.value, format_time(busy[lane]), occupancy, descriptions[lane])
+        table.add_row(lane.value, format_time(busy[lane]), occupancy, descriptions.get(lane, ""))
     return table
 
 

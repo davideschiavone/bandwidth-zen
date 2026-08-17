@@ -65,7 +65,7 @@ Or from the CLI:
 uv run bwz run \
   --model llama3_8b --chip h100_sxm \
   --batch 1 --input-tokens 2048 --output-tokens 256 \
-  --precision fp16 --attention flash2
+  --weights fp16 --attention flash2
 ```
 
 ```
@@ -156,6 +156,83 @@ docker compose up      # http://localhost:5173
 
 ---
 
+## Commands
+
+Every command, from `backend/`. `bwz --help` and `bwz <command> --help` list the flags; this is
+what each one is *for*.
+
+| | |
+|---|---|
+| `bwz list` | the bundled chip and model profiles, with peaks, shapes and provenance |
+| `bwz matmul` | one `A[M,K] × B[K,N] → C[M,N]` — the smallest probe of a machine |
+| `bwz single-layer-encoder` | one encoder layer, sized from the command line |
+| `bwz run` | a model profile on a chip |
+| `bwz compare` | chips head to head, with the prefill crossover |
+
+### `bwz matmul` — the shape is M, N, K
+
+```bash
+uv run bwz matmul -M 10000 -N 10000 -K 10000 --chip a100_80gb --dtype fp16 --ideal
+```
+
+`-M -N -K` the dimensions · `-c/--chip` · `-d/--dtype` both operands · `--a`/`--b` per-operand
+widths · `--out` the **result** width, i.e. the accumulator · `--ideal` · `--pipeline/--no-pipeline`
+· `--json`.
+
+`M` folds the batch in — a batch of 128 rows is `-M 128`. There is no `--batch`, no context and no
+phase, because one matmul has none of those.
+
+```bash
+uv run bwz matmul -M 4096 -N 4096 -K 4096 -c a100_80gb --dtype int8               # all int8
+uv run bwz matmul -M 4096 -N 4096 -K 4096 -c a100_80gb --dtype int8 --out int32   # int32 accumulate
+uv run bwz matmul -M 4096 -N 4096 -K 4096 -c a100_80gb --dtype fp16 --out fp32    # all float
+uv run bwz matmul -M 4096 -N 4096 -K 4096 -c a100_80gb --a fp16 --b int8          # mixed operands
+```
+
+All four do the same 137.4 GOP. The result width changes bytes only, never operations; a mixed
+matmul runs at the **wider** operand, because both share one datapath.
+
+### `bwz single-layer-encoder` — the shape is the dimensions
+
+The transformer counterpart: arguments rather than a profile, so one term can be changed and its
+effect read off.
+
+```bash
+uv run bwz single-layer-encoder --chip a100_80gb --ideal             # 664 params, 5280 ops
+uv run bwz single-layer-encoder --chip a100_80gb --ideal --ffn 32    # 920 params, 7392 ops
+uv run bwz single-layer-encoder --chip a100_80gb --ideal -S 16       # 664 params, 29184 ops
+```
+
+`--hidden -d` · `--heads` · `--head-dim` · `--ffn` · `--vocab` · `-S/--tokens` · `-b/--batch` ·
+`--ffn-type` · `--norm` · `--tie/--untie` · `--weights` · `--ideal` · `--show-ops` · `--json`.
+
+It leads with a table of *where* the parameters are, not just the total. One layer always — that is
+the name; for anything deeper, write a profile and use `bwz run`. No KV cache and no LM head: an
+encoder has no later step to reuse a cache for.
+
+### `bwz run` — a profile on a chip
+
+```bash
+uv run bwz run --model llama3_8b --chip a100_80gb --input-tokens 2048 --output-tokens 128
+uv run bwz run --model single_layer_encoder --chip a100_80gb --input-tokens 4 --show-ops 20 --ideal
+```
+
+`-m/--model` · `-c/--chip` · `-b/--batch` · `--input-tokens` · `--output-tokens` · `--context` ·
+`--weights` · `--phase` · `--attention` · `--show-ops N` · `--ideal` · `--json`.
+
+`--show-ops N` lists the N most expensive operations with their arithmetic, DRAM bytes and time —
+`20` simply asks for more lines than the encoder's 14 operations.
+
+### `--ideal`
+
+Zeroes every unfitted calibration constant: both efficiency de-ratings **and** the per-dispatch
+overhead. What is left follows from published quantities — MACs, clock, bandwidth, capacity — so
+the numbers can be checked against a datasheet by hand. Shape utilisation is *not* disabled: a
+batch-1 GEMM on a 512×512 array still runs at 1/513 of peak, because that is geometry rather than a
+fudge factor.
+
+---
+
 ## Figures
 
 **The same run, as numbers and then as a picture.** Three lines, from `backend/`:
@@ -172,53 +249,93 @@ uv run --group plots python scripts/plot_pipeline.py \
 xdg-open ../timeline-a100_80gb-fp16.html
 ```
 
-The first prints the report — 2 TOP, 539 MB of DRAM traffic, 6.43 ms, `COMPUTE_BOUND`. The second
-writes `timeline-a100_80gb-fp16.png` and a zoomable `.html` beside it. Note the shape is
-`-M 10000 -N 10000 -K 10000` for the report and `--matmul 10000,10000,10000` for the plot: one is a
-workload, the other is a list of shapes to draw.
+`--out ..` puts them in the repo root, where they are gitignored. `xdg-open` prints nothing and
+hands the file to a browser that may already be running, so look for a **new tab in an existing
+window**.
 
-`--out ..` puts them in the repo root, where they are gitignored. To regenerate the committed
-figures instead:
+### `plot_pipeline.py` — where the time went
+
+It draws one of three things, and the flags mirror the report commands above:
 
 ```bash
-make plots        # → docs/plots/
+# a matmul (the default)
+… plot_pipeline.py --chip a100_80gb --matmul 10000,10000,10000 --ideal --html --out ..
+
+# a profile — one figure per phase
+… plot_pipeline.py --chip a100_80gb --model llama3_8b -S 512 --html --out ..
+
+# an ad-hoc single-layer encoder, sized like the command of the same name
+… plot_pipeline.py --chip a100_80gb --encoder --hidden 4096 --heads 64 --ffn 16384 -S 4096 \
+    --ideal --html --out ..
 ```
 
-Three per chip, all computed by calling `analyze()` rather than drawn by hand, each carrying the
-command that produced it and the commit it came from:
+`--chip` (repeatable) · `--matmul M,N,K` · `--model ID` · `--encoder` with `--hidden --heads
+--head-dim --ffn --vocab` · `-S/--tokens` · `--weights` · `--ideal` · `--steps` how many bars ·
+`--zoom` how many in the second register · `--html` · `--html-steps` (256, finer than the PNG's 32)
+· `--out`.
+
+The shape flags belong to `--encoder`; a profile already carries its dimensions.
+
+### `plot_roofline.py` — where the workload sits
+
+```bash
+… plot_roofline.py --chip a100_80gb --model llama3_8b
+… plot_roofline.py --chip chip_a --weights int8 --model gemma3_4b --tokens 512 \
+    --matmul 512,4096,4096 --matmul 128,4096,4096 --matmul 1,4096,4096
+```
+
+`--chip` · `--weights` · `--matmul M,N,K` (repeatable) · `--model ID` (repeatable) · `--tokens` ·
+`--out`.
+
+### What gets written
+
+```bash
+make plots        # → docs/plots/, the committed figures
+```
+
+All computed by calling `analyze()` rather than drawn by hand, each carrying the command that
+produced it and the commit it came from:
 
 | | |
 |---|---|
 | `roofline-<chip>-<dtype>.png` | the two ceilings, the ridge point, the M=1 tail, and workloads placed on them |
 | `machine-<chip>.png` | the three-element machine — which link carries a bandwidth number and which does not |
 | `timeline-<chip>-<dtype>.png` | where the time went, one row per hardware resource |
-| `timeline-<chip>-<dtype>.html` | the same timeline, **zoomable** |
+| `timeline-<chip>-<dtype>.html` | the same, **zoomable**, with the roofline and the arithmetic below it |
 
 ![A100 roofline](docs/plots/roofline-a100_80gb-fp16.png)
 
 ![A100 resource timeline](docs/plots/timeline-a100_80gb-fp16.png)
 
 **Rows are hardware resources**, read off the chip profile — every memory level and every compute
-unit it declares. Grey rows are declared and unused by this model, which puts its boundary on the
-page instead of hiding it: A100 has 40 MB of L2 and 6912 CUDA cores the v1 roofline never spends.
-Put that next to `chip_a`, whose DRAM row reads `0 B — nothing crossed` because 55 MB of SRAM holds
-all of operand B, and the contrast is the architecture comparison.
+unit it declares, each with its own quantity: bytes moved and at what rate, operations retired and
+at what fraction of peak, how much the buffers hold. `tensor_core` carries the matrix work and
+`cuda_core` the norms and activations, because a tensor core does matrix-multiply-accumulate and
+nothing else.
+
+Grey rows are declared and unused by this model, which puts its boundary on the page instead of
+hiding it: A100 has 40 MB of L2 the v1 roofline never spends. Put that next to `chip_a`, whose DRAM
+row reads `LOAD 0 B · STORE 16.8 MB` — it fetches nothing because 55 MB of SRAM holds all of
+operand B, and still writes the answer out — and the contrast is the architecture comparison.
 
 The spans are a decomposition of the reported latency, not a second model: DRAM busy sums to
-`t_dram`, core busy to `t_compute + t_fixed`.
+`t_dram`, the compute rows to `t_compute + t_fixed`.
 
-The `.html` is one self-contained file — no server, no download, no CDN. Open it with `file://`;
-wheel zooms about the cursor, drag pans, double-click resets, and hovering a bar gives its own
-bytes, rate and duration.
+### The zoomable page
 
-```bash
-xdg-open docs/plots/timeline-a100_80gb-fp16.html
-```
+One self-contained file — no server, no download, no CDN. Wheel zooms about the cursor, drag pans,
+double-click resets. Hovering a bar names the transaction: `LOAD — operands in`, `STORE — result
+written back`, `EXEC — matmul`, `HOLD — on chip`, each with its bytes or operations and the rate.
 
-**The figures are not the report.** `bwz matmul` and `bwz run` print the numbers, their derivations
-and the assumptions drawer; the plot scripts write files and print only `wrote …`.
-[`docs/plots/README.md`](docs/plots/README.md) covers how to read each figure and
-[`docs/CLI.md`](docs/CLI.md) §5 every flag.
+Below the timeline it carries the **roofline** for the same run, and below that **the arithmetic
+operation by operation** — operand shapes, the algebra, the flop count as an expression
+(`2·M·N·K = 2·4·8·8 = 512`) and a pseudo-C loop nest with the real extents, so the model can be
+back-tested against code rather than trusted.
+
+**The figures are not the report.** `bwz matmul`, `bwz run` and `bwz single-layer-encoder` print the
+numbers, their derivations and the assumptions drawer; the plot scripts write files and print only
+`wrote …`. [`docs/plots/README.md`](docs/plots/README.md) covers how to read each figure and
+[`docs/CLI.md`](docs/CLI.md) every flag with its real output.
 
 ---
 
