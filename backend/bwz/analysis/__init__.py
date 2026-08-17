@@ -262,12 +262,12 @@ def _assumptions(
             f"transcendental work is charged at the array's rate. That is optimistic: such work "
             f"does not use the array (D27)."
         ),
-        "Non-linear functions — GELU's erf, softmax's exp, RMSNorm's rsqrt — are charged as plain "
-        "arithmetic at the vector rate. Hardware without a special-function unit evaluates them by "
-        "polynomial approximation over many ALU ops, and hardware with one typically runs it at a "
-        "fraction of the ALU rate; no shipped profile declares either figure, so the cost here is "
-        "a lower bound. On Llama-3-8B prefill all non-matrix work is 1.4% of the phase, so a 4x "
-        "transcendental penalty would move the total by 4% (D27).",
+        "Non-linear functions are counted algebraically — GELU 8 operations per element, softmax "
+        "5 per score, RMSNorm 4 — and charged at the vector rate. Real hardware pays more: an erf "
+        "without a special-function unit is a polynomial approximation, and an SFU runs below the "
+        "ALU rate. A deliberate simplification (D27), so these costs are a lower bound; on "
+        "Llama-3-8B prefill non-matrix work is 1.4% of the phase, so a 4x transcendental penalty "
+        "would move the total by 4%.",
         f"Achieved-throughput derating and shape utilisation are applied separately and multiply; "
         f"a batch-1 GEMM on a {machine.unit.systolic_dims} array loses far more to shape than to "
         f"derating.",

@@ -64,12 +64,13 @@ DEFAULT_ACHIEVED_FLOPS_FRACTION: float = 0.70
 # instead of 5 FLOPs per score moves total prefill FLOPs by well under 1%.
 
 # exp, running max subtract, sum accumulate, and the final divide.
-# These per-element counts are *algebraic* operations, not machine instructions.
-# A GELU is 8 arithmetic operations on paper; on hardware with no special-function
-# unit its erf is a polynomial approximation costing many more ALU ops, and on
-# hardware with one it runs at a fraction of the ALU rate. Neither figure is
-# declared by any shipped profile, so every non-linear cost below is a lower
-# bound (docs/CORRECTIONS.md D27).
+# These per-element counts are *algebraic* operations, not machine instructions,
+# and stay that way by decision (docs/CORRECTIONS.md D27). A GELU is 8 arithmetic
+# operations on paper; hardware without a special-function unit evaluates its erf
+# by polynomial approximation over many more ALU ops, and hardware with one runs
+# it below the ALU rate. No profile declares either figure and none is invented
+# here, so every non-linear cost below is a lower bound — bounded at ~4% of a
+# transformer phase, and not bounded at all on activation-heavy work.
 SOFTMAX_FLOPS_PER_SCORE: float = 5.0
 
 # square, sum-accumulate, rsqrt (amortised), scale multiply.

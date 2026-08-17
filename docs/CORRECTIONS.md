@@ -729,11 +729,16 @@ A profile declaring only a systolic array — `chip_a` — has nowhere to put el
 is still charged at the array's rate and the assumptions drawer says exactly that. Adding a vector
 unit to those profiles needs a published figure nobody has yet.
 
-**Left open, and stated rather than buried:** the per-element constants in `calibration.py` are
-*algebraic* operation counts, not machine instructions. A GELU is 8 arithmetic operations on paper;
-hardware without a special-function unit evaluates its erf by polynomial approximation over many
-more ALU ops, and hardware with one typically runs it at a fraction of the ALU rate. No shipped
-profile declares either number, so every non-linear cost is a lower bound. The bound is small for a
-transformer and not for everything: all non-matrix work is 1.4% of Llama-3-8B prefill, so even a 4x
-transcendental penalty moves the phase by 4% — but on a model whose arithmetic is mostly
-activations, or an NPU with no vector unit at all, it is the whole story.
+**Decided, not left open (user, 2026-08-17): the per-element constants stay as they are** — GELU 8,
+softmax 5, RMSNorm 4. They are *algebraic* operation counts, not machine instructions: hardware
+without a special-function unit evaluates GELU's erf by polynomial approximation over many more ALU
+ops, and hardware with one typically runs it at a fraction of the ALU rate. No shipped profile
+declares either number, and rather than invent one the model keeps the simple count and says what
+it costs.
+
+The bound on that approximation: all non-matrix work is 1.4% of Llama-3-8B prefill, so even a 4x
+transcendental penalty would move the phase by 4%. That is why the simplification is affordable
+here. It would not be on a model whose arithmetic is mostly activations, or on an NPU with no
+vector unit — and the assumptions drawer says so on every report, so the reader can tell which case
+they are in. Closing it properly would need a published SFU throughput per profile
+(`transcendental_flops_ratio` on `ComputeUnit`), fitted in Session 5 against a measurement.
