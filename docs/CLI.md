@@ -247,8 +247,24 @@ uv run --group plots python scripts/plot_pipeline.py --chip h100_sxm --matmul 81
 
 `plot_roofline.py`: `--chip`, `--weights`, `--matmul M,N,K` (repeatable), `--model ID`
 (repeatable), `--tokens`, `--out`.
-`plot_pipeline.py`: `--chip` (repeatable), `--matmul M,N,K`, `--model ID`, `--tokens`, `--weights`,
-`--ideal`, `--steps`, `--zoom`, `--html`, `--html-steps`, `--out`.
+`plot_pipeline.py` draws one of three things, and the flags mirror the report commands:
+
+| what | flags |
+|---|---|
+| a matmul (default) | `--matmul M,N,K` |
+| a profile | `--model ID`, `--tokens/-S` — one figure per phase |
+| an ad-hoc single-layer encoder | `--encoder --hidden --heads --head-dim --ffn --vocab --tokens/-S` |
+
+plus `--chip` (repeatable), `--weights`, `--ideal`, `--steps`, `--zoom`, `--html`, `--html-steps`,
+`--out`.
+
+The shape flags belong to `--encoder`; passing them with `--model` is an error, because a profile
+already carries its dimensions:
+
+```bash
+uv run --group plots python scripts/plot_pipeline.py --chip a100_80gb \
+  --encoder --hidden 4096 --heads 64 --ffn 16384 -S 4096 --ideal --html --out ..
+```
 
 `--model` draws a network instead of a matmul, one figure per phase — which is where the
 `COMPUTED — matmul 98% · attention 2%` breakdown earns itself:

@@ -42,7 +42,16 @@ from bwz.analysis.roofline import MATRIX_OP_TYPES, compute_dtype
 from bwz.explain import Explanation, explain_graph
 from bwz.graph import GraphPhase, build_graph, build_graphs
 from bwz.report import Bound
-from bwz.spec import DeploymentSpec, DType, HardwareSpec, MatmulSpec, load_chip, load_model
+from bwz.spec import (
+    AnyModelSpec,
+    DeploymentSpec,
+    DType,
+    HardwareSpec,
+    MatmulSpec,
+    TransformerSpec,
+    load_chip,
+    load_model,
+)
 from bwz.units import format_bandwidth, format_bytes, format_quantity, format_time
 
 matplotlib.use("Agg")
@@ -732,9 +741,58 @@ def build_matmul(chip: HardwareSpec, m: int, n: int, k: int, dtype: DType, steps
 def build_model(
     chip: HardwareSpec, model_id: str, tokens: int, dtype: DType, steps: int
 ) -> list[Workload]:
-    """One workload per phase: prefill and decode are different machines, so they
-    get different figures rather than being averaged onto one axis."""
-    model = load_model(model_id)
+    """One workload per phase of a profile: prefill and decode are different
+    machines, so they get different figures rather than being averaged."""
+    # Profile ids use underscores; accept the hyphenated form people type after
+    # seeing the command name.
+    return _workloads_for(chip, load_model(model_id.replace("-", "_")), tokens, dtype, steps)
+
+
+def build_encoder(
+    chip: HardwareSpec,
+    *,
+    hidden: int,
+    heads: int,
+    head_dim: int | None,
+    ffn: int,
+    vocab: int,
+    tokens: int,
+    dtype: DType,
+    steps: int,
+) -> list[Workload]:
+    """A single-layer encoder built from dimensions, mirroring `bwz single-layer-encoder`.
+
+    The same reason that command exists: a shape you can change one term of and
+    watch the picture move, without writing a profile for every experiment.
+    """
+    spec = TransformerSpec.model_validate(
+        {
+            "id": "single_layer_encoder_cli",
+            "name": f"1-layer encoder d={hidden} h={heads} ffn={ffn} S={tokens}",
+            "family": "transformer_encoder",
+            "hypothetical": True,
+            "params": {
+                "layers": 1,
+                "hidden": hidden,
+                "heads": heads,
+                "head_dim": head_dim,
+                "ffn_hidden": ffn,
+                "ffn_type": "relu",
+                "vocab": vocab,
+                "max_context": max(tokens, 1),
+                "norm": "rmsnorm",
+                "positional": "none",
+                "tie_embeddings": True,
+            },
+        }
+    )
+    return _workloads_for(chip, spec, tokens, dtype, steps)
+
+
+def _workloads_for(
+    chip: HardwareSpec, model: AnyModelSpec, tokens: int, dtype: DType, steps: int
+) -> list[Workload]:
+    """One workload per phase of *model*."""
     deployment = DeploymentSpec.model_validate(
         {
             "batch": 1,
@@ -785,7 +843,19 @@ def main() -> None:
     parser.add_argument(
         "--model", default=None, help="Draw a model instead of a matmul; one figure per phase"
     )
-    parser.add_argument("--tokens", type=int, default=512, help="Prefill length for --model")
+    parser.add_argument(
+        "--tokens", "-S", type=int, default=512, help="Sequence length for --model / --encoder"
+    )
+    parser.add_argument(
+        "--encoder",
+        action="store_true",
+        help="Draw a single-layer encoder built from the shape flags below, not a profile",
+    )
+    parser.add_argument("--hidden", type=int, default=8, help="--encoder: model width")
+    parser.add_argument("--heads", type=int, default=2, help="--encoder: attention heads")
+    parser.add_argument("--head-dim", type=int, default=None, help="--encoder: defaults to d/h")
+    parser.add_argument("--ffn", type=int, default=16, help="--encoder: FFN inner width")
+    parser.add_argument("--vocab", type=int, default=16, help="--encoder: vocabulary")
     parser.add_argument("--weights", default=None, help="Precision; defaults per chip")
     parser.add_argument("--ideal", action="store_true", help="Both de-ratings at 1.0")
     parser.add_argument("--steps", type=int, default=32, help="Steps to draw")
@@ -806,10 +876,12 @@ def main() -> None:
 
     def slug(chip: HardwareSpec, dtype: DType, work: Workload, index: int) -> str:
         """File stem. A model gets one figure per phase, so the phase is in the name."""
+        if args.encoder:
+            return f"{chip.id}-encoder-d{args.hidden}-S{args.tokens}-{dtype.value}"
         if args.model is None:
             return f"{chip.id}-{dtype.value}"
         phase = work.trace.spans[0].phase.value if work.trace.spans else str(index)
-        return f"{chip.id}-{args.model}-{phase}-{dtype.value}"
+        return f"{chip.id}-{args.model.replace('-', '_')}-{phase}-{dtype.value}"
 
     for chip_id in args.chip or ["a100_80gb", "chip_a"]:
         chip = load_chip(chip_id)
@@ -817,11 +889,26 @@ def main() -> None:
             chip = idealised(chip)
         dtype = DType(args.weights) if args.weights else _default_dtype(chip)
 
-        coarse = (
-            build_model(chip, args.model, args.tokens, dtype, args.steps)
-            if args.model
-            else [build_matmul(chip, m, n, k, dtype, args.steps)]
-        )
+        def workloads(
+            steps: int, chip: HardwareSpec = chip, dtype: DType = dtype
+        ) -> list[Workload]:
+            if args.encoder:
+                return build_encoder(
+                    chip,
+                    hidden=args.hidden,
+                    heads=args.heads,
+                    head_dim=args.head_dim,
+                    ffn=args.ffn,
+                    vocab=args.vocab,
+                    tokens=args.tokens,
+                    dtype=dtype,
+                    steps=steps,
+                )
+            if args.model:
+                return build_model(chip, args.model, args.tokens, dtype, steps)
+            return [build_matmul(chip, m, n, k, dtype, steps)]
+
+        coarse = workloads(args.steps)
         for index, work in enumerate(coarse):
             draw(
                 chip,
@@ -834,11 +921,7 @@ def main() -> None:
         if args.html:
             # A separate, finer trace: the PNG stays readable at 32 steps while
             # the page has something to zoom into.
-            fine = (
-                build_model(chip, args.model, args.tokens, dtype, args.html_steps)
-                if args.model
-                else [build_matmul(chip, m, n, k, dtype, args.html_steps)]
-            )
+            fine = workloads(args.html_steps)
             for index, work in enumerate(fine):
                 write_html(
                     chip,
