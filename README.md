@@ -128,27 +128,7 @@ All four do the same 137.4 GOP. The int32 result quadruples C from 16.8 MB to 67
 the arithmetic intensity; the mixed-operand case runs at the **fp16** rate, because both operands
 share one datapath — the narrow side saves bytes and buys no throughput.
 
-See where the time went — one figure per chip, since the schedule is a property of the machine:
-
-```bash
-make plots        # → docs/plots/
-```
-
-That writes, per chip: the roofline, the machine diagram, and the resource timeline as both a PNG
-and a **zoomable** self-contained `timeline-*.html` (wheel to zoom, drag to pan, hover a bar for
-its bytes and rate). The figures are separate from the text report above — see
-[`docs/CLI.md`](docs/CLI.md) §5.
-
-![A100 roofline](docs/plots/roofline-a100_80gb-fp16.png)
-
-![A100 resource timeline](docs/plots/timeline-a100_80gb-fp16.png)
-
-The same 4096³ matmul is 4% DRAM-busy on A100 and touches DRAM not at all on `chip_a`, whose 55 MB
-of SRAM holds all of operand B. The spans are a decomposition of the reported latency rather than a
-second model: DRAM busy sums to `t_dram`, core busy to `t_compute + t_fixed`.
-
-Every figure is computed by calling `analyze()`, not drawn by hand, and carries the command that
-produced it. See [`backend/scripts/`](backend/scripts/).
+To *see* where the time went rather than read it, `make plots` — see [Figures](#figures).
 
 Sweep and take the Pareto frontier:
 
@@ -163,6 +143,50 @@ Docker:
 ```bash
 docker compose up      # http://localhost:5173
 ```
+
+---
+
+## Figures
+
+```bash
+make plots        # → docs/plots/
+```
+
+Three per chip, all computed by calling `analyze()` rather than drawn by hand, each carrying the
+command that produced it and the commit it came from:
+
+| | |
+|---|---|
+| `roofline-<chip>-<dtype>.png` | the two ceilings, the ridge point, the M=1 tail, and workloads placed on them |
+| `machine-<chip>.png` | the three-element machine — which link carries a bandwidth number and which does not |
+| `timeline-<chip>-<dtype>.png` | where the time went, one row per hardware resource |
+| `timeline-<chip>-<dtype>.html` | the same timeline, **zoomable** |
+
+![A100 roofline](docs/plots/roofline-a100_80gb-fp16.png)
+
+![A100 resource timeline](docs/plots/timeline-a100_80gb-fp16.png)
+
+**Rows are hardware resources**, read off the chip profile — every memory level and every compute
+unit it declares. Grey rows are declared and unused by this model, which puts its boundary on the
+page instead of hiding it: A100 has 40 MB of L2 and 6912 CUDA cores the v1 roofline never spends.
+Put that next to `chip_a`, whose DRAM row reads `0 B — nothing crossed` because 55 MB of SRAM holds
+all of operand B, and the contrast is the architecture comparison.
+
+The spans are a decomposition of the reported latency, not a second model: DRAM busy sums to
+`t_dram`, core busy to `t_compute + t_fixed`.
+
+The `.html` is one self-contained file — no server, no download, no CDN. Open it with `file://`;
+wheel zooms about the cursor, drag pans, double-click resets, and hovering a bar gives its own
+bytes, rate and duration.
+
+```bash
+xdg-open docs/plots/timeline-a100_80gb-fp16.html
+```
+
+**The figures are not the report.** `bwz matmul` and `bwz run` print the numbers, their derivations
+and the assumptions drawer; the plot scripts write files and print only `wrote …`.
+[`docs/plots/README.md`](docs/plots/README.md) covers how to read each figure and
+[`docs/CLI.md`](docs/CLI.md) §5 every flag.
 
 ---
 
