@@ -643,3 +643,33 @@ attention 2%`, `LOAD 15 GB · STORE 322 kB` — memory-bound, visibly, in one pi
 **The HTML carries the roofline too.** Same page, below the timeline: both ceilings, the ridge
 point, the M=1 tail line, and the run as a labelled point with its intensity and achieved rate on
 hover. Two views of one run in one file — where the time went, and why it had to.
+
+---
+
+## D24 — An encoder is not a decoder with the same code path (2026-08-17)
+
+`ModelFamily.TRANSFORMER_ENCODER` existed in the spec from M1 and was never exercised. Building
+one for teaching showed the graph builder treated it as a decoder in three ways, each of which
+changes the count:
+
+**Attention was causal.** `causal=True` was hardcoded, so an encoder's scores were halved by a
+triangle it does not have. At S=4 with 2 heads that is 20 scored positions instead of 32 — a 37.5%
+understatement, approaching 50% at long sequences. Now `causal = family is TRANSFORMER_DECODER`.
+
+**It was given a decode phase.** `phases_for` returned prefill *and* decode for any
+`TransformerSpec`. An encoder runs one bidirectional pass over the whole sequence; there is no
+token-by-token phase to separate. Now encoders return `(PREFILL,)`.
+
+**It was given an LM head.** An encoder emits hidden states; what sits on top — a classifier, an
+MLM head, a pooler — is task-specific. Counting one here would be inventing a layer, so the head is
+built for decoders only.
+
+Ships with `profiles/models/tiny_encoder.yaml`: one layer, hidden 8, 2 heads of 4, FFN 16,
+vocab 16, tied embeddings, ReLU FFN. Small enough that every figure is a product of two small
+integers — **664 parameters** and **5280 operations** over 4 tokens — with the full derivation in
+the profile's own header and in `tests/unit/test_tiny_encoder.py`, which recomputes both from the
+dimensions rather than asserting what the engine happened to produce.
+
+`rank_operations` (the `--show-ops` lines) now carries each operation's arithmetic and DRAM traffic
+alongside its time. On a model this small they tell different stories: seven operations cost 3 µs
+each and are all `LATENCY_BOUND`, while one of them does 1.02 kOP and another does none at all.

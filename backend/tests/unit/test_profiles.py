@@ -42,6 +42,7 @@ def test_the_expected_profiles_ship() -> None:
         "llama3_8b",
         "mistral_7b",
         "mobilenetv3",
+        "tiny_encoder",
     ]
 
 

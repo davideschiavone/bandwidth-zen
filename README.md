@@ -268,6 +268,15 @@ edge NPU, a server CPU baseline. Each profile cites its datasheet in `source_url
 **Models:** GPT-3, BERT-base, Llama-3-8B, Llama-2-70B, Mistral-7B, Mixtral-8x7B, Gemma-4,
 MobileNetV3, ViT-B/16, Stable Diffusion U-Net.
 
+Plus **`tiny_encoder`** — a one-layer encoder sized so every number can be checked with a
+calculator: 664 parameters, 5280 operations over 4 tokens, with the derivation in the profile's own
+header.
+
+```bash
+uv run bwz run --model tiny_encoder --chip a100_80gb \
+  --input-tokens 4 --output-tokens 0 --phase prefill --show-ops 20 --ideal
+```
+
 Add your own — chips and models are plain YAML:
 
 ```yaml

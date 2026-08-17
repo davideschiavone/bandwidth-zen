@@ -9,7 +9,7 @@ from bwz.graph.ops import ComputeGraph, GraphPhase
 from bwz.graph.transformer import build_transformer_graph
 from bwz.spec.deployment import DeploymentSpec, Phase
 from bwz.spec.loaders import AnyModelSpec
-from bwz.spec.model_spec import CNNSpec, CustomSpec, MatmulSpec, TransformerSpec
+from bwz.spec.model_spec import CNNSpec, CustomSpec, MatmulSpec, ModelFamily, TransformerSpec
 
 
 def phases_for(model: AnyModelSpec, deployment: DeploymentSpec) -> tuple[GraphPhase, ...]:
@@ -20,6 +20,10 @@ def phases_for(model: AnyModelSpec, deployment: DeploymentSpec) -> tuple[GraphPh
     """
     if not isinstance(model, TransformerSpec):
         return (GraphPhase.STATIC,)
+    # An encoder runs one bidirectional pass over the whole sequence; there is no
+    # token-by-token phase to separate (D24).
+    if model.family is ModelFamily.TRANSFORMER_ENCODER:
+        return (GraphPhase.PREFILL,)
     if deployment.phase is Phase.PREFILL:
         return (GraphPhase.PREFILL,)
     if deployment.phase is Phase.DECODE:

@@ -1,0 +1,56 @@
+# A transformer encoder small enough to count by hand.
+#
+# Not a real model — every dimension is chosen so the arithmetic stays in small
+# integers, so `bwz run --model tiny_encoder --show-ops 20` can be checked line
+# by line against a calculator. Deliberately the plainest configuration the spec
+# allows: one layer, a non-gated FFN (2 matrices, not 3), tied embeddings (one
+# table, not two), no positional weights.
+#
+# Hand-count of the weights, all of it:
+#
+#   Q, K, V, O   4 x (8 x 8)            = 256      heads 2 x head_dim 4 = 8 = hidden
+#   FFN up/down  8 x 16  +  16 x 8      = 256
+#   norms        2 x 8                  =  16      rmsnorm: one scale per channel
+#   ------------------------------------------
+#   per layer                             528
+#   embeddings   16 x 8                 = 128      tied, so counted once
+#   final norm   8                      =   8
+#   ==========================================
+#   total                                 664 parameters
+#
+# And the arithmetic for one pass over S tokens, batch 1. At S=4:
+#
+#   q,k,v,o_proj  4 x 2·S·8·8                    4 x   512 =  2048
+#   ffn_up/down   2·S·8·16 + 2·S·16·8            2 x  1024 =  2048
+#   attn          bidirectional: positions = S² = 16
+#                 scored = heads·positions = 32
+#                 2·2·scored·head_dim + 5·scored             =   672
+#   norms         3 x (S·8 x 4 flops, rmsnorm)   3 x   128 =   384
+#   ffn_act       S·16 x 1 flop (relu)                      =    64
+#   residuals     2 x S·8                        2 x    32 =    64
+#   embed         a gather, no arithmetic                   =     0
+#   ==============================================================
+#   total                                                     5280 operations
+#
+# Check it with:
+#   bwz run --model tiny_encoder --chip a100_80gb --input-tokens 4 \
+#           --output-tokens 0 --phase prefill --show-ops 20 --ideal
+id: tiny_encoder
+name: Tiny encoder (hand-countable)
+family: transformer_encoder
+hypothetical: true
+notes: >-
+  Teaching profile. Bidirectional attention over the whole sequence, one pass, no
+  LM head — an encoder emits hidden states and what sits on top is task-specific
+  (docs/CORRECTIONS.md D24).
+params:
+  layers: 1
+  hidden: 8
+  heads: 2
+  ffn_hidden: 16
+  ffn_type: relu
+  vocab: 16
+  max_context: 8
+  norm: rmsnorm
+  positional: none
+  tie_embeddings: true

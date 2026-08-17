@@ -12,7 +12,7 @@ from __future__ import annotations
 from bwz.analysis.roofline import MachineModel
 from bwz.report import Bound, FlipMargin, PhaseResult
 from bwz.spec.hardware_spec import HardwareSpec
-from bwz.units import format_bandwidth, format_quantity
+from bwz.units import format_bandwidth, format_bytes, format_quantity, format_time
 
 _TERM_INPUT = {
     Bound.DRAM_BW_BOUND: "dram bandwidth",
@@ -119,10 +119,20 @@ def suggestions(phase: PhaseResult, machine: MachineModel) -> tuple[str, ...]:
 
 
 def rank_operations(phase: PhaseResult, limit: int = 10) -> tuple[str, ...]:
-    """The operations that dominate the phase, most expensive first."""
+    """The operations that dominate the phase, most expensive first.
+
+    Each line carries the *arithmetic* as well as the time, because "which
+    operation is slow" and "which operation does the work" are different
+    questions and on a small model they have different answers — a 5 kOP
+    projection and a 0 OP residual can cost the same three microseconds when both
+    are dispatch-bound.
+    """
     ranked = sorted(phase.ops, key=lambda op: op.latency_s, reverse=True)[:limit]
     total = phase.latency_s or 1.0
+    width = max((len(op.op_id) for op in ranked), default=0)
     return tuple(
-        f"{op.op_id}: {op.latency_s * 1e3:.3g} ms ({op.latency_s / total:.1%}), {op.bound.value}"
+        f"{op.op_id:<{width}}  {format_quantity(op.flops, 'OP'):>10}  "
+        f"{format_bytes(op.dram_bytes):>9}  {format_time(op.latency_s):>8} "
+        f"({op.latency_s / total:5.1%})  {op.bound.value}"
         for op in ranked
     )

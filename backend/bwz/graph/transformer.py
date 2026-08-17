@@ -34,7 +34,7 @@ from bwz.graph.ops import (
 )
 from bwz.spec.deployment import AttentionImpl, DeploymentSpec
 from bwz.spec.dtypes import DType
-from bwz.spec.model_spec import FFNType, NormType, PositionalType, TransformerSpec
+from bwz.spec.model_spec import FFNType, ModelFamily, NormType, PositionalType, TransformerSpec
 
 _NORM_FLOPS = {
     NormType.RMSNORM: RMSNORM_FLOPS_PER_ELEMENT,
@@ -186,7 +186,12 @@ class _Builder:
             hidden_state = self.block(hidden_state, layer)
 
         hidden_state = self.norm("final_norm", hidden_state, layer=None)
-        self.lm_head(hidden_state, embedding)
+        # An encoder produces hidden states and stops. What sits on top — a
+        # classifier, an MLM head, a pooler — is task-specific and not part of
+        # the encoder, so counting one here would be inventing a layer
+        # (docs/CORRECTIONS.md D24).
+        if self.model.family is ModelFamily.TRANSFORMER_DECODER:
+            self.lm_head(hidden_state, embedding)
 
         return ComputeGraph(
             name=f"{self.model.id}.{self.phase.value}",
@@ -290,7 +295,9 @@ class _Builder:
                     head_dim=p.effective_head_dim,
                     q_len=self.seq,
                     kv_len=self.kv_len,
-                    causal=True,
+                    # Bidirectional for an encoder: every token attends to every
+                    # other, so there is no triangle to halve (D24).
+                    causal=self.model.family is ModelFamily.TRANSFORMER_DECODER,
                     materialize_scores=materialize,
                 ),
                 inputs=reads,
