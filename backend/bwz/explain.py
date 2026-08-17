@@ -61,7 +61,8 @@ def explain_graph(graph: ComputeGraph) -> tuple[Explanation, ...]:
 def explain(op: Operation, tensors: TensorTable) -> Explanation:
     """Describe one operation. Falls back to a shape-only note for families that
     have no closed form worth writing out."""
-    flops = cost_of(op, tensors).flops
+    cost = cost_of(op, tensors)
+    flops = cost.flops
     attrs = op.attrs
 
     if isinstance(attrs, MatmulAttrs):
@@ -73,7 +74,7 @@ def explain(op: Operation, tensors: TensorTable) -> Explanation:
     if isinstance(attrs, ElementwiseAttrs):
         return _elementwise(op, attrs, flops)
     if isinstance(attrs, EmbeddingAttrs):
-        return _embedding(op, attrs, flops)
+        return _embedding(op, attrs, flops, cost.weight_bytes + cost.output_bytes)
     if isinstance(attrs, ConvAttrs):
         return _conv(op, attrs, flops)
     if isinstance(attrs, PoolAttrs):
@@ -188,17 +189,25 @@ def _elementwise(op: Operation, a: ElementwiseAttrs, flops: float) -> Explanatio
     )
 
 
-def _embedding(op: Operation, a: EmbeddingAttrs, flops: float) -> Explanation:
+def _embedding(op: Operation, a: EmbeddingAttrs, flops: float, moved: float) -> Explanation:
     return Explanation(
         op_id=op.id,
         op_type=op.op_type.value,
         shapes=f"ids[{a.tokens}] -> Y[{a.tokens},{a.width}]",
         algebra="y[t,:] = table[ids[t], :]",
-        arithmetic=f"a gather: no arithmetic, {flops:,.0f} OP",
+        # Zero arithmetic is not zero cost, and a panel that says only "0 OP"
+        # reads as free. A copy transforms nothing — that is why it contributes
+        # no FLOPs, and why the standard 2·N·D transformer count excludes it —
+        # but it moves bytes and pays a dispatch like anything else.
+        arithmetic=(
+            f"a gather: no arithmetic, {flops:,.0f} OP. The cost is movement — "
+            f"{a.tokens} rows of {a.width}, {moved:,.0f} bytes — plus one dispatch"
+        ),
         flops=flops,
         code=f"""for (t = 0; t < {a.tokens}; ++t)
   memcpy(Y[t], table[ids[t]], {a.width} * sizeof(elem));
-                                    /* traffic only — the table is footprint */""",
+      /* a move, not an operation: 0 FLOP, {moved:,.0f} bytes, 1 dispatch.
+         The table is footprint; only the rows touched are traffic. */""",
     )
 
 
