@@ -1,0 +1,124 @@
+id: metis_aipu
+name: Axelera Metis AIPU
+vendor: Axelera AI
+source_url: https://doi.org/10.1109/ISSCC49657.2024.10454395
+process_nm: 12                       # Table C: TSMC 12 nm. Die 12 x 12 mm^2.
+clock_ghz: 0.8                       # Table B: Frequency 800 MHz (nominal, 0.68 V)
+
+# P. A. Hager et al., "11.3 Metis AIPU: A 12nm 15TOPS/W 209.6TOPS SoC for Cost- and
+# Energy-Efficient Inference at the Edge", ISSCC 2024, pp. 212-213.
+#
+# Every figure below is either quoted from that paper (cited by figure/table) or
+# named in `estimates:` with how it was derived (docs/CORRECTIONS.md D6/D7).
+# The measured part is beta silicon, which the paper says explicitly.
+#
+# TOPS check, and the paper agrees with it to 0.06%:
+#   512 x 512 MACs                                        = 262144 MAC/cycle/core
+#   / 8 bit-serial cycles per INT8 activation             =  32768 MAC/cycle/core
+#   x 0.8 GHz x 2 OP/MAC                                  =   52.4288 TOPS/core
+#   x 4 AI cores                                          =  209.7152 TOPS SoC
+# against Table C's 52.4 TOPS/core and the title's 209.6 TOPS (= 4 x 52.4 rounded).
+# The /8 rides on the int8 dtype multiplier so peak_flops_per_s() doubles exactly
+# once (CLAUDE.md #5). Cross-check at the measured peak: 875 MHz gives 57.344
+# TOPS/core against the paper's stated 57.3.
+
+compute_units:
+  # Fig 11.3.4(a): "512x512 INT-8-8-26 D-IMC crossbar array", segmented into 16
+  # IMC banks of 512 inputs x 32 outputs x 4 weight sets. Weight-stationary is
+  # not a modelling choice here — the weights are physically stored in the
+  # compute array.
+  - name: d_imc
+    count: 4                         # Table C: AI Cores = 4
+    ops_per_cycle_per_unit: 262144   # 512 x 512 MACs
+    supported_dtypes: [int8]         # Table C: weights 8-bit, activations 8-bit. Only.
+    dtype_multipliers: {int8: 0.125} # bit-serial: 8 cycles per INT8 activation
+    systolic_dims: [512, 512]
+    dataflow: ws
+  # The DPU: "a data processing unit (DPU) for element-wise vector operations and
+  # activations". Distinct silicon from the MVM engine, so norms, requantisation
+  # and activations do not get charged at the array's rate (docs/CORRECTIONS.md
+  # D27). Its own throughput is NOT published — see estimates.compute_units.
+  - name: dpu
+    count: 4                         # one on the MVM datapath of each AI core
+    ops_per_cycle_per_unit: 64       # Fig 11.3.4(a): "64 x 32-bit" per cycle into the DPU
+    supported_dtypes: [int8]
+
+# Levels are SoC aggregates over the four AI cores, because the peak TOPS and the
+# paper's own on-chip total are quoted that way. They sum to exactly 52 MiB,
+# which is the figure the paper states: "Including the 4 MiB L1 and the 1 MiB
+# D-IMC SRAM of each of the four AI-Cores, the on-chip SRAM aggregates to 52 MiB."
+memory:
+  # Table C: IMC capacity 8 Mib = 1 MiB per core. The weights live in the array.
+  - {name: D-IMC, level: 1, capacity_bytes: 4194304, bandwidth_bytes_per_s: 8.388608e+14, latency_ns: 0}
+  # Table C: L1 scratchpad 4 MiB per core.
+  - {name: L1, level: 2, capacity_bytes: 16777216, bandwidth_bytes_per_s: 2.048e+11, latency_ns: 0}
+  # Table C: On-Chip L2 scratchpad 32 MiB (Fig 11.3.2 draws it as 4 x 8 MiB).
+  - {name: L2, level: 3, capacity_bytes: 33554432, bandwidth_bytes_per_s: 1.25e+11, latency_ns: 0}
+  # Fig 11.3.2: two LPDDR4x PHYs, 32 pins each. Capacity and data rate: see estimates.
+  - {name: LPDDR4x, level: 4, capacity_bytes: 8.0e+09, bandwidth_bytes_per_s: 3.4128e+10, latency_ns: 0}
+
+async_copy_engines: 4                # Fig 11.3.2: one DMA per AI core
+tdp_w: 15                            # Table C: "Typical 5-15 W"
+
+dram_bandwidth_efficiency: 1.0
+achieved_flops_fraction: 1.0
+
+estimates:
+  memory: >-
+    Capacities are all published (Table C; 4 MiB L1 and 1 MiB D-IMC per core, 32 MiB L2) and sum
+    to the paper's own stated 52 MiB of on-chip SRAM. The BANDWIDTHS are not, except one:
+    (1) L2 1.25e+11 B/s is the paper's "more than a terabit per second of aggregated bandwidth to
+    the shared memories" divided by 8 — a published LOWER BOUND on the NoC, attributed here to the
+    L2 level it serves; (2) L1 2.048e+11 B/s is derived, not read: "each cycle processing 512
+    single bit activations through the input feeder from the L1 memory" is 64 B/cycle/core, x4
+    cores x0.8 GHz. It is the activation FEED path only — the 64x32-bit writeback path is four
+    times wider, so this understates L1; (3) D-IMC 8.388608e+14 B/s is the in-place operand
+    delivery rate (262144 weight bytes per cycle per core x4 x0.8 GHz), which is what "compute in
+    memory" means rather than a bus figure. None of the three is used by v1 (docs/CORRECTIONS.md
+    D5a) — SRAM contributes capacity only — and they are declared to keep the level ordering
+    honest and for the M8 hierarchical roofline.
+    DRAM is the one that matters and the paper does NOT publish it. Bandwidth 3.4128e+10 B/s is a
+    64-bit LPDDR4x bus (Fig 11.3.2 shows two PHYs at 32 pins each) at the JEDEC JESD209-4 maximum
+    of 4266 MT/s. The paper states only "Support for LPDDR4x" and "several GiB of an optional
+    LPDDR4x SDRAM", so both the data rate and the 8 GB capacity are inferences and are the single
+    dominant uncertainty in every DRAM-bound result from this chip. Assume the true figure could be
+    half this if the part clocks LPDDR4x below its maximum.
+  compute_units: >-
+    The D-IMC row is entirely published (Fig 11.3.4(a), Table B, Table C). The DPU row is not:
+    the paper names the unit and its job — "a data processing unit (DPU) for element-wise vector
+    operations and activations" — but gives it no throughput. The 64 MAC/cycle/core here is the
+    width of the datapath that FEEDS it, read off Fig 11.3.4(a): the output serializer emits
+    64 x 26-bit per cycle to the integer arithmetic unit, which hands 64 x 32-bit per cycle to the
+    DPU. That makes 409.6 GOP/s of vector throughput a statement about the datapath, not a measured
+    DPU rate. Declaring it is still much closer than the alternative, which is charging norms and
+    activations at the 209.7 TOPS array rate (docs/CORRECTIONS.md D27).
+    Two units the paper describes are NOT declared, because declaring them would mean inventing a
+    number: the DWPU (depth-wise convolution, pooling, up-sampling) and the per-core RISC-V control
+    core have no published throughput at all. Depth-wise convolution is therefore charged to the
+    D-IMC array here, which is wrong in the direction of optimism on a MobileNet-shaped workload.
+    INT4 is not declared either: the paper says 8-bit weights and 8-bit activations and nothing
+    about a narrower mode, so unlike chip_a this profile claims no int4 datapath.
+  dram_bandwidth_efficiency: >-
+    Set to 1.0 deliberately, per the rule in calibration.py: the 0.85 default is a datacenter-HBM
+    figure and "has no business being applied to an LPDDR estimate that is itself a guess". The
+    DRAM bandwidth above is already an inference; de-rating it by an unfitted constant would
+    compound two guesses and make any golden test the constant rather than the formula.
+  achieved_flops_fraction: >-
+    Set to 1.0 because the 52.4 TOPS is MEASURED silicon (Fig 11.3.5(b) is a throughput-vs-voltage
+    curve on the fabricated part; the paper reports 57.3 TOPS at 0.7 V/875 MHz), not a marketing
+    peak, so the 0.70 default — an unfitted allowance for issue and scheduling losses on a GPU —
+    would be double-counting. Shape utilisation is applied separately and is NOT disabled by this:
+    a batch-1 GEMM still runs at 1/513 of peak on the 512x512 array, which is the dominant compute
+    effect at edge batch sizes (docs/CORRECTIONS.md D14).
+    The paper's Table A does publish network-level measurements — ResNet-50 2502 FPS at 7.1 W,
+    ResNet-34 3199 FPS, SSD-MobileNetV1 5901 FPS, YoloV5s-ReLU 497 FPS at 5.4 W, all INT8 with an
+    experimental compiler. Those are citable reference points for the validation suite, not
+    calibration constants, and nothing here has been fitted to them.
+  tdp_w: >-
+    Table C gives a range ("Typical 5-15 W") rather than a TDP; 15 W is its top. Measured chip
+    power in Table A is 7.1 W for ResNet-34/50 and SSD-MobileNetV1 and 5.4 W for YoloV5s.
+  kernel_launch_overhead_s: >-
+    Not published and not set, so the 3 us datacenter-GPU default in calibration.py applies. That
+    is very likely wrong for a RISC-V-controlled dataflow engine whose cores run a whole network
+    without host interaction, and it is the term that decides LATENCY_BOUND verdicts on small
+    graphs. Flagged rather than guessed.

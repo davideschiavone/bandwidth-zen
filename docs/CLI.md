@@ -39,6 +39,25 @@ Prints the bundled chip and model profiles with their headline numbers, shapes a
 (`sourced` / `N est.` / `hypothetical`). The `ridge` column is the arithmetic intensity above which
 that chip is compute-bound — 6168 OP/byte for `chip_a`, 153 for A100 at fp16.
 
+```
+  id            name                       peak   dtype     DRAM BW     DRAM   on-chip   ridge   provenance
+ ─────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  a100_80gb     NVIDIA A100 SXM4 80GB   312 TFLOP/s  fp16   2.04 TB/s   80 GB   60.7 MB     153   1 est.
+  chip_a        chip_a (edge INT8 NPU)    210 TOP/s  int8     34 GB/s    8 GB     55 MB    6168   hypothetical
+  chip_b        chip_b (hypothetical)    52.4 TOP/s  int8     34 GB/s    8 GB      1 GB    1542   hypothetical
+  h100_sxm      NVIDIA H100 SXM5 80GB   989 TFLOP/s  fp16   3.35 TB/s   80 GB   83.8 MB     295   2 est.
+  jetson_orin   NVIDIA Jetson AGX Orin 42.6 TFLOP/s  fp16    205 GB/s   64 GB   7.07 MB     208   3 est.
+  metis_aipu    Axelera Metis AIPU        210 TOP/s  int8   34.1 GB/s    8 GB   54.5 MB    6145   6 est.
+  mi300x        AMD Instinct MI300X     1.31 PFLOP/s fp16    5.3 TB/s  192 GB    275 MB     247   2 est.
+```
+
+(Names are elided here to fit the page; the real table wraps them.) `metis_aipu` is the Axelera
+Metis AIPU from ISSCC 2024 — the first profile whose numbers come from a paper rather than a
+datasheet, and the one with the most `est.` fields, because the paper publishes compute and
+capacity in full and DRAM bandwidth not at all. Read
+[`../backend/profiles/chips/metis_aipu.yaml`](../backend/profiles/chips/metis_aipu.yaml) before
+quoting anything derived from it.
+
 ---
 
 ## 2. `bwz matmul` — one `A[M,K] × B[K,N] → C[M,N]`
@@ -255,8 +274,76 @@ uv run --group plots python scripts/plot_pipeline.py --chip h100_sxm --matmul 81
 | a profile | `--model ID`, `--tokens/-S` — one figure per phase |
 | an ad-hoc single-layer encoder | `--encoder --hidden --heads --head-dim --ffn --vocab --tokens/-S` |
 
-plus `--chip` (repeatable), `--weights`, `--ideal`, `--steps`, `--zoom`, `--html`, `--html-steps`,
-`--out`.
+plus `--chip` (repeatable), `--compare`, `--weights`, `--ideal`, `--steps`, `--zoom`, `--html`,
+`--html-steps`, `--out`.
+
+### 5.1 `--compare` — two chips, one workload, one figure
+
+Without it, `--chip A --chip B` writes one figure per chip, each with x normalised to that chip's
+own span. With it, they land in **one** figure on a **shared, absolute** axis:
+
+```bash
+uv run --group plots python scripts/plot_pipeline.py \
+  --chip a100_80gb --chip metis_aipu --compare --model gemma3_4b -S 512 --html
+```
+
+```
+wrote ../docs/plots/timeline-compare-a100_80gb-vs-metis_aipu-gemma3_4b-prefill-int8.png
+wrote ../docs/plots/timeline-compare-a100_80gb-vs-metis_aipu-gemma3_4b-decode-int8.png
+wrote ../docs/plots/timeline-compare-a100_80gb-vs-metis_aipu-gemma3_4b-prefill-int8.html
+wrote ../docs/plots/timeline-compare-a100_80gb-vs-metis_aipu-gemma3_4b-decode-int8.html
+```
+
+Both views are kept on purpose (`docs/CORRECTIONS.md` D29). Absolute is the axis for "which is
+faster and by how much"; normalised is the axis for "how is *this* machine's time distributed", and
+at 13x the faster chip's whole run is 7% of a shared axis.
+
+It works for all three workload kinds and for more than two chips:
+
+```bash
+… --chip a100_80gb --chip metis_aipu --compare --matmul 4096,4096,4096
+… --chip a100_80gb --chip metis_aipu --compare --encoder --hidden 4096 --heads 64 --ffn 16384 -S 1024
+… --chip a100_80gb --chip metis_aipu --chip jetson_orin --compare --matmul 2048,2048,2048
+```
+
+A `--model` comparison pairs prefill against prefill and decode against decode, never across.
+
+**Every chip runs the same workload at the same precision**, which has to be enforced rather than
+assumed — A100 defaults to fp16 and Metis has no fp16 datapath, so per-chip defaults would compare
+two different amounts of traffic. `--compare` picks one dtype every chip supports and otherwise
+refuses:
+
+```bash
+uv run --group plots python scripts/plot_pipeline.py \
+  --chip metis_aipu --chip a100_80gb --compare --weights fp16
+```
+
+```
+bwz: metis_aipu has no fp16 datapath, so --compare cannot run the same workload on every chip.
+Supported by all: int8
+```
+
+```bash
+uv run --group plots python scripts/plot_pipeline.py --chip a100_80gb --compare
+```
+
+```
+bwz: --compare puts two or more chips in one figure and got 1; pass --chip twice, or drop
+--compare for the per-chip view
+```
+
+Rows are **banded by chip**, not aligned across them: A100 declares 3 memory levels and 2 compute
+units, Metis 4 and 2, `chip_a` 2 and 1, and no correspondence between `cuda_core` and `dpu` exists
+to draw. Each band opens with a header row carrying that machine's peak, DRAM bandwidth, on-chip
+capacity, its row counts and its total span. Everything the single-chip figure does survives inside
+the band — grey rows for declared-and-unused resources, matrix and vector lanes on separate rows,
+filled loads against hollow stores, named bars, and the three info boxes, now one set per chip.
+
+Below the two registers the comparison adds a **roofline register**: both chips' ceilings, ridge
+points and M=1 lines on one chart, with each chip's workload point on it. Inside that panel colour
+means *chip* rather than *resource*, which the panel says on itself. The same chart is on the HTML
+page, and the arithmetic section there is rendered **once** — it is a property of the workload, and
+the workload is the same on both machines.
 
 The shape flags belong to `--encoder`; passing them with `--model` is an error, because a profile
 already carries its dimensions:

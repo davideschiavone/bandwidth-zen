@@ -11,7 +11,7 @@ import pytest
 
 from bwz.analysis import analyze, idealised, machine_model
 from bwz.analysis.pipeline import Lane, PipelineTrace, Stage, build_trace, tile_count
-from bwz.analysis.roofline import MachineModel
+from bwz.analysis.roofline import MATRIX_OP_TYPES, MachineModel
 from bwz.graph import GraphPhase, build_graph
 from bwz.report import Report
 from bwz.spec import DeploymentSpec, DType, MatmulSpec, load_chip, load_model
@@ -180,6 +180,53 @@ def test_operation_trace_reproduces_the_reported_latency_exactly() -> None:
 
     assert trace.fill_drain_s == 0.0
     assert trace.total_s == pytest.approx(decode.latency_s, rel=1e-9)
+
+
+def test_each_engines_spans_name_only_families_that_engine_can_run() -> None:
+    """A matrix family cannot execute on the vector unit, and vice versa.
+
+    D28 split a coalesced group's compute *time* between the two engines but
+    named both halves after the group's dominant family — which is a matmul in
+    essentially every group of a transformer. The vector lane's spans therefore
+    carried ``op_type="matmul"``, and the timeline's hover read
+    ``EXEC — matmul on the vector unit``: a claim that contradicts D27, on the
+    one lane D27 exists to separate out.
+
+    Llama-3-8B decode on A100 coalesces 451 operations into 32 blocks, and every
+    block mixes matmul with norms and elementwise work, so this asserts over a
+    case where the naive answer is wrong on every step.
+    """
+    chip = load_chip("a100_80gb")
+    model = load_model("llama3_8b")
+    deployment = DeploymentSpec.model_validate(
+        {"batch": 1, "input_tokens": 512, "output_tokens": 1}
+    )
+    report = analyze(model, chip, deployment)
+    decode = report.phase(GraphPhase.DECODE)
+    assert decode is not None
+    trace = build_trace(
+        build_graph(model, deployment, GraphPhase.DECODE),
+        decode,
+        machine_model(chip, DType.FP16),
+        double_buffered=report.memory.double_buffered,
+    )
+
+    matrix = {t.value for t in MATRIX_OP_TYPES}
+    core = {s.op_type for s in trace.spans if s.lane is Lane.CORE and s.stage is Stage.EXEC}
+    vector = {s.op_type for s in trace.spans if s.lane is Lane.VECTOR and s.stage is Stage.EXEC}
+
+    assert core and vector, "this workload must exercise both engines for the test to mean anything"
+    assert core <= matrix, f"array span named a non-matrix family: {sorted(core - matrix)}"
+    assert not (vector & matrix), f"vector span named a matrix family: {sorted(vector & matrix)}"
+
+    # The split is a relabelling, not a re-costing: the two lanes still sum to
+    # the phase's compute time and arithmetic (D19).
+    busy = trace.busy_s
+    totals = trace.totals
+    assert busy[Lane.CORE] + busy[Lane.VECTOR] == pytest.approx(
+        decode.t_compute_s + decode.t_fixed_s, rel=1e-9
+    )
+    assert totals[Lane.CORE] + totals[Lane.VECTOR] == pytest.approx(decode.flops, rel=1e-9)
 
 
 def test_coalescing_preserves_the_span() -> None:

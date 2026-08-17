@@ -775,3 +775,121 @@ GEMM + bias + GELU as a single kernel — is overcharged here by a dispatch and 
 residency failed to absorb. Stated in every report's assumptions rather than left for the reader to
 discover. Modelling it properly means a register/shared-memory level and a fusion pass, which is
 M8 work (D5).
+
+---
+
+## D29 — Two chips in one figure: the axis is shared, the rows are not (2026-08-17)
+
+`bwz compare` prints a head-to-head table. Asked for it visually — "the same workload on each,
+resource rows grouped per chip, so the difference is readable at a glance" — with the time axis
+**shared and absolute**, because seeing that one span is 13x the other is the whole reason to draw
+it. `scripts/plot_pipeline.py --chip A --chip B --compare`.
+
+Four decisions the comparison forces, none of which arise for a single chip.
+
+**1. The rows cannot line up, so they are banded rather than aligned.** Row counts are read off the
+profile and profiles disagree:
+
+| chip | memory levels | compute units | rows |
+|---|---|---|---|
+| `chip_a` | 2 | 1 | 3 |
+| `a100_80gb` | 3 | 2 | 5 |
+| `metis_aipu` | 4 | 2 | 6 |
+
+There is no honest correspondence to draw between A100's `L2` and Metis's `L2`, still less between
+`cuda_core` and `dpu`. Forcing one — a canonical DRAM/SRAM/COMPUTE triple, say — would throw away
+exactly what a comparison is for, which is that the machines are shaped differently. So each chip
+keeps **its own band**, introduced by a header row naming it and carrying its peak, its DRAM
+bandwidth, its on-chip capacity, its row counts and its total span. The shared thing is the **time
+axis**; the rows are deliberately not shared. Adding a third chip adds a third band and nothing else
+has to change.
+
+**2. Both chips must run the same workload at the same precision, and that has to be enforced.**
+Per-chip dtype defaults would silently compare different amounts of traffic: A100 defaults to fp16,
+Metis has no fp16 datapath at all. `--compare` therefore resolves **one** dtype that every chip
+supports (preferring fp16, then int8) and refuses with the intersection named when there is none:
+
+```
+bwz: metis_aipu has no fp16 datapath, so --compare cannot run the same workload on
+every chip. Supported by all: int8
+```
+
+The single-chip path keeps its per-chip default, which is right there — nothing is being compared.
+
+**3. The normalised view is kept, not replaced.** Shared-and-absolute is the right axis for "which
+machine is faster and by how much" and the *wrong* one for "how is this machine's time distributed":
+at 13x, the faster chip's whole run is 7% of the axis and its internal structure is a smudge. Both
+questions are real, so `--compare` is a flag and the default remains one normalised figure per chip.
+
+**4. The roofline gets a register of its own, and colour changes meaning inside it.** The timeline
+answers *what happened*; two chips landing on opposite sides of their own ridge point is *why*, and
+that is invisible in a table of latencies. On the shipped comparison — Gemma-3-4B prefill, S=512,
+int8 — both chips do 3.33 TOP over ~3.8 GB, i.e. ~870 OP/byte, and:
+
+| | ridge | this run | verdict |
+|---|---|---|---|
+| `a100_80gb` | 306 OP/byte | 870.4 | **compute bound** |
+| `metis_aipu` | 6145 OP/byte | 868.9 | **DRAM-bandwidth bound** |
+
+Identical arithmetic, identical traffic, opposite limiters. Inside that panel colour encodes
+**chip**, where everywhere else in the figure it encodes **resource** — so the panel gets its own
+two hues (slots 4 and 5) rather than reusing the lane blue/grey/orange/green, its own stated legend,
+and a direct label on every mark.
+
+**What is unchanged, and tested to be.** The comparison composes per-chip traces; it does not build
+a new one. Each panel's spans are the same `build_trace` output the single-chip figure draws, so the
+D19 invariant survives untouched — measured on the shipped figure, DRAM busy reproduces `t_dram` to
+7e-18 s on A100 and 1e-16 s on Metis, the compute rows reproduce `t_compute + t_fixed` to the same
+tolerance, and each band's span equals its chip's reported latency exactly.
+
+### Four pre-existing bugs this surfaced, all on the vector lane
+
+D28 added `Lane.VECTOR` and taught the PNG's bar drawing and lane totals about it. **Four other
+places that switch on lane were never updated**, and every one of them fails in the same direction:
+the vector engine renders as something it is not. They are grouped here because the lesson is one
+lesson — adding an enum member is not the same as handling it — and because a matmul-only figure
+set hides all four, which is why a year of committed figures never showed them.
+
+Each was confirmed against a *rendered* artefact from the unmodified script (a screenshot, or the
+JSON payload of the emitted page), never from reading the source.
+
+**1. No colour.** The page's JS colour map still had three entries. A Llama-3-8B prefill page
+emitted 130 vector spans, every one rendering `fill="undefined"`; browsers fall back to black, so
+the vector row read as a solid dark bar rather than the green D28 assigned it.
+
+**2. No denominator on the rate.** The `COMPUTED` box read
+`array 3.32 TOP @ 381 TOP/s of 624 TOP/s` and then `vector 2.22 GOP @ 437 TOP/s` — a rate with
+nothing to measure it against, on every chip. It now carries the vector unit's peak, and when the
+profile declares no vector unit for that dtype it says so rather than printing the array's peak
+twice as though it were a second engine. That makes D27's open problem legible on the face of the
+figure: **A100 at int8 has no vector datapath at all** (`cuda_core` is fp32/fp16 only), so its norms
+and activations are charged at the tensor cores' 437 TOP/s and the box now says so. Metis, which
+declares a DPU, reads `vector 2.22 GOP @ 410 GOP/s of 410 GOP/s`.
+
+**3. The hover called it a buffer.** `_tip()` tested `Lane.DRAM`, then `Lane.CORE`, then fell
+through to the SRAM branch — so hovering any vector bar gave
+`HOLD — elementwise on chip … holding 0 B`: the arithmetic lane described as an occupancy, with its
+operations and its rate, the two numbers a reader most wants there, absent entirely. Now
+`EXEC — norm on the vector unit … 33.6 MOP @ 410 GOP/s`.
+
+**4. The vector spans were named after matrix operators.** This one is in the engine, not the
+script. `_operation_trace` splits a coalesced group's compute time between the two engines (D28) but
+named *both* halves after the group's dominant family — and a transformer block's dominant family by
+FLOPs is a matmul in essentially every group. So the vector lane's spans carried
+`op_type="matmul"`, and once bug 3 was fixed the hover read **`EXEC — matmul on the vector unit`**,
+a claim that directly contradicts the correction D27 exists to make. 136 of 274 vector spans on the
+shipped comparison said it.
+
+`_engine_work(group, matrix=...)` now picks each half's dominant family from the operations *that
+engine actually ran*. It is a relabelling and not a re-costing, and `test_pipeline.py`
+asserts both halves of that: no vector span names a family in `MATRIX_OP_TYPES`, no array span names
+one outside it, and the two lanes still sum to `t_compute + t_fixed` and to the phase's arithmetic.
+
+**Open, not fixed: `HELD ON CHIP` can exceed the chip's capacity.** The same figure reports
+`671 MB` held `of 60.7 MB capacity` on A100 — because `_operation_trace` sets a step's
+`resident_bytes` to `max(weight_bytes)` over the operations it coalesces, and Gemma-3-4B's LM head
+alone is 671 MB of int8 weights. That is the operation's whole weight footprint, not what the
+capacity planner granted, so the box is measuring one thing and labelling it another. It reproduces
+on the unmodified script for any `--model` whose largest operator exceeds SRAM, and fixing it is a
+semantics change in `analysis/pipeline.py` (either charge the tiled working set or rename the
+quantity), which deserves its own decision rather than being folded into a figure change.
