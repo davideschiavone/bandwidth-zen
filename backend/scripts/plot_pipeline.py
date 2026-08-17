@@ -582,6 +582,13 @@ def main() -> None:
     parser.add_argument("--steps", type=int, default=32, help="Steps to draw")
     parser.add_argument("--zoom", type=int, default=6, help="Steps in the zoomed register")
     parser.add_argument("--html", action="store_true", help="Also write the zoomable HTML timeline")
+    parser.add_argument(
+        "--html-steps",
+        type=int,
+        default=256,
+        help="Steps in the HTML trace (default 256). Higher than --steps on purpose: a static "
+        "figure has to stay legible at one scale and a zoomable one does not",
+    )
     parser.add_argument("--out", type=Path, default=Path("../docs/plots"))
     args = parser.parse_args()
 
@@ -604,10 +611,13 @@ def main() -> None:
             args.zoom,
         )
         if args.html:
+            # A separate, finer trace: the PNG stays readable at 32 steps while
+            # the page has something to zoom into.
+            fine, _ = build(chip, m, n, k, dtype, args.html_steps)
             write_html(
                 chip,
                 dtype,
-                trace,
+                fine,
                 spec,
                 command,
                 args.out / f"timeline-{chip.id}-{dtype.value}.html",
