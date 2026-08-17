@@ -301,7 +301,10 @@ check and then fail with "index.html was not found next to konata.sh".
 
 - `KONATA_VERSION=v1.2.0 make konata TRACE=…` uses a different release. The hash check is skipped
   then, because the pinned hash belongs to the default.
-- `KONATA_PORT=31000 …` if 30080 is taken.
+- **A busy port is handled.** A viewer left running in another terminal keeps 30080, so the script
+  probes upward and says which port it took: `port 30080 is in use (another viewer?); using 30081
+  instead`. Set `KONATA_PORT` to pin one instead — if *that* is busy you get a one-line explanation
+  rather than a Python traceback.
 - **Offline:** download `konata-v1.1.0.zip` by hand and `unzip` it into
   `~/.cache/bandwidth-zen/konata-v1.1.0/`, giving
   `~/.cache/bandwidth-zen/konata-v1.1.0/konata-v1.1.0/index.html`. The script then never reaches

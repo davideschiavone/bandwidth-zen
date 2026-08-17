@@ -114,6 +114,46 @@ fi
 
 have_konata || { echo "konata.sh: install failed; remove $install_dir and retry" >&2; exit 1; }
 
+# The helper binds a port and lets Python's traceback do the talking if it is
+# taken — which it usually is because a previous viewer is still running in
+# another terminal. Pick a free one instead, unless the caller pinned it.
+start_port="${KONATA_PORT:-30080}"
+pinned=0
+[ -n "${KONATA_PORT:-}" ] && pinned=1
+
+if ! port="$(python3 - "$start_port" "$pinned" <<'PYEOF'
+import socket
+import sys
+
+start, pinned = int(sys.argv[1]), sys.argv[2] == "1"
+for candidate in range(start, start + (1 if pinned else 20)):
+    with socket.socket() as probe:
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            probe.bind(("127.0.0.1", candidate))
+        except OSError:
+            continue
+    print(candidate)
+    break
+else:
+    sys.exit(1)
+PYEOF
+)"; then
+    if [ "$pinned" = 1 ]; then
+        echo "konata.sh: port $start_port is already in use." >&2
+        echo "  Another viewer is probably still running — stop it with Ctrl+C in its" >&2
+        echo "  terminal, or unset KONATA_PORT to let this script pick a free port." >&2
+    else
+        echo "konata.sh: no free port in ${start_port}..$((start_port + 19))." >&2
+    fi
+    exit 1
+fi
+
+if [ "$port" != "$start_port" ]; then
+    echo "konata.sh: port $start_port is in use (another viewer?); using $port instead" >&2
+fi
+export KONATA_PORT="$port"
+
 # Konata's own helper serves index.html and the traces over 127.0.0.1 and blocks
 # until interrupted. It prints the URL to open.
 exec "$helper" "$@"
