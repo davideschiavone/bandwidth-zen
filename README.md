@@ -173,19 +173,28 @@ t_memory    = bytes_moved / (bandwidth × bandwidth_efficiency)
 t_op        = max(t_compute, t_memory)            # or sum, if the chip can't overlap
 ```
 
-Three things make it more than a textbook roofline:
+Four things would make it more than a textbook roofline. **Two are implemented and two are not** —
+`docs/MODEL.md` says which formula is live:
 
-1. **`bytes_moved` comes from a tiling model**, not from tensor sizes. For `C = A·B` with tiles
-   `(Tm, Tn, Tk)` constrained to fit on-chip, DRAM traffic is
-   `M·K·⌈N/Tn⌉ + K·N·⌈M/Tm⌉ + M·N` — the tool searches tile sizes and reports the reuse factor.
-2. **`utilization_efficiency` is derived, not assumed.** The tail effect
-   (`padded_dims / real_dims` on the systolic array) plus pipeline fill/drain. This is why a GEMM
-   with M=1 on a 128×128 array gets ~1/128 of peak — and why LLM decode looks the way it does.
-3. **Communication is modelled with alpha-beta costs on the real topology.** Ring allreduce is
-   `2(N−1)α + 2(N−1)/N·S·β`, with separate `(α, β)` for intra- and inter-node links, and
-   hierarchical decomposition for multi-node collectives.
+1. **`utilization_efficiency` is derived, not assumed.** *(implemented)* The systolic tail effect,
+   `[K/padded(K)]·[N/padded(N)]·[M/(M+rows)]`. This is why a matmul with M=1 on a 128×128 array
+   gets ~1/128 of peak — and why LLM decode looks the way it does. Pipeline fill/drain is
+   **not** folded in here: it is reported separately by the tile schedule (§6.5), because the
+   roofline's `max(load, compute)` is the many-tiles limit and hiding the difference inside a
+   utilisation figure would make it unfalsifiable.
+2. **On-chip capacity decides overlap and residency.** *(implemented)* Capacity is allocated
+   double buffer → activations → weights, and whether two tiles fit is what earns
+   `max(load, compute)` instead of `load + compute`.
+3. **`bytes_moved` from a tile-reuse search.** *(not implemented — v1 charges compulsory traffic.)*
+   The target is `M·K·⌈N/Tn⌉ + K·N·⌈M/Tm⌉ + M·N` over a search of tile sizes; v1 charges each
+   operand once, which is the traffic of an ideal schedule and therefore a **lower bound** once the
+   working set stops fitting on chip. Quantified in `docs/MODEL.md` §6.2 — 1.5–2× at 16384³ — and
+   stated in every report's assumptions drawer.
+4. **Communication with alpha-beta costs on the real topology.** *(not implemented — M5.)* Ring
+   allreduce as `2(N−1)α + 2(N−1)/N·S·β`, separate `(α, β)` per link class.
 
-Energy uses a per-operation pJ table (Horowitz-style) and is labelled ±50%.
+Energy (M7) is not implemented either. Nothing in this repo has been calibrated against a published
+measurement yet, which is why no report claims better than medium confidence.
 
 ---
 
@@ -246,7 +255,7 @@ backend/bwz/
   profiles/     chip and model YAML
 backend/scripts/  figure generation (imports the engine; the engine never imports it)
 frontend/src/   React + TS dashboard (roofline plot, Gantt, Pareto explorer)
-docs/           MODEL.md · CALIBRATION.md · SCHEMA.md · CORRECTIONS.md · plots/
+docs/           MODEL.md · CALIBRATION.md · SCHEMA.md · CORRECTIONS.md · plots/ (+ its README)
 ```
 
 The analysis core is pure and dependency-free: `analyze()` is a deterministic function of its

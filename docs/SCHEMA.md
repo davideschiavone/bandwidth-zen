@@ -58,7 +58,9 @@ interconnect:                   # optional; unused until M5
 
 **Enums.** `dataflow`: `ws | os | rs`. `topology`: `fully_connected | ring | mesh | fat_tree |
 switched`. `supported_dtypes` and `dtype_multipliers` keys: `fp32 | tf32 | fp16 | bf16 | fp8 |
-int8 | int4`.
+int8 | int4`. **Not `int32`**: that is an accumulator width with no compute unit behind it (an
+int8 product accumulates in int32 *at the int8 rate*), so it is legal only as a matmul's
+`out_dtype`. No bundled profile declares it and nothing validates against it yet.
 
 ### What v1 actually reads
 
@@ -172,6 +174,42 @@ ops:
 
 The escape hatch of PROMPT.md §4.2 — models anything the parametric flavours cannot express.
 
+**A bare matmul is not this.** `CustomOp` carries hand-written FLOPs and bytes but no shape, so the
+systolic tail effect cannot be computed for it and comes back as 100%. Use `family: matmul`
+(§2.4), which carries `m`, `n`, `k` (`docs/CORRECTIONS.md` D17).
+
+### 2.4 Matmul workload
+
+```yaml
+id: gemm_4096
+family: matmul
+hypothetical: true         # defaults true for this family: a synthetic shape has no source_url
+m: 4096                    # rows of operand A; folds batch in
+n: 4096                    # columns of operand B
+k: 4096                    # contracted dimension
+a_dtype: int8              # width of the M x K operand      (default fp16)
+b_dtype: int8              # width of the K x N operand      (default fp16)
+out_dtype: int32           # width of the M x N result       (default: the wider operand)
+```
+
+One `A[M,K] × B[K,N] → C[M,N]`, expanded into a single-operation graph. **Matmul vocabulary, not
+transformer vocabulary** — operands A and B and a result C, with no weights/activations
+asymmetry, because a bare matmul has none (`docs/CORRECTIONS.md` D18).
+
+| Derived | Rule |
+|---|---|
+| `operand_dtype` | the **wider** of `a_dtype` and `b_dtype` — both enter the array through one datapath, so a narrow operand saves bytes and buys no throughput |
+| `result_dtype` | `out_dtype`, else the wider operand |
+| `parameter_count()` | `k · n`; a matmul has no parameters, but the base class asks for a count |
+
+**`deployment.precision` is ignored for this family.** The widths are here, and there is no batch,
+context, phase or attention implementation to describe — `M` folds the batch in. `analyze()` still
+takes a `DeploymentSpec` because its signature is fixed; the builder discards it.
+
+The result width is an **accumulator** width and changes bytes only, never operations:
+`int8 × int8 → int32` performs the same `2·M·N·K` as `int8 × int8 → int8` and writes four bytes
+per result instead of one. See `docs/MODEL.md` §5b for the worked table.
+
 ---
 
 ## 3. Deployment spec
@@ -186,9 +224,9 @@ input_tokens: 2048
 output_tokens: 256
 kv_context_tokens: 4096    # optional; defaults to input_tokens + output_tokens
 precision:
-  weights: int8            # fp32 | tf32 | fp16 | bf16 | fp8 | int8 | int4
+  weights: int8            # fp32 | tf32 | fp16 | bf16 | fp8 | int8 | int4 | int32
   activations: fp16
-  accumulate: fp32
+  accumulate: fp32         # DECLARED BUT NOT READ -- see below
   kv_cache: fp16
 per_layer_precision_overrides:
   "layer.0.attn.qkv": {weights: fp16}
@@ -203,6 +241,12 @@ constraints: {max_latency_s: 0.05, max_power_w: 700, max_memory_bytes: 8.0e+10}
 **Validated here (intra-spec):** `tp x pp x dp x ep == num_chips`; decode requires
 `output_tokens > 0`; training has no phase split; `pp > 1` needs at least `pp` microbatches;
 `structured_2_4` implies ratio 0.5.
+
+**`precision.accumulate` is not read by anything.** The transformer and CNN builders size output
+tensors at the activation dtype, so declaring `accumulate: fp32` against `activations: fp16` does
+not add the bytes an fp32 accumulator would move. Only `family: matmul` models a widening
+accumulator, through its own `out_dtype` (§2.4). Closing the gap for networks means changing every
+activation-traffic number in the repo and has not been done.
 
 **Not validated here.** Whether the chip supports the requested dtype, or whether the weights fit,
 is a *feasibility* question. M3 answers it with a `Report` carrying `feasible: false` and the

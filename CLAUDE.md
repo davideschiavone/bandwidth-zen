@@ -32,6 +32,7 @@ make lint           # ruff check + mypy --strict + eslint
 make fmt            # ruff format + prettier
 make types          # regenerate frontend/src/api/types.ts from OpenAPI
 make validate       # run the predicted-vs-published validation suite, print the table
+make plots          # regenerate docs/plots/ (roofline + tile schedule, per chip)
 make docker         # docker compose build && up
 ```
 
@@ -99,6 +100,9 @@ Nothing in `analysis/` may import from `api/`. Nothing in `graph/` may import fr
 | A new empirical constant | `calibration.py` only | `docs/CALIBRATION.md` |
 | A new report field | `report.py` | `docs/report.schema.json`, TS types, snapshot tests |
 | A new parallelism strategy | `analysis/parallelism.py` + `collectives.py` | `docs/MODEL.md` |
+| A new model family | `spec/model_spec.py` + `graph/<family>.py`, dispatched in `graph/builder.py` | `docs/SCHEMA.md`, `docs/MODEL.md`, golden test |
+| A new dtype | `spec/dtypes.py` only — widths are definitions, not calibration | `docs/SCHEMA.md` dtype lists |
+| A figure | `backend/scripts/plot_*.py`, never inside `bwz/` | `docs/plots/README.md`, `make plots` |
 | A new UI panel | `frontend/src/components/` | `Dashboard.tsx`, vitest |
 
 ---
@@ -117,7 +121,14 @@ These are known-good behaviours. If a change breaks one, the change is wrong.
 - MobileNetV3 depthwise layers → **memory-bound**, poor utilization on a large systolic array.
 - GEMM with M=1 on a 128×128 systolic array → utilization ≈ 1/128 from the tail effect. If your
   utilization model doesn't reproduce this, it isn't modelling the array.
-- FlashAttention changes bytes, never FLOPs.
+- FlashAttention changes bytes, never FLOPs. So does GQA, and so does a matmul's result width: an
+  `int8 x int8 -> int32` matmul does the same `2*M*N*K` as `int8 x int8 -> int8` and writes four
+  times the bytes.
+- A mixed-width matmul runs at the **wider** operand — both enter the array through one datapath.
+  `fp16 x int8` is 312 TOP/s on A100, not 624. (The transformer path still uses the older
+  weight-dtype rule and is wrong for W8A16; see `docs/CORRECTIONS.md` D18.)
+- A pipeline trace must never be faster than the report it illustrates. Spans are slices of
+  `t_dram`/`t_compute`/`t_fixed` and sum back to them (D19).
 - TP=8 across NVLink on a 7B model at batch 1 → comms is a large fraction of the critical path;
   speedup is well below 8×.
 - Doubling DRAM bandwidth never increases predicted latency. INT8 is never slower than FP16 on
