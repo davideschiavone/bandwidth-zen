@@ -133,7 +133,8 @@ See where the time went — one figure per chip, since the schedule is a propert
 ```bash
 make plots                                                  # → docs/plots/
 uv run bwz matmul -M 4096 -N 4096 -K 4096 -c a100_80gb \
-  --kanata run.kanata                                       # open in Konata
+  --kanata run.kanata                                       # write a Kanata trace
+make konata TRACE=backend/run.kanata                        # open it in Konata
 ```
 
 ![A100 roofline](docs/plots/roofline-a100_80gb-fp16.png)

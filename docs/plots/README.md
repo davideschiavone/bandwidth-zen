@@ -25,6 +25,15 @@ in its own `plots` dependency group, so `make test` does not pull it in.
 | `pipeline-matmul-<chip>-<dtype>.png` | `plot_pipeline.py` | The tile schedule: which resource is busy when, at total scale and zoomed |
 | `pipeline-matmul-<chip>-<dtype>.kanata` | `plot_pipeline.py --kanata` | The same schedule as a Kanata log, for [Konata](https://github.com/shioyadan/Konata) |
 
+Open either `.kanata` file — or both at once, side by side — with:
+
+```bash
+make konata TRACE=docs/plots/pipeline-matmul-a100_80gb-fp16.kanata
+```
+
+The first run fetches a pinned Konata release into `~/.cache/bandwidth-zen/`; see
+[`../CLI.md`](../CLI.md) §6.
+
 ## Reading the roofline
 
 Solid roof = datasheet, which is what `--ideal` reports. Dashed roof = the same machine after the

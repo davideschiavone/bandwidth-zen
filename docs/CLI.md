@@ -241,22 +241,77 @@ See [`plots/README.md`](plots/README.md) for how to read the output.
 
 ---
 
-## 6. Konata
+## 6. Konata — viewing a trace
+
+Two steps: write the trace, then open it.
 
 ```bash
-uv run bwz matmul -M 4096 -N 4096 -K 4096 -c a100_80gb -d fp16 --kanata run.kanata
-uv run bwz run -m llama3_8b -c a100_80gb --kanata llama.kanata   # writes -prefill and -decode
+# from backend/ — write the trace
+uv run bwz matmul -M 10000 -N 10000 -K 10000 -c a100_80gb -d fp16 --ideal \
+  --kanata ../matmul-10k.kanata
+
+# from the repo root — open it
+make konata TRACE=matmul-10k.kanata
 ```
 
-Open the `.kanata` file in [Konata](https://github.com/shioyadan/Konata) (`File → Open`). One row
-per step; lane 0 is the DRAM load then the arithmetic, lane 1 is on-chip residency.
+```
+konata.sh: fetching Konata v1.1.0 into /home/you/.cache/bandwidth-zen/konata-v1.1.0
+Konata URL: http://127.0.0.1:30080/#name=matmul-10k.kanata
+SSH tunnel: ssh -L 30080:127.0.0.1:30080 <host>
+Press Ctrl+C to stop the server.
+```
 
-A tick is `total_time / 2000`, printed in the file header — the engine has no cycle-accurate notion
-of a cycle. That normalisation is deliberate: the whole run spans 2000 ticks whether it took 71 µs
-or 8 ms, so two chips can be compared by shape.
+Open the printed URL. The server binds loopback only and serves exactly two paths — the viewer and
+your trace — so nothing else in the filesystem is exposed. Ctrl+C stops it.
 
-`bwz run` writes one file per phase. A 2048-token prefill is ~15× a decode step; on one axis the
-decode step would be invisible.
+`bwz run` writes one file per phase, so pass whichever you want:
+
+```bash
+uv run bwz run -m llama3_8b -c a100_80gb --kanata llama.kanata   # -prefill and -decode
+make konata TRACE=backend/llama-decode.kanata
+```
+
+Two traces open side by side, which is the point of one figure per chip:
+
+```bash
+make konata TRACE="docs/plots/pipeline-matmul-a100_80gb-fp16.kanata \
+                   docs/plots/pipeline-matmul-chip_a-int8.kanata"
+```
+
+### What the script does, and why it is not vendored
+
+`backend/scripts/konata.sh` fetches a **pinned** Konata release (`v1.1.0`, sha256 checked) into
+`~/.cache/bandwidth-zen/` on first use, then hands over to the helper inside it. Konata is a browser
+application, not a Python package, so it cannot live in the venv; and its release is 520 KB of
+somebody else's build output, which a checksum pins more honestly than a copy in our tree would.
+
+- `KONATA_VERSION=v1.2.0 make konata TRACE=…` uses a different release. The hash check is skipped
+  then, because the pinned hash belongs to the default.
+- `KONATA_PORT=31000 …` if 30080 is taken.
+- **Offline:** download `konata-v1.1.0.zip` by hand, extract into
+  `~/.cache/bandwidth-zen/konata-v1.1.0/`, and the script never touches the network.
+
+### Reading it
+
+The file's header comments carry the scale:
+
+```
+// 1 tick = 3.22 µs; 2000 ticks = 6.43 ms total
+// 64 steps coalesced from 390625; double buffered: yes
+```
+
+A tick is `total/2000` — the engine has no cycle-accurate notion of a cycle, and normalising this
+way is deliberate: the whole run spans 2000 ticks whether it took 71 µs or 8 ms, so two chips can
+be compared by shape.
+
+One row per step. Row 0 is the kernel dispatch. **Lane 0** is `Ld` then `Ex` — the DRAM load
+followed by the arithmetic; at 10000³ that is 4.13 µs of load against 100 µs of execute, which is
+what compute-bound looks like. **Lane 1** is `Hold`, the tile in SRAM; where row *n*'s `Hold`
+overlaps row *n+1*'s is the double buffer doing its work. Hovering a row gives
+`dram/Ld 4.13 µs  sram/Hold 104 µs  core/Ex 100 µs`.
+
+Konata's own convention is that lane 1 carries stalls. This trace repurposes it for residency; the
+file says so in its header.
 
 ---
 
