@@ -166,17 +166,42 @@ def _bars(ax: plt.Axes, rows: list[Row], spans: list[Span], window: tuple[float,
             # visible at a glance: filled bars bring operands in, outlined bars
             # take results out, and they never overlap because it is one port.
             store = span.stage is Stage.STORE
+            dispatch = span.stage is Stage.DISPATCH
+            x0 = (span.start_s - start) / width_s
+            width = max(span.duration_s / width_s, 0.0015)
             ax.add_patch(
                 Rectangle(
-                    ((span.start_s - start) / width_s, index + 0.18),
-                    max(span.duration_s / width_s, 0.0015),
+                    (x0, index + 0.18),
+                    width,
                     0.64,
                     facecolor=SURFACE if store else COLOUR[row.lane],
-                    edgecolor=COLOUR[row.lane] if store else SURFACE,
-                    linewidth=1.1 if store else 0.7,
+                    edgecolor=COLOUR[row.lane] if (store or dispatch) else SURFACE,
+                    linewidth=1.1 if (store or dispatch) else 0.7,
+                    hatch="///" if dispatch else None,
+                    alpha=0.5 if dispatch else 1.0,
                     zorder=4 if store else 3,
                 )
             )
+            # Name the bar when there is room for it. On a small graph this is
+            # the difference between "something happened" and "q_proj happened",
+            # and on a large one no bar is ever wide enough so nothing is drawn.
+            if width > 0.05:
+                ax.text(
+                    x0 + width / 2,
+                    index + 0.5,
+                    _short(span.label),
+                    ha="center",
+                    va="center",
+                    fontsize=6.4,
+                    color=INK if (store or dispatch) else SURFACE,
+                    zorder=6,
+                )
+
+
+def _short(label: str) -> str:
+    """Bar text: the operation, without the layer prefix that every bar shares."""
+    head = label.split("  ")[0]
+    return head.rsplit(".", 1)[-1] if "." in head else head
 
 
 def _row_axis(ax: plt.Axes, rows: list[Row]) -> None:
@@ -578,8 +603,12 @@ def draw(
     fig.text(
         0.038,
         y(header + band + gap - 0.28),
-        "A load and the previous tile's arithmetic overlap exactly as far as capacity "
-        "allowed a second buffer.",
+        (
+            "One bar per operation: dispatch, then its loads, arithmetic and stores."
+            if trace.kind == "operations"
+            else "A load and the previous tile's arithmetic overlap exactly as far as capacity "
+            "allowed a second buffer."
+        ),
         fontsize=8.5,
         color=INK_MUTED,
     )
@@ -610,14 +639,15 @@ def draw(
 
 def _subtitle(trace: PipelineTrace) -> str:
     steps = (
-        f"{trace.steps} steps drawn, coalesced from {trace.tiles} tiles. "
+        f"{trace.steps} steps drawn, coalesced from {trace.tiles} "
+        f"{'operations' if trace.kind == 'operations' else 'tiles'}. "
         if trace.coalesced
-        else f"{trace.steps} tile steps. "
+        else f"{trace.steps} {'operations' if trace.kind == 'operations' else 'tile steps'}. "
     )
     if trace.kind == "operations":
         buffering = (
             "Operations do not pipeline against each other in this model (D5a), so the span is "
-            "the reported latency exactly."
+            "the reported latency exactly. Hatched bars are kernel dispatch."
         )
     elif not trace.double_buffered:
         buffering = "No double buffer: loads and arithmetic alternate."

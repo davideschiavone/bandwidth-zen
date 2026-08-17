@@ -76,8 +76,9 @@ def idealised(chip: HardwareSpec) -> HardwareSpec:
     has fitted yet. Under ``--ideal`` only the first remains, so a number can be
     checked by hand against a datasheet.
 
-    Shape utilisation is **not** disabled — a batch-1 GEMM on a 512x512 array
-    still runs at 1/513 of peak. That is geometry, not a fudge factor: it follows
+    All three unfitted constants go: the two efficiencies and the per-dispatch
+    overhead. Shape utilisation is **not** disabled — a batch-1 GEMM on a 512x512
+    array still runs at 1/513 of peak. That is geometry, not a fudge factor: it follows
     from the array's declared dimensions and would be there on ideal silicon.
 
     The override is recorded in ``estimates`` so it propagates into
@@ -88,10 +89,16 @@ def idealised(chip: HardwareSpec) -> HardwareSpec:
         update={
             "dram_bandwidth_efficiency": 1.0,
             "achieved_flops_fraction": 1.0,
+            # The launch overhead is the third unfitted constant, and leaving it
+            # in was an inconsistency: on a small graph it *is* the latency, so
+            # an "ideal" run came back 100% dispatch with the arithmetic
+            # invisible beneath it (D25).
+            "kernel_launch_overhead_s": 0.0,
             "estimates": {
                 **chip.estimates,
                 "dram_bandwidth_efficiency": IDEAL_NOTE,
                 "achieved_flops_fraction": IDEAL_NOTE,
+                "kernel_launch_overhead_s": IDEAL_NOTE,
             },
         }
     )

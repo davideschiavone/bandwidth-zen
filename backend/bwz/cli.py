@@ -246,7 +246,8 @@ def run(
     ideal: bool = typer.Option(
         False,
         "--ideal",
-        help="Set both efficiency de-ratings to 1.0: a hardware ceiling, not a prediction",
+        help="Zero every unfitted calibration constant — both efficiencies and the "
+        "per-dispatch overhead: a hardware ceiling, not a prediction",
     ),
     as_json: bool = typer.Option(False, "--json", help="Emit the raw Report as JSON"),
 ) -> None:
@@ -393,7 +394,8 @@ def matmul(
     ideal: bool = typer.Option(
         False,
         "--ideal",
-        help="Set both efficiency de-ratings to 1.0: a hardware ceiling, not a prediction",
+        help="Zero every unfitted calibration constant — both efficiencies and the "
+        "per-dispatch overhead: a hardware ceiling, not a prediction",
     ),
     pipeline: bool = typer.Option(
         True, "--pipeline/--no-pipeline", help="Show which resource is busy for how long"
@@ -570,7 +572,8 @@ def compare(
     ideal: bool = typer.Option(
         False,
         "--ideal",
-        help="Set both efficiency de-ratings to 1.0: a hardware ceiling, not a prediction",
+        help="Zero every unfitted calibration constant — both efficiencies and the "
+        "per-dispatch overhead: a hardware ceiling, not a prediction",
     ),
 ) -> None:
     """Head-to-head across chips, with the prefill crossover point."""

@@ -353,7 +353,6 @@ def _operation_trace(
     steps = len(groups)
     loads = [sum(r.t_dram_s for r in g) for g in groups]
     executes = [sum(r.t_compute_s for r in g) for g in groups]
-    dispatch = sum(r.t_fixed_s for r in results)
     labels = [
         g[0].op_id if len(g) == 1 else f"{g[0].op_id} .. {g[-1].op_id}  ({len(g)} ops)"
         for g in groups
@@ -367,12 +366,16 @@ def _operation_trace(
     # their summed terms: coalescing must not silently re-schedule the ops it
     # groups. max(sum L, sum C) <= sum max(L, C), so taking the former would draw
     # a picture faster than the report.
+    # Dispatch is charged to the operation that pays it, so it is part of that
+    # step's duration rather than a prologue (D25).
+    fixed = [sum(r.t_fixed_s for r in g) for g in groups]
     durations = [
-        sum(
+        fixed[index]
+        + sum(
             max(r.t_dram_s, r.t_compute_s) if double_buffered else r.t_dram_s + r.t_compute_s
             for r in g
         )
-        for g in groups
+        for index, g in enumerate(groups)
     ]
     spans = _serial_steps(
         loads,
@@ -381,7 +384,7 @@ def _operation_trace(
         labels=labels,
         op_types=op_types,
         phase=phase.phase,
-        dispatch_s=dispatch,
+        fixed_per_step=fixed,
         double_buffered=double_buffered,
         bytes_per_step=[sum(r.dram_read_bytes for r in g) for g in groups],
         stored_per_step=[sum(r.dram_write_bytes for r in g) for g in groups],
@@ -551,7 +554,7 @@ def _serial_steps(
     labels: list[str],
     op_types: list[str],
     phase: GraphPhase,
-    dispatch_s: float,
+    fixed_per_step: list[float],
     double_buffered: bool,
     bytes_per_step: list[float],
     stored_per_step: list[float],
@@ -567,13 +570,27 @@ def _serial_steps(
     """
     spans: list[Span] = []
     now = 0.0
-    if dispatch_s > 0:
-        spans.append(Span(Lane.CORE, Stage.DISPATCH, "kernel dispatch", 0.0, dispatch_s, -1, phase))
-        now = dispatch_s
 
     for i, (load, execute, duration) in enumerate(zip(loads, executes, durations, strict=True)):
         start = now
         end = start + duration
+        # Dispatch belongs to the operation that pays it, not to a prologue.
+        # Summed into one block at t=0 it made a launch-bound model draw as a
+        # single bar with every operation invisible behind it (D25).
+        if fixed_per_step[i] > 0:
+            spans.append(
+                Span(
+                    Lane.CORE,
+                    Stage.DISPATCH,
+                    labels[i],
+                    start,
+                    start + fixed_per_step[i],
+                    i,
+                    phase,
+                    op_type=op_types[i],
+                )
+            )
+        start += fixed_per_step[i]
         # Within a step: operands in, arithmetic, result out. The step's length
         # is the reported latency for those operations, so the three are placed
         # inside it rather than summed — a decomposition, not a re-schedule.
