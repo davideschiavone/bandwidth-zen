@@ -290,10 +290,11 @@ def _bars(
         for span in span_lists[row.panel]:
             if span.lane is not row.lane:
                 continue
-            # Stores are drawn hollow so the direction of DRAM traffic is
-            # visible at a glance: filled bars bring operands in, outlined bars
-            # take results out, and they never overlap because it is one port.
+            # Three looks on the DRAM row, so direction *and* operand are
+            # readable without a legend: operand B solid, operand A hatched,
+            # the result hollow. They never overlap — it is one port.
             store = span.stage is Stage.STORE
+            streaming = span.stage is Stage.LOAD_A
             dispatch = span.stage is Stage.DISPATCH
             x0 = (span.start_s - start) / width_s
             width = max(span.duration_s / width_s, 0.0015)
@@ -305,7 +306,7 @@ def _bars(
                     facecolor=SURFACE if store else COLOUR[row.lane],
                     edgecolor=COLOUR[row.lane] if (store or dispatch) else SURFACE,
                     linewidth=1.1 if (store or dispatch) else 0.7,
-                    hatch="///" if dispatch else None,
+                    hatch="///" if dispatch else ("\\\\\\" if streaming else None),
                     alpha=0.5 if dispatch else 1.0,
                     zorder=4 if store else 3,
                 )
@@ -313,7 +314,11 @@ def _bars(
             # Name the bar when there is room for it. On a small graph this is
             # the difference between "something happened" and "q_proj happened",
             # and on a large one no bar is ever wide enough so nothing is drawn.
-            if width > 0.05:
+            # The B load, the A load and the store of one step all carry the same
+            # label; naming it once per step is enough, and three times is a
+            # smear. The A bar is the one to drop — it sits against the B bar it
+            # would repeat, and its hatch already identifies it.
+            if width > 0.05 and not streaming:
                 ax.text(
                     x0 + width / 2,
                     index + 0.5,
@@ -408,8 +413,9 @@ def _boxes(panels: list[Panel]) -> list[Box]:
                 "dram",
                 "MOVED OVER DRAM",
                 format_bytes(totals[Lane.DRAM]),
-                f"LOAD {format_bytes(trace.direction_bytes[0])} · "
-                f"STORE {format_bytes(trace.direction_bytes[1])}\n{rate} while active\n"
+                f"LOAD B {format_bytes(trace.operand_bytes[0])} · "
+                f"A {format_bytes(trace.operand_bytes[1])}\n"
+                f"STORE C {format_bytes(trace.direction_bytes[1])} · {rate} while active\n"
                 f"{format_time(busy[Lane.DRAM])} — {busy[Lane.DRAM] / span:.0%} of the span",
                 band=band,
             ),
@@ -589,6 +595,7 @@ def write_html(panels: list[Panel], command: str, out: Path) -> None:
                 "start": span.start_s,
                 "end": span.end_s,
                 "store": span.stage is Stage.STORE,
+                "streaming": span.stage is Stage.LOAD_A,
                 "tip": _tip(span),
                 "panel": index,
             }
@@ -623,7 +630,11 @@ def _tip(span: Span) -> str:
     """
     when = f"{format_time(span.start_s)} + {format_time(span.duration_s)}"
     if span.lane is Lane.DRAM:
-        kind = "STORE — result written back" if span.stage is Stage.STORE else "LOAD — operands in"
+        kind = {
+            Stage.STORE: "STORE — result C written back",
+            Stage.LOAD: "LOAD — operand B, the tile the array holds",
+            Stage.LOAD_A: "LOAD — operand A, streaming through the array",
+        }.get(span.stage, "LOAD — operands in")
         return (
             f"{kind}\n{span.label}\n{when}\n"
             f"{format_bytes(span.bytes_moved)} @ {format_bandwidth(span.rate_bytes_per_s)}"
@@ -656,10 +667,12 @@ def _quantity(row: Row, trace: PipelineTrace) -> str:
         if totals[Lane.DRAM] <= 0:
             return "0 B — nothing crossed"
         rate = totals[Lane.DRAM] / busy[Lane.DRAM] if busy[Lane.DRAM] else 0.0
-        reads, writes = trace.direction_bytes
+        _, writes = trace.direction_bytes
+        weights, activations = trace.operand_bytes
         return (
             f"{format_bytes(totals[Lane.DRAM])} @ {format_bandwidth(rate)}\n"
-            f"LOAD {format_bytes(reads)} · STORE {format_bytes(writes)}"
+            f"LOAD B {format_bytes(weights)} · A {format_bytes(activations)}\n"
+            f"STORE C {format_bytes(writes)}"
         )
     if row.lane is Lane.SRAM:
         mean, peak = concurrency[Lane.SRAM]

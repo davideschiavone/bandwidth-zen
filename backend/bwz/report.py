@@ -76,6 +76,16 @@ class OpResult:
     """Results written back. Split from reads because the two are not
     interchangeable: a write happens *after* the arithmetic that produced it, and
     a result nothing on chip consumes must reach DRAM whatever the capacity."""
+    dram_weight_read_bytes: float = 0.0
+    """The share of :attr:`dram_read_bytes` that is operand B — the stationary
+    operand a weight-stationary array holds. Split out because the two operands
+    are governed by *different* residency fractions and spill at different
+    times: on-chip capacity is granted to activations before weights (D15), so
+    B is always the first to stream. A single LOAD figure hides which one is
+    crossing the bus, and on a comparison that is the question."""
+    dram_activation_read_bytes: float = 0.0
+    """The share of :attr:`dram_read_bytes` that is operand A plus scratch — the
+    operand that streams *through* the array rather than sitting in it."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,6 +146,10 @@ class PhaseResult:
     n_ops: int
     n_dispatched_ops: int
     ops: tuple[OpResult, ...] = field(default=())
+    dram_weight_read_bytes: float = 0.0
+    """Operand B's share of ``dram_read_bytes``; see :class:`OpResult`."""
+    dram_activation_read_bytes: float = 0.0
+    """Operand A's (plus scratch) share of ``dram_read_bytes``."""
 
 
 @dataclass(frozen=True, slots=True)

@@ -81,4 +81,6 @@ def run_phase(
         n_ops=len(results),
         n_dispatched_ops=sum(1 for op in graph.ops if op.op_type in DISPATCHED_OP_TYPES),
         ops=results,
+        dram_weight_read_bytes=sum(r.dram_weight_read_bytes for r in results),
+        dram_activation_read_bytes=sum(r.dram_activation_read_bytes for r in results),
     )

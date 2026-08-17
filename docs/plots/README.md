@@ -77,9 +77,12 @@ doing while the array worked" rather than "what happened to this tile".
 
 Three info boxes carry the headline quantities, and each row repeats its own share to the right:
 
-- **MOVED OVER DRAM** — `LOAD 15 GB · STORE 322 kB`, the rate while active, and the share of the
-  span. The two directions are named because they are not interchangeable: a store happens after
-  the arithmetic that produced it, and a result nothing consumes must be written (D22).
+- **MOVED OVER DRAM** — `LOAD B 67.1 MB · A 36.7 MB` / `STORE C 67.1 MB`, the rate while active, and
+  the share of the span. Direction is named because a store happens after the arithmetic that
+  produced it and a result nothing consumes must be written (D22); **operand** is named because A
+  and B obey different residency fractions and spill at different times — capacity goes to
+  activations before weights (D15), so B is always the first to stream (D31). On the row itself:
+  operand B **solid**, operand A **hatched**, the result **hollow**.
 - **HELD ON CHIP** — bytes, in how many buffers, against capacity.
 - **COMPUTED — matmul 98% · attention 2%** — the operator families that did the arithmetic,
   biggest first. "15.3 GOP" does not say whether that was one matmul or a decode step's worth of
@@ -96,6 +99,12 @@ resources, so theirs is a **duty cycle** — the fraction of the span they were 
 100%. SRAM is *n* buffers rather than a resource that is busy or idle, so theirs is a **depth**:
 `x1.96 of 2` means both halves of the double buffer were occupied almost all the time. Capacity,
 not bandwidth, is what SRAM contributes (D5a).
+
+**A bar on a compute row is a wave, not a tile.** A chip with `count` arrays runs that many weight
+tiles at once, so the trace draws `ceil(tiles / units)` steps and labels each with how many tiles are
+in flight — `8 B tiles 512x512 [3/64]  all in parallel` on Metis's four AI cores. Drawing one bar per
+tile said the arrays worked in series and contradicted the utilisation in the same report (D30/D31).
+When a bar has to coalesce several waves the qualifier becomes `4 at a time` instead.
 
 The x axis is normalised to the total time in both registers, which is what makes two chips
 comparable when their absolute times differ by orders of magnitude; absolute figures are on the

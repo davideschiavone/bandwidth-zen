@@ -978,3 +978,56 @@ cannot fail on a shipped profile. Tested against the store the array can really 
 also passes — 164 KiB of SMEM holds 328 A100 tiles, 1 MiB of D-IMC holds exactly 4. The verdicts
 were right for the wrong reason. Replacing it with the reload model above is the real fix, and waits
 on the same missing bandwidth.
+
+---
+
+## D31 — The DRAM row names its operand, and a bar is a wave (2026-08-17)
+
+Two follow-ons from D30, both asked for by a user staring at a `--compare` figure and finding it
+said less than the report behind it.
+
+### 1. `LOAD 107 MB` does not say *which* operand crossed the bus
+
+The DRAM row split by direction (D22) but not by operand, so A and B were one number. They are not
+interchangeable: they obey **different residency fractions** and spill at different times, because
+on-chip capacity is granted to activations before weights (D15). On an 8192-cubed INT8 matmul that
+asymmetry is the whole story:
+
+| | operand B | operand A | result C |
+|---|---|---|---|
+| `a100_80gb` | 67.1 MB — **100% of B** | 36.7 MB — 55% of A | 67.1 MB |
+| `metis_aipu` | 67.1 MB — **100% of B** | 40.4 MB — 60% of A | 67.1 MB |
+
+B streams in full on both chips while A is more than half resident, and one merged `LOAD` figure
+hid exactly that. `OpResult`/`PhaseResult` now carry `dram_weight_read_bytes` and
+`dram_activation_read_bytes`, `Stage.LOAD_A` joins `Stage.LOAD`, and the figure gives the DRAM row
+**three looks** rather than two: operand B solid, operand A hatched, the result hollow. The box
+reads `LOAD B 67.1 MB · A 36.7 MB` / `STORE C 67.1 MB`, and the hover names which operand a bar is.
+
+The split is a decomposition, not a recount — `weights + activations` reproduces the report's
+`dram_read_bytes` exactly, and a test asserts it.
+
+### 2. A tile step is a wave, not a tile
+
+D30 taught the *utilisation* that a chip is `count` arrays running a wave at a time. The *drawing*
+had not been told: `_tile_trace` laid one bar per tile, end to end, so a four-core NPU appeared to
+chew through four tiles in series while the same report quoted a wave occupancy of 1.0. The picture
+contradicted the number beside it, which is the one thing D19 says a figure may never do.
+
+A step is now `ceil(tiles / units)` waves. An 8192-cubed INT8 matmul on Metis is 256 tiles and draws
+**64 bars**, each labelled `8 B tiles 512x512 [n/64]  all in parallel`. When one bar has to coalesce
+several waves the qualifier changes to `4 at a time`, because "in parallel" would then overstate it.
+`PipelineTrace.tiles` — documented as "steps the schedule really has" — is the wave count, so
+`coalesced` compares like with like.
+
+Two consequences worth stating. The bar label carries its qualifier after a double space, which is
+the existing `_short()` convention the plot script splits on, so the bar text stays legible and the
+hover keeps the whole thing. And the D19 invariant is untouched: waves still sum to
+`t_compute + t_fixed` and DRAM busy to `t_dram`, measured to 1e-18 s on both shipped chips.
+
+### Still open, and now more visible
+
+Charging the reload of weight tiles beyond `resident_tile_capacity()` still waits on an L1-to-IMC
+bandwidth (D30). With B drawn as its own bar, a reader can now *see* 67.1 MB of operand B crossing
+DRAM on every invocation of a matmul whose 16 array-resident tiles could have held a quarter of it —
+which makes the missing term harder to forget, and is an argument for closing it.

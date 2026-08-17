@@ -194,9 +194,15 @@ def op_roofline(
     # capacity there is: for a standalone matmul that is the whole of C, and
     # discounting it by activation residency understated traffic (D22).
     resident_output = max(0.0, cost.output_bytes - terminal_output_bytes)
-    read_bytes = (1.0 - resident_fraction) * cost.weight_bytes + (
-        1.0 - activation_resident_fraction
-    ) * (cost.input_bytes + cost.scratch_bytes)
+    # The two operands are kept apart all the way to the figure. They obey
+    # different residency fractions and spill at different times — capacity goes
+    # to activations before weights (D15), so B streams first — and "LOAD 107 MB"
+    # does not say which of them crossed the bus.
+    weight_read_bytes = (1.0 - resident_fraction) * cost.weight_bytes
+    activation_read_bytes = (1.0 - activation_resident_fraction) * (
+        cost.input_bytes + cost.scratch_bytes
+    )
+    read_bytes = weight_read_bytes + activation_read_bytes
     write_bytes = terminal_output_bytes + (1.0 - activation_resident_fraction) * resident_output
     dram_bytes = read_bytes + write_bytes
     t_dram = dram_bytes / machine.effective_bandwidth_bytes_per_s
@@ -219,6 +225,8 @@ def op_roofline(
         dram_bytes=dram_bytes,
         dram_read_bytes=read_bytes,
         dram_write_bytes=write_bytes,
+        dram_weight_read_bytes=weight_read_bytes,
+        dram_activation_read_bytes=activation_read_bytes,
         arithmetic_intensity=cost.arithmetic_intensity,
         utilization=utilisation,
         t_dram_s=t_dram,

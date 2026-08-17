@@ -7,6 +7,8 @@ below is a form of that statement.
 
 from __future__ import annotations
 
+import math
+
 import pytest
 
 from bwz.analysis import analyze, idealised, machine_model
@@ -230,13 +232,72 @@ def test_each_engines_spans_name_only_families_that_engine_can_run() -> None:
 
 
 def test_coalescing_preserves_the_span() -> None:
-    """Drawing 64 rows instead of 390 625 changes the picture's resolution and
-    not its length."""
+    """Drawing 64 rows instead of every step changes the picture's resolution and
+    not its length.
+
+    Since D30 a step is a **wave**, not a tile: 625x625 = 390 625 tiles over
+    A100's 432 tensor cores is ``ceil(390625/432)`` = 905 waves, and that is the
+    schedule's real step count.
+    """
     fine, _ = _trace(_spec(10_000, 10_000, 10_000), "a100_80gb", max_steps=256)
     coarse, _ = _trace(_spec(10_000, 10_000, 10_000), "a100_80gb", max_steps=8)
 
-    assert fine.tiles == coarse.tiles == 625 * 625
+    assert fine.tiles == coarse.tiles == math.ceil(625 * 625 / 432) == 905
     assert fine.steps == 256
     assert coarse.steps == 8
     # Coarser steps mean a larger fill/drain, because fill/drain is one step.
     assert coarse.total_s > fine.total_s
+
+
+def test_loads_are_split_by_operand_and_reconcile_with_the_report() -> None:
+    """B and A cross the bus separately, and the two bars sum to the one number.
+
+    They obey different residency fractions and spill at different times —
+    capacity is granted to activations before weights (D15) — so a single LOAD
+    figure cannot say which operand moved. At 8192-cubed INT8 on Metis, B is
+    100% non-resident and A only 60%, which is exactly the asymmetry a combined
+    figure hides (D31).
+    """
+    chip = idealised(load_chip("metis_aipu"))
+    trace, report = _trace(_spec(8192, 8192, 8192, "int8"), "metis_aipu", max_steps=256)
+    op = report.phases[0].ops[0]
+
+    weights, activations = trace.operand_bytes
+    reads, writes = trace.direction_bytes
+
+    assert weights == pytest.approx(op.dram_weight_read_bytes, rel=1e-9)
+    assert activations == pytest.approx(op.dram_activation_read_bytes, rel=1e-9)
+    assert weights + activations == pytest.approx(op.dram_read_bytes, rel=1e-9)
+    assert reads == pytest.approx(op.dram_read_bytes, rel=1e-9)
+    assert writes == pytest.approx(op.dram_write_bytes, rel=1e-9)
+    # B spills entirely, A only partly: the asymmetry the split exists to show.
+    assert weights > activations > 0
+    assert chip.on_chip_capacity_bytes > 0
+
+
+def test_a_tile_step_is_a_wave_not_a_single_tile() -> None:
+    """The bars must not show a 4-core chip working one tile at a time (D30).
+
+    Metis has four 512x512 arrays. An 8192-cubed INT8 matmul is
+    ceil(8192/512)^2 = 256 tiles, which is 64 waves of 4 — and the trace draws
+    64 steps, not 256, with each step carrying four tiles' worth of arithmetic.
+    Drawing one bar per tile said the arrays ran in series, contradicting the
+    wave occupancy the same report quotes.
+    """
+    trace, report = _trace(_spec(8192, 8192, 8192, "int8"), "metis_aipu", max_steps=256)
+
+    assert trace.tiles == 64, "steps are waves: ceil(256 tiles / 4 arrays)"
+    assert not trace.coalesced, "64 waves fit under the drawing cap, so nothing is merged"
+    assert "4 B tiles 512x512" in trace.spans[0].label
+    assert trace.spans[0].label.endswith("all in parallel")
+
+    # And it stays a decomposition: the waves still sum to the reported terms.
+    op = report.phases[0].ops[0]
+    assert trace.busy_s[Lane.CORE] == pytest.approx(op.t_compute_s + op.t_fixed_s, rel=1e-9)
+
+    # When one bar has to coalesce several waves, the label must stop claiming
+    # they are simultaneous and say how many run at a time instead.
+    coarse, _ = _trace(_spec(8192, 8192, 8192, "int8"), "metis_aipu", max_steps=8)
+    assert coarse.coalesced
+    assert coarse.spans[0].label.endswith("4 at a time")
+    assert "in parallel" not in coarse.spans[0].label

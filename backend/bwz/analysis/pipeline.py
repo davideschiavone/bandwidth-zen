@@ -80,6 +80,12 @@ class Stage(StrEnum):
 
     DISPATCH = "Dis"
     LOAD = "Ld"
+    """Operand B, the stationary one the array holds."""
+    LOAD_A = "LdA"
+    """Operand A, the one that streams through the array. A separate stage
+    because the two obey different residency fractions and spill at different
+    times — capacity is granted to activations before weights (D15) — so one
+    combined LOAD figure cannot say which operand crossed the bus."""
     HOLD = "Hold"
     EXEC = "Ex"
     STORE = "St"
@@ -191,9 +197,18 @@ class PipelineTrace:
     def direction_bytes(self) -> tuple[float, float]:
         """``(read, written)`` over the DRAM lane. Two numbers rather than one
         because a comparison cares which way the bus was busy."""
-        reads = sum(s.bytes_moved for s in self.spans if s.stage is Stage.LOAD)
+        loads = (Stage.LOAD, Stage.LOAD_A)
+        reads = sum(s.bytes_moved for s in self.spans if s.stage in loads)
         writes = sum(s.bytes_moved for s in self.spans if s.stage is Stage.STORE)
         return reads, writes
+
+    @property
+    def operand_bytes(self) -> tuple[float, float]:
+        """``(B, A)`` read over the DRAM lane — the stationary operand and the
+        streaming one, kept apart because they spill at different times."""
+        weights = sum(s.bytes_moved for s in self.spans if s.stage is Stage.LOAD)
+        activations = sum(s.bytes_moved for s in self.spans if s.stage is Stage.LOAD_A)
+        return weights, activations
 
     @property
     def concurrency(self) -> dict[Lane, tuple[float, int]]:
@@ -305,43 +320,71 @@ def _tile_trace(
 ) -> PipelineTrace:
     result = phase.ops[0]
     tiles = tile_count(op, machine)
-    steps = min(tiles, max(1, max_steps))
-    per_step = tiles / steps
+    # A step is a WAVE, not a tile. The chip has `units` arrays and runs that
+    # many weight tiles at once, so drawing one bar per tile showed a 4-core NPU
+    # chewing through four tiles in series when it does all four together — a
+    # picture that contradicted the utilisation the same report quotes (D30).
+    units = max(machine.unit.count, 1)
+    waves = math.ceil(tiles / units) if tiles else 1
+    in_flight = min(tiles, units)
+    steps = min(waves, max(1, max_steps))
+    per_step = waves / steps
 
-    # Split the DRAM time by direction: loads lead the arithmetic, stores trail
-    # it, and both queue on the one port.
+    # Split the DRAM time by direction, and the read by operand: B is the
+    # stationary operand, A streams through. They obey different residency
+    # fractions and spill at different times (D15), so they get their own bars.
     traffic = result.dram_bytes or 1.0
-    load = result.t_dram_s * (result.dram_read_bytes / traffic) / steps
-    store = result.t_dram_s * (result.dram_write_bytes / traffic) / steps
+    scale = result.t_dram_s / traffic / steps
+    load_b = result.dram_weight_read_bytes * scale
+    load_a = result.dram_activation_read_bytes * scale
+    store = result.dram_write_bytes * scale
     execute = result.t_compute_s / steps
     attrs = op.attrs
     assert isinstance(attrs, MatmulAttrs)
     dims = machine.unit.systolic_dims
     shape = f"{dims[0]}x{dims[1]}" if dims is not None else "untiled"
-    label = f"B tile {shape}" if per_step == 1 else f"{per_step:.0f} B tiles {shape}"
+    tiles_here = in_flight * per_step
+    # Two spaces separate the bar text from the qualifier: `_short` in the plot
+    # script splits there, so the bar stays legible and the hover keeps it all.
+    if tiles_here == 1:
+        label, qualifier = f"B tile {shape}", ""
+    elif per_step > 1:
+        # One bar coalesces several waves, so "in parallel" would overstate it:
+        # this many tiles pass through, `in_flight` of them at any instant.
+        label = f"{tiles_here:.0f} B tiles {shape}"
+        qualifier = f"{in_flight} at a time"
+    elif units > 1:
+        label, qualifier = f"{tiles_here:.0f} B tiles {shape}", "all in parallel"
+    else:
+        label, qualifier = f"{tiles_here:.0f} B tiles {shape}", ""
+    tail = f"  {qualifier}" if qualifier else ""
 
     spans = _pipelined_tiles(
-        [load] * steps,
+        [load_b] * steps,
         [execute] * steps,
         [store] * steps,
-        labels=[f"{label} [{i + 1}/{steps}]" for i in range(steps)],
+        labels=[f"{label} [{i + 1}/{steps}]{tail}" for i in range(steps)],
         op_types=[op.op_type.value] * steps,
         phase=phase.phase,
         dispatch_s=result.t_fixed_s,
         double_buffered=double_buffered,
-        bytes_per_step=[result.dram_read_bytes / steps] * steps,
+        bytes_per_step=[result.dram_weight_read_bytes / steps] * steps,
         stored_per_step=[result.dram_write_bytes / steps] * steps,
         flops_per_step=[result.flops / steps] * steps,
-        # What one buffer holds: the B tile the array is stationary on, plus the
-        # A rows streaming against it. Sized from the schedule, not asserted.
-        resident_per_step=[result.weight_bytes / tiles * per_step] * steps,
+        # What one buffer holds: the B tiles the arrays are stationary on for
+        # this wave. Sized from the schedule, not asserted.
+        resident_per_step=[result.weight_bytes / max(tiles, 1) * tiles_here] * steps,
+        activation_loads=[load_a] * steps,
+        activation_bytes_per_step=[result.dram_activation_read_bytes / steps] * steps,
     )
     return PipelineTrace(
         spans=tuple(spans),
         total_s=max((s.end_s for s in spans), default=0.0),
         reported_latency_s=result.latency_s,
         steps=steps,
-        tiles=tiles,
+        # The schedule's real step count is WAVES, not tiles: `units` arrays run
+        # a wave together, so that is what `coalesced` must compare against.
+        tiles=waves,
         double_buffered=double_buffered,
         # Measured, not derived: with stores in the schedule the fill/drain is a
         # load at the head plus a store at the tail, and a formula for it would
@@ -425,6 +468,7 @@ def _operation_trace(
         fixed_per_step=fixed,
         double_buffered=double_buffered,
         bytes_per_step=[sum(r.dram_read_bytes for r in g) for g in groups],
+        weight_bytes_per_step=[sum(r.dram_weight_read_bytes for r in g) for g in groups],
         stored_per_step=[sum(r.dram_write_bytes for r in g) for g in groups],
         flops_per_step=[sum(r.flops for r in g) for g in groups],
         resident_per_step=[max((r.weight_bytes for r in g), default=0.0) for g in groups],
@@ -459,13 +503,21 @@ def _pipelined_tiles(
     stored_per_step: list[float],
     flops_per_step: list[float],
     resident_per_step: list[float],
+    activation_loads: list[float] | None = None,
+    activation_bytes_per_step: list[float] | None = None,
 ) -> list[Span]:
     """Software-pipeline the tiles of ONE operation, per the constraints above.
 
     Legitimate here and only here: the tiles of a single matmul are issued by one
     kernel, which is exactly the thing a double buffer overlaps.
+
+    ``loads`` is operand B's time and ``activation_loads`` operand A's. They
+    queue on the same port, so the schedule uses their sum and the drawing keeps
+    them as two adjacent bars.
     """
     steps = len(loads)
+    a_loads = activation_loads if activation_loads is not None else [0.0] * steps
+    a_bytes = activation_bytes_per_step if activation_bytes_per_step is not None else [0.0] * steps
     spans: list[Span] = []
     if dispatch_s > 0:
         # Step -1: the dispatch is not a tile, and giving it step 0 would merge it
@@ -495,7 +547,7 @@ def _pipelined_tiles(
         # computed — the hold below runs to the store, so the reuse test must too.
         freed = store_ends[i - depth] if i >= depth else dispatch_s
         load_start = max(dram_free, freed)
-        load_end = load_start + loads[i]
+        load_end = load_start + loads[i] + a_loads[i]
         dram_free = load_end
         load_starts.append(load_start)
         load_ends.append(load_end)
@@ -521,6 +573,8 @@ def _pipelined_tiles(
         exec_start, exec_end = exec_starts[i], exec_ends[i]
         store_start, store_end = store_starts[i], store_ends[i]
 
+        # B first, then A, adjacent on the one port: the array cannot start
+        # until its stationary operand has arrived.
         if loads[i] > 0:
             spans.append(
                 Span(
@@ -528,11 +582,25 @@ def _pipelined_tiles(
                     Stage.LOAD,
                     labels[i],
                     load_start,
-                    load_end,
+                    load_start + loads[i],
                     i,
                     phase,
                     op_type=op_types[i],
                     bytes_moved=bytes_per_step[i],
+                )
+            )
+        if a_loads[i] > 0:
+            spans.append(
+                Span(
+                    Lane.DRAM,
+                    Stage.LOAD_A,
+                    labels[i],
+                    load_start + loads[i],
+                    load_end,
+                    i,
+                    phase,
+                    op_type=op_types[i],
+                    bytes_moved=a_bytes[i],
                 )
             )
         # A buffer is occupied from the moment its fetch begins until its result
@@ -597,6 +665,7 @@ def _serial_steps(
     fixed_per_step: list[float],
     double_buffered: bool,
     bytes_per_step: list[float],
+    weight_bytes_per_step: list[float],
     stored_per_step: list[float],
     flops_per_step: list[float],
     resident_per_step: list[float],
@@ -645,19 +714,40 @@ def _serial_steps(
         now = end
 
         if load_time > 0:
-            spans.append(
-                Span(
-                    Lane.DRAM,
-                    Stage.LOAD,
-                    labels[i],
-                    start,
-                    load_end,
-                    i,
-                    phase,
-                    op_type=op_types[i],
-                    bytes_moved=bytes_per_step[i],
+            # Split the load bar by operand in proportion to the bytes each
+            # contributed, B first: the stationary operand has to land before
+            # the array can start (D31).
+            read = bytes_per_step[i] or 1.0
+            b_share = weight_bytes_per_step[i] / read
+            b_end = start + load_time * b_share
+            if weight_bytes_per_step[i] > 0:
+                spans.append(
+                    Span(
+                        Lane.DRAM,
+                        Stage.LOAD,
+                        labels[i],
+                        start,
+                        b_end,
+                        i,
+                        phase,
+                        op_type=op_types[i],
+                        bytes_moved=weight_bytes_per_step[i],
+                    )
                 )
-            )
+            if bytes_per_step[i] - weight_bytes_per_step[i] > 0:
+                spans.append(
+                    Span(
+                        Lane.DRAM,
+                        Stage.LOAD_A,
+                        labels[i],
+                        b_end,
+                        load_end,
+                        i,
+                        phase,
+                        op_type=op_types[i],
+                        bytes_moved=bytes_per_step[i] - weight_bytes_per_step[i],
+                    )
+                )
         spans.append(
             Span(
                 Lane.SRAM,
