@@ -50,7 +50,7 @@ import math
 from dataclasses import dataclass
 from enum import StrEnum
 
-from bwz.analysis.roofline import MachineModel
+from bwz.analysis.roofline import MATRIX_OP_TYPES, MachineModel
 from bwz.analysis.tiling import padded
 from bwz.graph.ops import ComputeGraph, GraphPhase, MatmulAttrs, Operation
 from bwz.report import OpResult, PhaseResult
@@ -68,6 +68,11 @@ class Lane(StrEnum):
     DRAM = "dram"
     SRAM = "sram"
     CORE = "core"
+    """The matrix engine: matmul, attention, conv, and the dispatches."""
+    VECTOR = "vector"
+    """Everything else — norms, activations, residuals. A separate lane because
+    it is separate silicon: a tensor core does matrix-multiply-accumulate and a
+    norm has to go somewhere else (D27)."""
 
 
 class Stage(StrEnum):
@@ -159,7 +164,8 @@ class PipelineTrace:
         core, peak bytes held for SRAM (a stock, not a flow — it does not sum)."""
         out = {
             Lane.DRAM: sum(s.bytes_moved for s in self.spans),
-            Lane.CORE: sum(s.flops for s in self.spans),
+            Lane.CORE: sum(s.flops for s in self.spans if s.lane is Lane.CORE),
+            Lane.VECTOR: sum(s.flops for s in self.spans if s.lane is Lane.VECTOR),
             Lane.SRAM: max((s.resident_bytes for s in self.spans), default=0.0)
             * max(self.concurrency[Lane.SRAM][1], 1),
         }
@@ -353,6 +359,24 @@ def _operation_trace(
     steps = len(groups)
     loads = [sum(r.t_dram_s for r in g) for g in groups]
     executes = [sum(r.t_compute_s for r in g) for g in groups]
+    # A coalesced group mixes families, so the group's compute time is split by
+    # engine rather than attributed to whichever family happens to dominate it.
+    # Without this the vector lane came out empty on a model that spends real
+    # time on norms and activations (D28).
+    matrix = [
+        (
+            sum(r.t_compute_s for r in g if r.op_type in MATRIX_OP_TYPES),
+            sum(r.flops for r in g if r.op_type in MATRIX_OP_TYPES),
+        )
+        for g in groups
+    ]
+    vector = [
+        (
+            sum(r.t_compute_s for r in g if r.op_type not in MATRIX_OP_TYPES),
+            sum(r.flops for r in g if r.op_type not in MATRIX_OP_TYPES),
+        )
+        for g in groups
+    ]
     labels = [
         g[0].op_id if len(g) == 1 else f"{g[0].op_id} .. {g[-1].op_id}  ({len(g)} ops)"
         for g in groups
@@ -383,6 +407,8 @@ def _operation_trace(
         durations=durations,
         labels=labels,
         op_types=op_types,
+        matrix_per_step=matrix,
+        vector_per_step=vector,
         phase=phase.phase,
         fixed_per_step=fixed,
         double_buffered=double_buffered,
@@ -518,7 +544,7 @@ def _pipelined_tiles(
         if executes[i] > 0:
             spans.append(
                 Span(
-                    Lane.CORE,
+                    _exec_lane(op_types[i]),
                     Stage.EXEC,
                     labels[i],
                     exec_start,
@@ -553,6 +579,8 @@ def _serial_steps(
     durations: list[float],
     labels: list[str],
     op_types: list[str],
+    matrix_per_step: list[tuple[float, float]],
+    vector_per_step: list[tuple[float, float]],
     phase: GraphPhase,
     fixed_per_step: list[float],
     double_buffered: bool,
@@ -631,20 +659,30 @@ def _serial_steps(
                 resident_bytes=resident_per_step[i],
             )
         )
-        if execute > 0:
+        # One span per engine that did work in this step: the array, then the
+        # vector unit that follows it. Two bars rather than one is the point —
+        # they are different silicon and a reader should see which was busy.
+        cursor = exec_start
+        for lane, (seconds, work) in (
+            (Lane.CORE, matrix_per_step[i]),
+            (Lane.VECTOR, vector_per_step[i]),
+        ):
+            if seconds <= 0:
+                continue
             spans.append(
                 Span(
-                    Lane.CORE,
+                    lane,
                     Stage.EXEC,
                     labels[i],
-                    exec_start,
-                    exec_start + execute,
+                    cursor,
+                    cursor + seconds,
                     i,
                     phase,
                     op_type=op_types[i],
-                    flops=flops_per_step[i],
+                    flops=work,
                 )
             )
+            cursor += seconds
         if store_time > 0:
             spans.append(
                 Span(
@@ -660,6 +698,12 @@ def _serial_steps(
                 )
             )
     return spans
+
+
+def _exec_lane(op_type: str) -> Lane:
+    """Which engine executes this family. Matrix work goes to the array; norms,
+    activations and residuals go to the vector unit (D27)."""
+    return Lane.CORE if op_type in {t.value for t in MATRIX_OP_TYPES} else Lane.VECTOR
 
 
 def _chunk(items: list[OpResult], groups: int) -> list[list[OpResult]]:

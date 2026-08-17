@@ -262,6 +262,15 @@ def _assumptions(
             f"transcendental work is charged at the array's rate. That is optimistic: such work "
             f"does not use the array (D27)."
         ),
+        (
+            f"{machine.unit.name} and {machine.vector_unit.name} are drawn as separate lanes but "
+            f"exchange nothing in this model: each operation's traffic is charged once, and no "
+            f"register file or shared memory is modelled. Real silicon hands a GEMM's result to "
+            f"the activation that follows it in registers, never through DRAM, so a fused "
+            f"epilogue costs less here than the model's two dispatches suggest (D28)."
+            if machine.has_vector_unit
+            else "Only one compute unit is declared, so no matrix/vector handoff arises."
+        ),
         "Non-linear functions are counted algebraically — GELU 8 operations per element, softmax "
         "5 per score, RMSNorm 4 — and charged at the vector rate. Real hardware pays more: an erf "
         "without a special-function unit is a polynomial approximation, and an SFU runs below the "

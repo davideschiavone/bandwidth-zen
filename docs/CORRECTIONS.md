@@ -742,3 +742,36 @@ here. It would not be on a model whose arithmetic is mostly activations, or on a
 vector unit — and the assumptions drawer says so on every report, so the reader can tell which case
 they are in. Closing it properly would need a published SFU throughput per profile
 (`transcendental_flops_ratio` on `ComputeUnit`), fitted in Session 5 against a measurement.
+
+---
+
+## D28 — Each engine gets its own lane, and the handoff between them is not modelled (2026-08-17)
+
+D27 split the *costing* between the matrix and vector engines. The figure still showed one busy
+row and drew `cuda_core` grey, so the correction was invisible where it mattered most.
+
+`Lane.VECTOR` now exists alongside `Lane.CORE`, and a step emits one span per engine that did work
+in it. Llama-3-8B prefill on A100:
+
+| row | | |
+|---|---|---|
+| `tensor_core` 432 x 16x16 | matrix work — peak 312 TOP/s | 7.22 TOP @ 207 TOP/s · matmul 99% · attention 1% |
+| `cuda_core` 6912 x 1 MAC/cycle | norms, activations — peak 19.5 TOP/s | 2.11 GOP @ 13.6 TOP/s · elementwise 74% · norm 26% |
+
+Splitting by *dominant family per coalesced group* was the first attempt and produced an empty
+vector lane: 451 operations collapse into 31 blocks, and matmul dominates every one. The group's
+compute time is now split by engine instead, which is the only version that survives coalescing.
+
+**How the two exchange data, and what this model says about it.** On real silicon they are inside
+the same SM: tensor cores read operands from the register file (or shared memory) and write results
+back to registers, and the CUDA cores use the same register file and the same shared memory/L1.
+A GEMM's result reaches the activation that follows it **in registers — never through DRAM**, which
+is exactly why fused epilogues are the default in every serving kernel.
+
+This model has no register file, no shared memory and no fusion. The two lanes are drawn adjacent
+and exchange nothing: each operation is charged its own compulsory traffic, with residency applied,
+and each costs its own dispatch. So an unfused chain is charged roughly right, and a *fused* one —
+GEMM + bias + GELU as a single kernel — is overcharged here by a dispatch and by whatever traffic
+residency failed to absorb. Stated in every report's assumptions rather than left for the reader to
+discover. Modelling it properly means a register/shared-memory level and a fusion pass, which is
+M8 work (D5).

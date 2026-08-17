@@ -38,7 +38,7 @@ from timeline_html import Box, render
 import bwz
 from bwz.analysis import analyze, idealised, machine_model
 from bwz.analysis.pipeline import Lane, PipelineTrace, Span, Stage, build_trace
-from bwz.analysis.roofline import compute_dtype
+from bwz.analysis.roofline import MATRIX_OP_TYPES, compute_dtype
 from bwz.explain import Explanation, explain_graph
 from bwz.graph import GraphPhase, build_graph, build_graphs
 from bwz.report import Bound
@@ -55,7 +55,12 @@ GRID = "#e6e5e1"
 BOX = "#f2f1ed"
 # Slots 1 and 2 of the documented categorical palette, plus a neutral for the
 # buffer. Three roles, not eight, and every row is directly labelled.
-COLOUR = {Lane.DRAM: "#2a78d6", Lane.SRAM: "#8a8983", Lane.CORE: "#eb6834"}
+COLOUR = {
+    Lane.DRAM: "#2a78d6",
+    Lane.SRAM: "#8a8983",
+    Lane.CORE: "#eb6834",
+    Lane.VECTOR: "#1baf7a",  # slot 3: a third engine, not a shade of the array
+}
 IDLE = "#e6e5e1"
 
 
@@ -97,10 +102,7 @@ def rows_for(chip: HardwareSpec, dtype: DType) -> list[Row]:
     rows: list[Row] = []
     deepest = chip.memory[-1]
     shallowest = chip.memory[0]
-    governing = max(
-        (u for u in chip.compute_units if u.supports(dtype)),
-        key=lambda u: u.peak_flops_per_s(chip.clock_hz, dtype),
-    )
+    machine = machine_model(chip, dtype)
 
     for level in reversed(chip.memory):
         detail = (
@@ -125,20 +127,17 @@ def rows_for(chip: HardwareSpec, dtype: DType) -> list[Row]:
             else f"{unit.ops_per_cycle_per_unit:g} MAC/cycle"
         )
         detail = f"{unit.count} x {geometry}"
-        if unit is governing:
-            peak = unit.peak_flops_per_s(chip.clock_hz, dtype)
-            rows.append(
-                Row(
-                    unit.name,
-                    detail,
-                    Lane.CORE,
-                    f"peak {format_quantity(peak, 'OP/s')} at {dtype.value}",
-                )
-            )
+        peak = unit.peak_flops_per_s(chip.clock_hz, dtype) if unit.supports(dtype) else 0.0
+        rate = f"peak {format_quantity(peak, 'OP/s')} at {dtype.value}"
+        if unit is machine.unit:
+            rows.append(Row(unit.name, detail, Lane.CORE, f"matrix work — {rate}"))
+        elif unit is machine.vector_unit:
+            # A tensor core does matrix-multiply-accumulate and nothing else, so
+            # norms, activations and residuals have their own row on their own
+            # silicon (D27/D28).
+            rows.append(Row(unit.name, detail, Lane.VECTOR, f"norms, activations — {rate}"))
         elif unit.supports(dtype):
-            rows.append(
-                Row(unit.name, detail, None, "idle — peak is the max over units, not the sum")
-            )
+            rows.append(Row(unit.name, detail, None, "idle — no work of its kind in this graph"))
         else:
             rows.append(Row(unit.name, detail, None, f"idle — no {dtype.value} datapath"))
     return rows
@@ -225,13 +224,18 @@ def _ticks(ax: plt.Axes, end: float, count: int) -> None:
     ax.set_xticklabels([format_time(f * end) for f in fractions], fontsize=8.5)
 
 
-def _op_mix(trace: PipelineTrace) -> str:
+def _op_mix(trace: PipelineTrace, *, matrix: bool | None = None) -> str:
     """The operator families that did the arithmetic, biggest first.
 
     "137 GOP" does not say whether that was one matmul or a decode step's worth of
     matmul, attention and norms, and for a comparison the mixture is the point.
     """
-    rows = [(name, flops) for name, flops, _ in trace.work_by_op if flops > 0]
+    families = {t.value for t in MATRIX_OP_TYPES}
+    rows = [
+        (name, flops)
+        for name, flops, _ in trace.work_by_op
+        if flops > 0 and (matrix is None or (name in families) is matrix)
+    ]
     if not rows:
         return "no arithmetic"
     total = sum(flops for _, flops in rows) or 1.0
@@ -249,6 +253,7 @@ def _boxes(trace: PipelineTrace, chip: HardwareSpec, dtype: DType) -> list[Box]:
     buffers = max(concurrency[Lane.SRAM][1], 1)
     dram_rate = format_bandwidth(totals[Lane.DRAM] / busy[Lane.DRAM]) if busy[Lane.DRAM] else "—"
     core_rate = totals[Lane.CORE] / busy[Lane.CORE] if busy[Lane.CORE] else 0.0
+    vector_rate = totals[Lane.VECTOR] / busy[Lane.VECTOR] if busy[Lane.VECTOR] else 0.0
     return [
         Box(
             "dram",
@@ -269,9 +274,11 @@ def _boxes(trace: PipelineTrace, chip: HardwareSpec, dtype: DType) -> list[Box]:
         Box(
             "core",
             f"COMPUTED — {_op_mix(trace)}",
-            format_quantity(totals[Lane.CORE], "OP"),
-            f"{format_quantity(core_rate, 'OP/s')} of {format_quantity(peak, 'OP/s')} peak\n"
-            f"{format_time(busy[Lane.CORE])} — {busy[Lane.CORE] / span:.0%} of the span",
+            format_quantity(totals[Lane.CORE] + totals[Lane.VECTOR], "OP"),
+            f"array {format_quantity(totals[Lane.CORE], 'OP')} @ "
+            f"{format_quantity(core_rate, 'OP/s')} of {format_quantity(peak, 'OP/s')}\n"
+            f"vector {format_quantity(totals[Lane.VECTOR], 'OP')} @ "
+            f"{format_quantity(vector_rate, 'OP/s')}",
         ),
     ]
 
@@ -420,12 +427,13 @@ def _quantity(row: Row, trace: PipelineTrace) -> str:
         mean, peak = concurrency[Lane.SRAM]
         plural = "buffers" if peak != 1 else "buffer"
         return f"{format_bytes(totals[Lane.SRAM])} in {peak} {plural} (x{mean:.2f} avg)"
-    if row.lane is Lane.CORE:
-        rate = totals[Lane.CORE] / busy[Lane.CORE] if busy[Lane.CORE] else 0.0
-        return (
-            f"{format_quantity(totals[Lane.CORE], 'OP')} @ {format_quantity(rate, 'OP/s')}\n"
-            f"{_op_mix(trace)}"
-        )
+    if row.lane in (Lane.CORE, Lane.VECTOR):
+        lane = row.lane
+        if totals[lane] <= 0:
+            return "idle — nothing of its kind"
+        rate = totals[lane] / busy[lane] if busy[lane] else 0.0
+        mix = _op_mix(trace, matrix=lane is Lane.CORE)
+        return f"{format_quantity(totals[lane], 'OP')} @ {format_quantity(rate, 'OP/s')}\n{mix}"
     return "not used"
 
 
@@ -444,6 +452,7 @@ def _info_boxes(
     peak = machine_model(chip, dtype).peak_flops_per_s
     buffers = max(concurrency[Lane.SRAM][1], 1)
     core_rate = totals[Lane.CORE] / busy[Lane.CORE] if busy[Lane.CORE] else 0.0
+    vector_rate = totals[Lane.VECTOR] / busy[Lane.VECTOR] if busy[Lane.VECTOR] else 0.0
 
     boxes = [
         (
@@ -466,9 +475,11 @@ def _info_boxes(
         (
             COLOUR[Lane.CORE],
             f"COMPUTED — {_op_mix(trace)}",
-            format_quantity(totals[Lane.CORE], "OP"),
-            f"{format_quantity(core_rate, 'OP/s')} of {format_quantity(peak, 'OP/s')} peak\n"
-            f"{format_time(busy[Lane.CORE])} — {busy[Lane.CORE] / span:.0%} of the span",
+            format_quantity(totals[Lane.CORE] + totals[Lane.VECTOR], "OP"),
+            f"array  {format_quantity(totals[Lane.CORE], 'OP')} @ "
+            f"{format_quantity(core_rate, 'OP/s')} of {format_quantity(peak, 'OP/s')}\n"
+            f"vector {format_quantity(totals[Lane.VECTOR], 'OP')} @ "
+            f"{format_quantity(vector_rate, 'OP/s')}",
         ),
     ]
 
