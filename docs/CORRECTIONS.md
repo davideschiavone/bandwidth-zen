@@ -480,8 +480,16 @@ Fixing the latency itself would move every number in the repo and belongs with c
 **2. Double buffering means depth two, and the schedule has to say so.** The first draft let a
 tile be fetched as soon as DRAM was free, which put all 64 tiles on chip at once — SRAM occupancy
 came out at 3237% of the span. The missing constraint is the buffer being freed:
-`load_start(i) >= compute_end(i - depth)`. With it, occupancy is exactly 196%, i.e. two tiles
-throughout, which is what "double buffered" means and what capacity planning granted.
+`load_start(i) >= compute_end(i - depth)`. With it, occupancy is two tiles throughout, which is
+what "double buffered" means and what capacity planning granted.
+
+> **Follow-up (2026-08-17):** it was reported as "196%", and the user rightly asked how SRAM can be
+> 198% occupied. It cannot — that figure was a *depth* printed with a duty cycle's unit. DRAM and
+> the array are single serial resources whose spans never overlap, so `busy/span` is a fraction of
+> time for them; SRAM is *n* buffers, so the same ratio counts buffers. `PipelineTrace.concurrency`
+> now returns `(mean, peak)` per lane and the CLI and figure label each row in its own unit —
+> `100% of span` for the array, `1.97 of 2 buf` for SRAM. No number changed; the schedule was
+> right and its presentation was not.
 
 **3. Coalescing must not re-schedule.** 390 625 tiles cannot be drawn, and 451 graph nodes should
 not be. Grouping them, a group's duration is the **sum of its members' latencies**, not the latency

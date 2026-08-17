@@ -59,8 +59,7 @@ LANE_TITLE = {
     Lane.CORE: "compute array",
 }
 LANE_LEGEND = (
-    "DRAM = the one modelled link · SRAM = capacity, tiles in flight (two deep when "
-    "double buffered) · array = arithmetic"
+    "DRAM = the one modelled link · SRAM = capacity, tile buffers in flight · array = arithmetic"
 )
 
 
@@ -165,8 +164,8 @@ def draw(
     zoom_steps: int,
 ) -> None:
     fig = plt.figure(figsize=(11.5, 6.6), dpi=160, facecolor=SURFACE)
-    top = fig.add_axes((0.135, 0.600, 0.83, 0.175))
-    bottom = fig.add_axes((0.135, 0.255, 0.83, 0.175))
+    top = fig.add_axes((0.135, 0.600, 0.76, 0.175))
+    bottom = fig.add_axes((0.135, 0.255, 0.76, 0.175))
 
     # -- whole run ---------------------------------------------------------
     _bars(top, list(trace.spans), trace.total_s)
@@ -177,13 +176,17 @@ def draw(
     top.set_xticklabels(
         [format_time(f * trace.total_s) for f in (0, 0.25, 0.5, 0.75, 1.0)], fontsize=8.5
     )
-    busy = trace.busy_s
+    # DRAM and the array are serial resources, so their occupancy is a duty cycle.
+    # SRAM is n buffers, so the same ratio is a depth — labelling both "%" made
+    # two-tiles-resident read as "196% busy".
+    concurrency = trace.concurrency
     for row, lane in enumerate(Lane):
-        share = busy[lane] / trace.total_s if trace.total_s else 0.0
+        mean, peak = concurrency[lane]
+        label = f"x{mean:.2f} of {peak}" if lane is Lane.SRAM else f"{mean:.0%}"
         top.text(
             1.008,
             row + 0.5,
-            f"{share:.0%}",
+            label,
             transform=top.get_yaxis_transform(),
             va="center",
             fontsize=9,
@@ -282,11 +285,17 @@ def _headings(
     )
     fig.text(
         0.135,
-        0.545,
-        "x normalised to the total, so two chips can be laid side by side. "
-        "The percentage at the right is each lane's occupancy.",
+        0.532,
+        textwrap.fill(
+            "x normalised to the total, so two chips can be laid side by side. Right-hand "
+            "figures: DRAM and the array are serial resources, so theirs is a duty cycle; SRAM "
+            "is n buffers, so theirs is a depth.",
+            width=108,
+        ),
         fontsize=8.5,
         color=INK_MUTED,
+        va="top",
+        linespacing=1.5,
     )
 
     fig.text(
@@ -300,9 +309,11 @@ def _headings(
     fig.text(
         0.135,
         0.200,
-        _zoom_caption(trace, cutoff),
+        textwrap.fill(_zoom_caption(trace, cutoff), width=108),
         fontsize=8.5,
         color=INK_MUTED,
+        va="top",
+        linespacing=1.5,
     )
 
 

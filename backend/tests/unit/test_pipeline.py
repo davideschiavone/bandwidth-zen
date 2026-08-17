@@ -103,6 +103,28 @@ def test_double_buffering_holds_exactly_two_tiles() -> None:
     assert depth == 2
 
 
+def test_concurrency_reads_as_a_depth_not_a_duty_cycle() -> None:
+    """SRAM occupancy is ~2 because two buffers are held, not because a resource
+    was busy 198% of the time.
+
+    DRAM and the array are single serial resources: their spans never overlap, so
+    their mean concurrency is a duty cycle and cannot exceed 1. SRAM is *n*
+    buffers, so the same ratio counts buffers. Reporting the second as a
+    percentage is what made a correct schedule look broken.
+    """
+    trace, _ = _trace(_spec(10_000, 10_000, 10_000), "a100_80gb")
+    concurrency = trace.concurrency
+
+    dram_mean, dram_peak = concurrency[Lane.DRAM]
+    core_mean, core_peak = concurrency[Lane.CORE]
+    sram_mean, sram_peak = concurrency[Lane.SRAM]
+
+    assert dram_peak == core_peak == 1
+    assert dram_mean <= 1.0 and core_mean <= 1.0
+    assert sram_peak == 2
+    assert 1.9 < sram_mean <= 2.0
+
+
 def test_fill_drain_is_one_step_of_the_non_binding_resource() -> None:
     """total = max(t_dram, t_compute) + min(t_dram, t_compute)/steps.
 

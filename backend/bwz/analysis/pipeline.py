@@ -120,11 +120,42 @@ class PipelineTrace:
 
     @property
     def busy_s(self) -> dict[Lane, float]:
-        """Seconds each lane is occupied. The honest denominator for "utilisation
-        of the memory system" as against "of the array"."""
+        """Summed span duration per lane.
+
+        For DRAM and the array this is time occupied, because their spans never
+        overlap — each is a single serial resource. For SRAM it is **not**: a
+        double buffer holds two tiles at once, so the sum runs to about twice the
+        wall clock. Divide it by the span and you get a *depth*, not a duty
+        cycle; :attr:`concurrency` does that division with the right label
+        attached.
+        """
         out = dict.fromkeys(Lane, 0.0)
         for span in self.spans:
             out[span.lane] += span.duration_s
+        return out
+
+    @property
+    def concurrency(self) -> dict[Lane, tuple[float, int]]:
+        """``(mean, peak)`` spans in flight per lane.
+
+        The mean is ``busy_s / total_s`` — a time-average count of how many
+        things that resource was holding at once. For DRAM and the array it
+        cannot exceed 1 and reads as a duty cycle. For SRAM it is the number of
+        tile buffers occupied, which is 2 under double buffering and 1 without;
+        reporting *that* as a percentage is what made a correct schedule look
+        like a broken one.
+        """
+        busy = self.busy_s
+        out: dict[Lane, tuple[float, int]] = {}
+        for lane in Lane:
+            spans = [s for s in self.spans if s.lane is lane]
+            edges = sorted([(s.start_s, 1) for s in spans] + [(s.end_s, -1) for s in spans])
+            peak = live = 0
+            for _at, delta in edges:
+                live += delta
+                peak = max(peak, live)
+            mean = busy[lane] / self.total_s if self.total_s > 0 else 0.0
+            out[lane] = (mean, peak)
         return out
 
 

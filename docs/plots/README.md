@@ -45,8 +45,11 @@ array. The x axis is normalised to the total time in both registers, which is wh
 comparable when their absolute times differ by orders of magnitude; absolute figures are on the
 ticks.
 
-SRAM occupancy reads ~196% because a double buffer holds two tiles at once. That is the point:
-capacity, not bandwidth, is what SRAM contributes (D5a).
+The right-hand figure carries a different unit per lane. DRAM and the array are single serial
+resources, so theirs is a **duty cycle** — the fraction of the span they were busy, never above
+100%. SRAM is *n* buffers rather than a resource that is busy or idle, so theirs is a **depth**:
+`x1.96 of 2` means both halves of the double buffer were occupied almost all the time. Capacity,
+not bandwidth, is what SRAM contributes (D5a).
 
 The spans are a **decomposition** of the reported latency, not a second model — DRAM busy sums to
 `t_dram`, core busy to `t_compute + t_fixed`, and the tile count is the same one the utilisation

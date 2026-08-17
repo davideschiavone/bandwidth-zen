@@ -130,16 +130,20 @@ uv run bwz matmul -M 4096 -N 4096 -K 4096 -c a100_80gb -d fp16
 ```
 
 ```
-  lane     busy   of span   what it was doing
-  dram     23 µs       4%   streaming operand tiles across the one modelled link
-  sram   1.25 ms     197%   holding tiles from fetch to use — two at once when double buffered
-  core    635 µs     100%   arithmetic, plus one dispatch
+  lane      busy       occupancy   what it was doing
+  dram     23 µs      4% of span   streaming operand tiles across the one modelled link
+  sram   1.25 ms   1.97 of 2 buf   tile buffers held from fetch to use
+  core    635 µs    100% of span   arithmetic, plus one dispatch
 
   64 steps drawn, coalesced from 65536 tiles, double buffered.
 ```
 
-SRAM at ~197% is the double buffer: two tiles resident at once. That is capacity, not bandwidth,
-which is the whole of what SRAM contributes in this model.
+**The occupancy column carries a different unit per row, on purpose.** DRAM and the array are
+single serial resources — their spans never overlap — so theirs is a duty cycle and cannot exceed
+100%. SRAM is not a resource that is busy or idle; it is *n* buffers, and the same arithmetic
+counts how many were occupied: `1.97 of 2` means both halves of the double buffer were in use
+almost all the time. That is capacity, not bandwidth, which is the whole of what SRAM contributes
+in this model.
 
 ---
 
@@ -283,6 +287,6 @@ cd backend && uv run pytest tests/unit/test_pipeline.py::test_double_buffering_h
 | 5.88% = 1/17 at M=1 | §2.2 | `docs/MODEL.md` §6.1 |
 | result width changes bytes only | §2.3 | `docs/CORRECTIONS.md` D18 |
 | mixed operands run at the wider | §2.3 | `docs/CORRECTIONS.md` D18 |
-| SRAM 197% = two tiles | §2.4 | `docs/MODEL.md` §6.5, D19 |
+| SRAM depth 1.97 of 2 buffers | §2.4 | `docs/MODEL.md` §6.5, D19 |
 | 1.40% residency on chip_a | §3 | `docs/CORRECTIONS.md` D8, D15 |
 | traffic is a lower bound when the working set does not fit | every report's assumptions | `docs/MODEL.md` §6.2 |

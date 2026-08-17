@@ -395,21 +395,33 @@ def _pipeline_note(trace: PipelineTrace) -> str:
 
 
 def _lane_table(trace: PipelineTrace) -> Table:
-    """Who was busy, and for how long. The picture in five rows."""
+    """Who was busy, and for how long.
+
+    DRAM and the array are single serial resources, so their occupancy is a duty
+    cycle and cannot exceed 100%. SRAM is not a serial resource — it is *n*
+    buffers — so the same arithmetic gives a depth, and printing it as a
+    percentage made "two tiles resident throughout" read as "198% busy". The
+    column therefore carries its own unit per row.
+    """
     table = Table(title="Pipeline", box=box.SIMPLE)
     table.add_column("lane")
     table.add_column("busy", justify="right")
-    table.add_column("of span", justify="right")
+    table.add_column("occupancy", justify="right")
     table.add_column("what it was doing")
     busy = trace.busy_s
+    concurrency = trace.concurrency
     descriptions = {
         Lane.DRAM: "streaming operand tiles across the one modelled link",
-        Lane.SRAM: "holding tiles from fetch to use — two at once when double buffered",
+        Lane.SRAM: "tile buffers held from fetch to use",
         Lane.CORE: "arithmetic, plus one dispatch",
     }
     for lane in Lane:
-        share = busy[lane] / trace.total_s if trace.total_s > 0 else 0.0
-        table.add_row(lane.value, format_time(busy[lane]), f"{share:.0%}", descriptions[lane])
+        mean, peak = concurrency[lane]
+        if lane is Lane.SRAM:
+            occupancy = f"{mean:.2f} of {peak} buf" if peak else "—"
+        else:
+            occupancy = f"{mean:.0%} of span"
+        table.add_row(lane.value, format_time(busy[lane]), occupancy, descriptions[lane])
     return table
 
 
