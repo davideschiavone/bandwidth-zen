@@ -670,6 +670,12 @@ integers — **664 parameters** and **5280 operations** over 4 tokens — with t
 the profile's own header and in `tests/unit/test_tiny_encoder.py`, which recomputes both from the
 dimensions rather than asserting what the engine happened to produce.
 
+**It was given a KV cache.** K and V were tagged `KV_CACHE`, so the memory plan reported a
+footprint — 128 B on the tiny profile — that nothing would ever read again, and the planner tracks
+cache separately from activations, which also skewed the residency waterfall. A cache exists to be
+reused by a later step and an encoder has no later step, so K and V are now plain activations
+consumed within the pass.
+
 A deployment may still ask an encoder for `output_tokens`; the request is ignored, and the
 assumptions drawer says so by name rather than dropping it silently.
 

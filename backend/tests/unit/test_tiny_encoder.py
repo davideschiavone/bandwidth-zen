@@ -94,6 +94,21 @@ def test_attention_is_bidirectional() -> None:
     assert scored == 32  # a causal decoder would score 2 * 10 = 20
 
 
+def test_an_encoder_has_no_kv_cache() -> None:
+    """K and V are intermediate activations, not a cache.
+
+    A cache exists to be reused by a later step; an encoder has no later step.
+    Tagging them as cache reported 128 B of footprint that nothing would ever
+    read again, and the planner tracks cache separately from activations, so it
+    also skewed the residency waterfall.
+    """
+    report = analyze(load_model("tiny_encoder"), load_chip("a100_80gb"), _deployment())
+    assert report.memory.kv_cache_bytes == 0.0
+
+    graph = build_graph(load_model("tiny_encoder"), _deployment(), GraphPhase.PREFILL)
+    assert not any("cache" in name for name in graph.tensors)
+
+
 def test_an_encoder_has_one_phase_and_no_lm_head() -> None:
     """One bidirectional pass, and it stops at hidden states.
 

@@ -272,15 +272,21 @@ class _Builder:
         reason decode's cost grows with context and prefill's does not.
         """
         p = self.params
-        kv_shape = (self.batch, self.kv_len, p.kv_width)
-        k_cache = self.kv(f"{prefix}.k_cache", kv_shape)
-        v_cache = self.kv(f"{prefix}.v_cache", kv_shape)
-
         reads: tuple[str, ...]
-        if self.phase is GraphPhase.PREFILL:
-            reads = (q, k, v, k_cache, v_cache)
+        if self.model.family is ModelFamily.TRANSFORMER_ENCODER:
+            # No cache: an encoder sees the whole sequence once, so K and V are
+            # intermediate activations consumed in the same pass. Tagging them
+            # KV_CACHE would report a footprint that is never reused, and the
+            # planner tracks cache separately from activations (D24).
+            reads = (q, k, v)
         else:
-            reads = (q, k_cache, v_cache)
+            kv_shape = (self.batch, self.kv_len, p.kv_width)
+            k_cache = self.kv(f"{prefix}.k_cache", kv_shape)
+            v_cache = self.kv(f"{prefix}.v_cache", kv_shape)
+            if self.phase is GraphPhase.PREFILL:
+                reads = (q, k, v, k_cache, v_cache)
+            else:
+                reads = (q, k_cache, v_cache)
 
         materialize = self.deployment.attention_impl is AttentionImpl.VANILLA
         out = self.activation(f"{prefix}.attn.out", (self.rows, p.q_width))
