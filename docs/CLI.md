@@ -56,7 +56,6 @@ so a batch of 128 is `-M 128`.
 | `--out` | result width — the **accumulator**. Defaults to the wider operand |
 | `--ideal` | set both efficiency de-ratings to 1.0: a datasheet ceiling, not a prediction |
 | `--pipeline` / `--no-pipeline` | lane occupancy table (default on) |
-| `--kanata PATH` | write a Kanata log of the tile schedule, for Konata |
 | `--json` | the raw `Report` as JSON |
 
 ### 2.1 The datasheet check
@@ -159,7 +158,7 @@ in this model.
 | `--phase` | `prefill` \| `decode` \| `both` |
 | `--attention` | `vanilla` \| `flash2` \| `paged` \| `sliding_window` |
 | `--show-ops N` | the N most expensive operations |
-| `--ideal`, `--kanata PATH`, `--json` | as for `matmul` |
+| `--ideal`, `--json` | as for `matmul` |
 
 ```bash
 uv run bwz run -m llama3_8b -c a100_80gb --input-tokens 2048 --output-tokens 128
@@ -221,21 +220,26 @@ make plots        # from the repo root — regenerates all of docs/plots/
 or individually, from `backend/`:
 
 ```bash
-# roofline + the three-element machine diagram
+# roofline + the three-element machine diagram (roofline-*.png, machine-*.png)
 uv run --group plots python scripts/plot_roofline.py --chip a100_80gb --model llama3_8b
 uv run --group plots python scripts/plot_roofline.py --chip chip_a --weights int8 \
   --model gemma3_4b --tokens 512 \
   --matmul 512,4096,4096 --matmul 128,4096,4096 --matmul 1,4096,4096
 
-# tile schedule, one figure per chip, plus the Kanata logs
-uv run --group plots python scripts/plot_pipeline.py --kanata
-uv run --group plots python scripts/plot_pipeline.py --chip h100_sxm --matmul 8192,8192,8192
+# resource timeline, one figure per chip (timeline-*.png) plus a zoomable page
+uv run --group plots python scripts/plot_pipeline.py --html
+uv run --group plots python scripts/plot_pipeline.py --chip h100_sxm --matmul 8192,8192,8192 --html
 ```
 
 `plot_roofline.py`: `--chip`, `--weights`, `--matmul M,N,K` (repeatable), `--model ID`
 (repeatable), `--tokens`, `--out`.
 `plot_pipeline.py`: `--chip` (repeatable), `--matmul M,N,K`, `--weights`, `--ideal`, `--steps`,
-`--zoom`, `--kanata`, `--out`.
+`--zoom`, `--html`, `--html-steps`, `--out`.
+
+The `.html` is the one to open when you want to *look around* rather than glance: rows are the same
+hardware resources, but the time axis zooms (wheel), pans (drag), resets (double-click), and every
+bar reports its own bytes, rate and duration on hover. One self-contained file, no server and no
+viewer to install.
 
 The pipeline figure gives every declared memory level and compute unit its own row, with the bytes
 moved, the achieved bandwidth and the operations retired written beside it — and draws grey the
@@ -243,98 +247,7 @@ resources this model never uses. See [`plots/README.md`](plots/README.md) for ho
 
 ---
 
-## 6. Konata — viewing a trace
-
-Two steps: write the trace, then open it.
-
-```bash
-# from backend/ — write the trace
-uv run bwz matmul -M 10000 -N 10000 -K 10000 -c a100_80gb -d fp16 --ideal \
-  --kanata ../matmul-10k.kanata
-
-# from the repo root — open it
-make konata TRACE=matmul-10k.kanata
-```
-
-```
-konata.sh: fetching Konata v1.1.0 into /home/you/.cache/bandwidth-zen/konata-v1.1.0
-Konata URL: http://127.0.0.1:30080/#name=matmul-10k.kanata
-SSH tunnel: ssh -L 30080:127.0.0.1:30080 <host>
-Press Ctrl+C to stop the server.
-```
-
-Open the printed URL. The server binds loopback only and serves exactly two paths — the viewer and
-your trace — so nothing else in the filesystem is exposed. Ctrl+C stops it.
-
-`bwz run` writes one file per phase, so pass whichever you want:
-
-```bash
-uv run bwz run -m llama3_8b -c a100_80gb --kanata llama.kanata   # -prefill and -decode
-make konata TRACE=backend/llama-decode.kanata
-```
-
-Two traces open side by side, which is the point of one figure per chip:
-
-```bash
-make konata TRACE="docs/plots/pipeline-matmul-a100_80gb-fp16.kanata \
-                   docs/plots/pipeline-matmul-chip_a-int8.kanata"
-```
-
-### What the script does, and why it is not vendored
-
-`backend/scripts/konata.sh` fetches a **pinned** Konata release (`v1.1.0`, sha256 checked) into
-`~/.cache/bandwidth-zen/` on first use, then hands over to the helper inside it. Konata is a browser
-application, not a Python package, so it cannot live in the venv; and its release is 520 KB of
-somebody else's build output, which a checksum pins more honestly than a copy in our tree would.
-
-**Cache behaviour**, which is the whole of what the script decides:
-
-| Cache state | What happens |
-|---|---|
-| complete (`konata.sh` **and** `index.html` present) | used as-is; the network is never touched |
-| absent | fetched, checksummed, extracted |
-| present but incomplete — interrupted download, a deleted file, an empty directory | `cached Konata … is incomplete; refetching` |
-
-The install is staged in a temp directory and swapped in only once both files are verified, so an
-interrupted run leaves either the previous cache or none — never a half one that would pass the
-check and then fail with "index.html was not found next to konata.sh".
-
-- `KONATA_VERSION=v1.2.0 make konata TRACE=…` uses a different release. The hash check is skipped
-  then, because the pinned hash belongs to the default.
-- **A busy port is handled.** A viewer left running in another terminal keeps 30080, so the script
-  probes upward and says which port it took: `port 30080 is in use (another viewer?); using 30081
-  instead`. Set `KONATA_PORT` to pin one instead — if *that* is busy you get a one-line explanation
-  rather than a Python traceback.
-- **Offline:** download `konata-v1.1.0.zip` by hand and `unzip` it into
-  `~/.cache/bandwidth-zen/konata-v1.1.0/`, giving
-  `~/.cache/bandwidth-zen/konata-v1.1.0/konata-v1.1.0/index.html`. The script then never reaches
-  the network. A failed download prints that path.
-
-### Reading it
-
-The file's header comments carry the scale:
-
-```
-// 1 tick = 3.22 µs; 2000 ticks = 6.43 ms total
-// 64 steps coalesced from 390625; double buffered: yes
-```
-
-A tick is `total/2000` — the engine has no cycle-accurate notion of a cycle, and normalising this
-way is deliberate: the whole run spans 2000 ticks whether it took 71 µs or 8 ms, so two chips can
-be compared by shape.
-
-One row per step. Row 0 is the kernel dispatch. **Lane 0** is `Ld` then `Ex` — the DRAM load
-followed by the arithmetic; at 10000³ that is 4.13 µs of load against 100 µs of execute, which is
-what compute-bound looks like. **Lane 1** is `Hold`, the tile in SRAM; where row *n*'s `Hold`
-overlaps row *n+1*'s is the double buffer doing its work. Hovering a row gives
-`dram/Ld 4.13 µs  sram/Hold 104 µs  core/Ex 100 µs`.
-
-Konata's own convention is that lane 1 carries stalls. This trace repurposes it for residency; the
-file says so in its header.
-
----
-
-## 7. Development
+## 6. Development
 
 ```bash
 make test          # pytest + vitest
@@ -353,7 +266,7 @@ cd backend && uv run pytest tests/unit/test_pipeline.py::test_double_buffering_h
 
 ---
 
-## 8. Where each claim is derived
+## 7. Where each claim is derived
 
 | Claim | Command | Derivation |
 |---|---|---|

@@ -34,7 +34,6 @@ make fmt            # ruff format + prettier
 make types          # regenerate frontend/src/api/types.ts from OpenAPI
 make validate       # run the predicted-vs-published validation suite, print the table
 make plots          # regenerate docs/plots/ (roofline + tile schedule, per chip)
-make konata TRACE=f.kanata   # open a pipeline trace in Konata (fetches it on first use)
 make docker         # docker compose build && up
 ```
 
@@ -105,7 +104,6 @@ Nothing in `analysis/` may import from `api/`. Nothing in `graph/` may import fr
 | A new model family | `spec/model_spec.py` + `graph/<family>.py`, dispatched in `graph/builder.py` | `docs/SCHEMA.md`, `docs/MODEL.md`, golden test |
 | A new dtype | `spec/dtypes.py` only — widths are definitions, not calibration | `docs/SCHEMA.md` dtype lists |
 | A figure | `backend/scripts/plot_*.py`, never inside `bwz/` | `docs/plots/README.md`, `make plots` |
-| A third-party tool | `backend/scripts/*.sh` that fetches a **pinned, checksummed** release into `~/.cache/bandwidth-zen/` — never vendored into the tree | `docs/CLI.md` |
 | A CLI command or flag | `cli.py` | `docs/CLI.md` — with real output, not a description |
 | A new UI panel | `frontend/src/components/` | `Dashboard.tsx`, vitest |
 

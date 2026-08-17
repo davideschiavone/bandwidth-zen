@@ -21,18 +21,84 @@ in its own `plots` dependency group, so `make test` does not pull it in.
 | File | Script | Shows |
 |---|---|---|
 | `roofline-<chip>-<dtype>.png` | `plot_roofline.py` | The two ceilings, the ridge point, the M=1 tail line, and a set of workloads placed on them |
-| `pipeline-<chip>.png` | `plot_roofline.py` | The three-element machine (D5a) — DRAM, SRAM-as-capacity, array — and which link carries a bandwidth number |
-| `pipeline-matmul-<chip>-<dtype>.png` | `plot_pipeline.py` | Where the time went, per hardware resource, with the bytes and operations on each row |
-| `pipeline-matmul-<chip>-<dtype>.kanata` | `plot_pipeline.py --kanata` | The same schedule as a Kanata log, for [Konata](https://github.com/shioyadan/Konata) |
+| `machine-<chip>.png` | `plot_roofline.py` | The three-element machine (D5a) — DRAM, SRAM-as-capacity, array — and which link carries a bandwidth number |
+| `timeline-<chip>-<dtype>.png` | `plot_pipeline.py` | Where the time went, per hardware resource, with the bytes and operations on each row |
+| `timeline-<chip>-<dtype>.html` | `plot_pipeline.py --html` | The same, **zoomable**: wheel to zoom about the cursor, drag to pan, hover a bar for its own numbers |
 
-Open either `.kanata` file — or both at once, side by side — with:
+The HTML is one self-contained file — no server, no download, no CDN. Open it with `file://`, or:
 
 ```bash
-make konata TRACE=docs/plots/pipeline-matmul-a100_80gb-fp16.kanata
+xdg-open docs/plots/timeline-a100_80gb-fp16.html
 ```
 
-The first run fetches a pinned Konata release into `~/.cache/bandwidth-zen/`; see
-[`../CLI.md`](../CLI.md) §6.
+It carries more steps than the PNG (256 against 32) because a static figure has to stay legible at
+one scale and a zoomable one does not.
+
+Nothing in `bwz/` imports a plotting library (CLAUDE.md #3). The scripts live in
+`backend/scripts/` and import the engine; the dependency never points the other way. matplotlib is
+in its own `plots` dependency group, so `make test` does not pull it in.
+
+## What each one is
+
+| File | Script | Shows |
+|---|---|---|
+| `roofline-<chip>-<dtype>.png` | `plot_roofline.py` | The two ceilings, the ridge point, the M=1 tail line, and a set of workloads placed on them |
+| `machine-<chip>.png` | `plot_roofline.py` | The three-element machine (D5a) — DRAM, SRAM-as-capacity, array — and which link carries a bandwidth number |
+| `timeline-<chip>-<dtype>.png` | `plot_pipeline.py` | Where the time went, per hardware resource, with the bytes and operations on each row |
+| `timeline-<chip>-<dtype>.html` | `plot_pipeline.py --html` | The same, **zoomable**: wheel to zoom about the cursor, drag to pan, hover a bar for its own numbers |
+
+The HTML is one self-contained file — no server, no download, no CDN. Open it with `file://`, or:
+
+```bash
+xdg-open docs/plots/timeline-a100_80gb-fp16.html
+```
+
+It carries more steps than the PNG (256 against 32) because a static figure has to stay legible at
+one scale and a zoomable one does not.
+
+Nothing in `bwz/` imports a plotting library (CLAUDE.md #3). The scripts live in
+`backend/scripts/` and import the engine; the dependency never points the other way. matplotlib is
+in its own `plots` dependency group, so `make test` does not pull it in.
+
+## What each one is
+
+| File | Script | Shows |
+|---|---|---|
+| `roofline-<chip>-<dtype>.png` | `plot_roofline.py` | The two ceilings, the ridge point, the M=1 tail line, and a set of workloads placed on them |
+| `machine-<chip>.png` | `plot_roofline.py` | The three-element machine (D5a) — DRAM, SRAM-as-capacity, array — and which link carries a bandwidth number |
+| `timeline-<chip>-<dtype>.png` | `plot_pipeline.py` | Where the time went, per hardware resource, with the bytes and operations on each row |
+| `timeline-<chip>-<dtype>.html` | `plot_pipeline.py --html` | The same, **zoomable**: wheel to zoom about the cursor, drag to pan, hover a bar for its own numbers |
+
+The HTML is one self-contained file — no server, no download, no CDN. Open it with `file://`, or:
+
+```bash
+xdg-open docs/plots/timeline-a100_80gb-fp16.html
+```
+
+It carries more steps than the PNG (256 against 32) because a static figure has to stay legible at
+one scale and a zoomable one does not.
+
+Nothing in `bwz/` imports a plotting library (CLAUDE.md #3). The scripts live in
+`backend/scripts/` and import the engine; the dependency never points the other way. matplotlib is
+in its own `plots` dependency group, so `make test` does not pull it in.
+
+## What each one is
+
+| File | Script | Shows |
+|---|---|---|
+| `roofline-<chip>-<dtype>.png` | `plot_roofline.py` | The two ceilings, the ridge point, the M=1 tail line, and a set of workloads placed on them |
+| `machine-<chip>.png` | `plot_roofline.py` | The three-element machine (D5a) — DRAM, SRAM-as-capacity, array — and which link carries a bandwidth number |
+| `timeline-<chip>-<dtype>.png` | `plot_pipeline.py` | Where the time went, per hardware resource, with the bytes and operations on each row |
+| `timeline-<chip>-<dtype>.html` | `plot_pipeline.py --html` | The same, **zoomable**: wheel to zoom about the cursor, drag to pan, hover a bar for its own numbers |
+
+The HTML is one self-contained file — no server, no download, no CDN. Open it with `file://`, or:
+
+```bash
+xdg-open docs/plots/timeline-a100_80gb-fp16.html
+```
+
+It carries more steps than the PNG (256 against 32) because a static figure has to stay legible at
+one scale and a zoomable one does not.
 
 ## Reading the roofline
 
@@ -47,7 +113,7 @@ point right and a fully resident workload leaves the chart entirely.
 The dotted `M=1` line is **not** a derating — it is `peak/(1+rows)`, geometry from the array's
 declared depth, and `--ideal` leaves it exactly where it is.
 
-## Reading the pipeline
+## Reading the timeline
 
 **Rows are resources, read off the chip profile** — every memory level and every compute unit the
 profile declares, not one row per step. That is the axis a comparison needs: "what was the memory

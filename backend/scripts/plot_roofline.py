@@ -423,7 +423,7 @@ def _table(
     )
 
 
-def draw_pipeline(chip: HardwareSpec, dtype: DType, command: str, out: Path) -> None:
+def draw_machine(chip: HardwareSpec, dtype: DType, command: str, out: Path) -> None:
     """The three-element machine, drawn as it is modelled (docs/CORRECTIONS.md D5a).
 
     The point of the picture is what is *missing*: exactly one link carries a
@@ -619,7 +619,7 @@ def main() -> None:
 
     command = "uv run --group plots python " + " ".join(shlex.quote(a) for a in sys.argv)
     draw_roofline(chip, dtype, points, command, args.out / f"roofline-{chip.id}-{dtype.value}.png")
-    draw_pipeline(chip, dtype, command, args.out / f"pipeline-{chip.id}.png")
+    draw_machine(chip, dtype, command, args.out / f"machine-{chip.id}.png")
 
 
 if __name__ == "__main__":

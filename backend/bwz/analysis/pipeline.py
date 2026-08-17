@@ -71,7 +71,7 @@ class Lane(StrEnum):
 
 
 class Stage(StrEnum):
-    """What a lane is doing. Konata calls these stages; a Gantt calls them bars."""
+    """What a lane is doing — one bar on the timeline."""
 
     DISPATCH = "Dis"
     LOAD = "Ld"

@@ -1,0 +1,194 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>NVIDIA A100 SXM4 80GB — matmul 4096x4096x4096 at fp16</title>
+<style>
+  :root {
+    --surface: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e; --ink-3: #8a8983;
+    --grid: #e6e5e1; --box: #f2f1ed;
+    --dram: #2a78d6; --sram: #8a8983; --core: #eb6834; --idle: #e6e5e1;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 28px 32px 40px; background: var(--surface); color: var(--ink);
+    font: 14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  h1 { font-size: 21px; margin: 0 0 6px; }
+  .sub { color: var(--ink-2); margin: 0 0 20px; font-size: 13px; }
+  .boxes { display: flex; gap: 14px; margin-bottom: 26px; flex-wrap: wrap; }
+  .box {
+    flex: 1 1 240px; border: 1.5px solid var(--grid); border-radius: 7px;
+    background: var(--box); padding: 12px 14px;
+  }
+  .box h2 { font-size: 10.5px; letter-spacing: .04em; margin: 0 0 6px; }
+  .box .big { font-size: 26px; font-weight: 700; line-height: 1.1; }
+  .box .det { font-size: 11.5px; color: var(--ink-2); margin-top: 6px; white-space: pre-line; }
+  .box.dram { border-color: var(--dram); } .box.dram h2 { color: var(--dram); }
+  .box.sram { border-color: var(--sram); } .box.sram h2 { color: var(--sram); }
+  .box.core { border-color: var(--core); } .box.core h2 { color: var(--core); }
+  .hint { font-size: 11.5px; color: var(--ink-3); margin: 0 0 10px; }
+  #wrap { position: relative; border-top: 1px solid var(--grid); padding-top: 12px; }
+  svg { display: block; width: 100%; touch-action: none; cursor: grab; }
+  svg.drag { cursor: grabbing; }
+  .rowline { fill: none; stroke: var(--grid); stroke-width: 1; }
+  .rowname { font-size: 12.5px; font-weight: 600; fill: var(--ink); }
+  .rowdetail { font-size: 9.5px; fill: var(--ink-3); }
+  .rowqty { font-size: 11px; fill: var(--ink); }
+  .rowqty.off { fill: var(--ink-3); }
+  .tick { font-size: 10.5px; fill: var(--ink-2); }
+  .tickline { stroke: var(--grid); stroke-width: 1; }
+  #tip {
+    position: absolute; pointer-events: none; opacity: 0; transition: opacity .08s;
+    background: #17171a; color: #fff; padding: 7px 10px; border-radius: 5px;
+    font-size: 11.5px; line-height: 1.45; white-space: pre; z-index: 5;
+  }
+  footer { margin-top: 22px; font-size: 11px; color: var(--ink-3); }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
+</style>
+
+<h1>NVIDIA A100 SXM4 80GB — matmul 4096x4096x4096 at fp16</h1>
+<p class="sub">Span 636 µs. 32 steps drawn, coalesced from 65536 tiles. Double buffered — the reported latency omits 720 ns of pipeline fill/drain.</p>
+<div class="boxes"><div class="box dram"><h2>COPIED FROM DRAM</h2><div class="big">39.9 MB</div><div class="det">1.73 TB/s while active
+23 µs — 4% of the span</div></div><div class="box sram"><h2>HELD ON CHIP</h2><div class="big">2.1 MB</div><div class="det">2 buffers x 1.05 MB
+of 60.7 MB capacity</div></div><div class="box core"><h2>COMPUTED</h2><div class="big">137 GOP</div><div class="det">216 TOP/s of 312 TOP/s peak
+635 µs — 100% of the span</div></div></div>
+<p class="hint">Rows are hardware resources, not steps. <b>Wheel</b> zooms about the cursor ·
+<b>drag</b> pans · <b>double-click</b> resets · <b>hover</b> a bar for its own numbers.
+Grey rows are declared by the chip and unused by this model.</p>
+<div id="wrap"><svg id="chart"></svg><div id="tip"></div></div>
+<footer>bwz 0.1.0 @ c487b93 — every bar is a slice of the reported latency: the DRAM row sums to t_dram and the compute row to t_compute. <br><code>$ uv run --group plots python scripts/plot_pipeline.py --html</code></footer>
+
+<script>
+const DATA = {"rows": [{"title": "HBM2e", "detail": "80 GB \u00b7 2.04 TB/s", "note": "the only bandwidth ceiling (D5a)", "lane": "dram", "quantity": "39.9 MB @ 1.73 TB/s"}, {"title": "L2", "detail": "40 MB \u00b7 7 TB/s", "note": "declared, not modelled \u2014 the roofline is flat (D5)", "lane": null, "quantity": "not used"}, {"title": "L1", "detail": "20.7 MB \u00b7 80 TB/s", "note": "capacity only \u2014 no bandwidth term (D5b)", "lane": "sram", "quantity": "2.1 MB in 2 buffers (x1.96 avg)"}, {"title": "tensor_core", "detail": "432 x 16x16 array", "note": "peak 312 TOP/s at fp16", "lane": "core", "quantity": "137 GOP @ 216 TOP/s"}, {"title": "cuda_core", "detail": "6912 x 1 MAC/cycle", "note": "idle \u2014 peak is the max over units, not the sum", "lane": null, "quantity": "not used"}], "spans": [{"lane": "core", "start": 0.0, "end": 3e-06, "tip": "kernel dispatch\n0 s + 3 \u00b5s\n0 OP @ 0 OP/s"}, {"lane": "dram", "start": 3e-06, "end": 3.7199376857167584e-06, "tip": "2048 B tiles 16x16 [1/32]\n3 \u00b5s + 720 ns\n1.25 MB @ 1.73 TB/s"}, {"lane": "sram", "start": 3e-06, "end": 2.3470622514415772e-05, "tip": "2048 B tiles 16x16 [1/32]\n3 \u00b5s + 20.5 \u00b5s\nholding 1.05 MB"}, {"lane": "core", "start": 3.7199376857167584e-06, "end": 2.3470622514415772e-05, "tip": "2048 B tiles 16x16 [1/32]\n3.72 \u00b5s + 19.8 \u00b5s\n4.29 GOP @ 217 TOP/s"}, {"lane": "dram", "start": 3.7199376857167584e-06, "end": 4.439875371433517e-06, "tip": "2048 B tiles 16x16 [2/32]\n3.72 \u00b5s + 720 ns\n1.25 MB @ 1.73 TB/s"}, {"lane": "sram", "start": 3.7199376857167584e-06, "end": 4.322130734311478e-05, "tip": "2048 B tiles 16x16 [2/32]\n3.72 \u00b5s + 39.5 \u00b5s\nholding 1.05 MB"}, {"lane": "core", "start": 2.3470622514415772e-05, "end": 4.322130734311478e-05, "tip": "2048 B tiles 16x16 [2/32]\n23.5 \u00b5s + 19.8 \u00b5s\n4.29 GOP @ 217 TOP/s"}, {"lane": "dram", "start": 2.3470622514415772e-05, "end": 2.4190560200132532e-05, "tip": "2048 B tiles 16x16 [3/32]\n23.5 \u00b5s + 720 ns\n1.25 MB @ 1.73 TB/s"}, {"lane": "sram", "start": 2.3470622514415772e-05, "end": 6.29719921718138e-05, "tip": "2048 B tiles 16x16 [3/32]\n23.5 \u00b5s + 39.5 \u00b5s\nholding 1.05 MB"}, {"lane": "core", "start": 4.322130734311478e-05, "end": 6.29719921718138e-05, "tip": "2048 B tiles 16x16 [3/32]\n43.2 \u00b5s + 19.8 \u00b5s\n4.29 GOP @ 217 TOP/s"}, {"lane": "dram", "start": 4.322130734311478e-05, "end": 4.394124502883154e-05, "tip": "2048 B tiles 16x16 [4/32]\n43.2 \u00b5s + 720 ns\n1.25 MB @ 1.73 TB/s"}, {"lane": "sram", "start": 4.322130734311478e-05, "end": 8.272267700051282e-05, "tip": "2048 B tiles 16x16 [4/32]\n43.2 \u00b5s + 39.5 \u00b5s\nholding 1.05 MB"}, {"lane": "core", "start": 6.29719921718138e-05, "end": 8.272267700051282e-05, "tip": "2048 B tiles 16x16 [4/32]\n63 \u00b5s + 19.8 \u00b5s\n4.29 GOP @ 217 TOP/s"}, {"lane": "dram", "start": 6.29719921718138e-05, "end": 6.369192985753056e-05, "tip": "2048 B tiles 16x16 [5/32]\n63 \u00b5s + 720 ns\n1.25 MB @ 1.73 TB/s"}, {"lane": "sram", "start": 6.29719921718138e-05, "end": 0.00010247336182921184, "tip": "2048 B tiles 16x16 [5/32]\n63 \u00b5s + 39.5 \u00b5s\nholding 1.05 MB"}, {"lane": "core", "start": 8.272267700051282e-05, "end": 0.00010247336182921184, "tip": "2048 B tiles 16x16 [5/32]\n82.7 \u00b5s + 19.8 \u00b5s\n4.29 GOP @ 217 TOP/s"}, {"lane": "dram", "start": 8.272267700051282e-05, "end": 8.344261468622957e-05, "tip": "2048 B tiles 16x16 [6/32]\n82.7 \u00b5s + 720 ns\n1.25 MB @ 1.73 TB/s"}, {"lane": "sram", "start": 8.272267700051282e-05, "end": 0.00012222404665791084, "tip": "2048 B tiles 16x16 [6/32]\n82.7 \u00b5s + 39.5 \u00b5s\nholding 1.05 MB"}, {"lane": "core", "start": 0.00010247336182921184, "end": 0.00012222404665791084, "tip": "2048 B tiles 16x16 [6/32]\n102 \u00b5s + 19.8 \u00b5s\n4.29 GOP @ 217 TOP/s"}, {"lane": "dram", "start": 0.00010247336182921184, "end": 0.00010319329951492859, "tip": "2048 B tiles 16x16 [7/32]\n102 \u00b5s + 720 ns\n1.25 MB @ 1.73 TB/s"}, {"lane": "sram", "start": 0.00010247336182921184, "end": 0.00014197473148660984, "tip": "2048 B tiles 16x16 [7/32]\n102 \u00b5s + 39.5 \u00b5s\nholding 1.05 MB"}, {"lane": "core", "start": 0.00012222404665791084, "end": 0.00014197473148660984, "tip": "2048 B tiles 16x16 [7/32]\n122 \u00b5s + 19.8 \u00b5s\n4.29 GOP @ 217 TOP/s"}, {"lane": "dram", "start": 0.00012222404665791084, "end": 0.0001229439843436276, "tip": "2048 B tiles 16x16 [8/32]\n122 \u00b5s + 720 ns\n1.25 MB @ 1.73 TB/s"}, {"lane": "sram", "start": 0.00012222404665791084, "end": 0.00016172541631530885, "tip": "2048 B tiles 16x16 [8/32]\n122 \u00b5s + 39.5 \u00b5s\nholding 1.05 MB"}, {"lane": "core", "start": 0.00014197473148660984, "end": 0.00016172541631530885, "tip": "2048 B tiles 16x16 [8/32]\n142 \u00b5s + 19.8 \u00b5s\n4.29 GOP @ 217 TOP/s"}, {"lane": "dram", "start": 0.00014197473148660984, "end": 0.0001426946691723266, "tip": "2048 B tiles 16x16 [9/32]\n142 \u00b5s + 720 ns\n1.25 MB @ 1.73 TB/s"}, {"lane": "sram", "start": 0.00014197473148660984, "end": 0.00018147610114400785, "tip": "2048 B tiles 16x16 [9/32]\n142 \u00b5s + 39.5 \u00b5s\nholding 1.05 MB"}, {"lane": "core", "start": 0.00016172541631530885, "end": 0.00018147610114400785, "tip": "2048 B tiles 16x16 [9/32]\n162 \u00b5s + 19.8 \u00b5s\n4.29 GOP @ 217 TOP/s"}, {"lane": "dram", "start": 0.00016172541631530885, "end": 0.00016244535400102562, "tip": "2048 B tiles 16x16 [10/32]\n162 \u00b5s + 720 ns\n1.25 MB @ 1.73 TB/s"}, {"lane": "sram", "start": 0.00016172541631530885, "end": 0.00020122678597270685, "tip": "2048 B tiles 16x16 [10/32]\n162 \u00b5s + 39.5 \u00b5s\nholding 1.05 MB"}, {"lane": "core", "start": 0.00018147610114400785, "end": 0.00020122678597270685, "tip": "2048 B tiles 16x16 [10/32]\n181 \u00b5s + 19.8 \u00b5s\n4.29 GOP @ 217 TOP/s"}, {"lane": "dram", "start": 0.00018147610114400785, "end": 0.00018219603882972462, "tip": "2048 B tiles 16x16 [11/32]\n181 \u00b5s + 720 ns\n1.25 MB @ 1.73 TB/s"}, {"lane": "sram", "start": 0.00018147610114400785, "end": 0.00022097747080140586, "tip": "2048 B tiles 16x16 [11/32]\n181 \u00b5s + 39.5 \u00b5s\nholding 1.05 MB"}, {"lane": "core", "start": 0.00020122678597270685, "end": 0.00022097747080140586, "tip": "2048 B tiles 16x16 [11/32]\n201 \u00b5s + 19.8 \u00b5s\n4.29 GOP @ 217 TOP/s"}, {"lane": "dram", "start": 0.00020122678597270685, "end": 0.00020194672365842362, "tip": "2048 B tiles 16x16 [12/32]\n201 \u00b5s + 720 ns\n1.25 MB @ 1.73 TB/s"}, {"lane": "sram", "start": 0.00020122678597270685, "end": 0.00024072815563010486, "tip": "2048 B tiles 16x16 [12/32]\n201 \u00b5s + 39.5 \u00b5s\nholding 1.05 MB"}, {"lane": "core", "start": 0.00022097747080140586, "end": 0.00024072815563010486, "tip": "2048 B tiles 16x16 [12/32]\n221 \u00b5s + 19.8 \u00b5s\n4.29 GOP @ 217 TOP/s"}, {"lane": "dram", "start": 0.00022097747080140586, "end": 0.00022169740848712263, "tip": "2048 B tiles 16x16 [13/32]\n221 \u00b5s + 720 ns\n1.25 MB @ 1.73 TB/s"}, {"lane": "sram", "start": 0.00022097747080140586, "end": 0.00026047884045880387, "tip": "2048 B tiles 16x16 [13/32]\n221 \u00b5s + 39.5 \u00b5s\nholding 1.05 MB"}, {"lane": "core", "start": 0.00024072815563010486, "end": 0.00026047884045880387, "tip": "2048 B tiles 16x16 [13/32]\n241 \u00b5s + 19.8 \u00b5s\n4.29 GOP @ 217 TOP/s"}, {"lane": "dram", "start": 0.00024072815563010486, "end": 0.00024144809331582163, "tip": "2048 B tiles 16x16 [14/32]\n241 \u00b5s + 720 ns\n1.25 MB @ 1.73 TB/s"}, {"lane": "sram", "start": 0.00024072815563010486, "end": 0.0002802295252875029, "tip": "2048 B tiles 16x16 [14/32]\n241 \u00b5s + 39.5 \u00b5s\nholding 1.05 MB"}, {"lane": "core", "start": 0.00026047884045880387, "end": 0.0002802295252875029, "tip": "2048 B tiles 16x16 [14/32]\n260 \u00b5s + 19.8 \u00b5s\n4.29 GOP @ 217 TOP/s"}, {"lane": "dram", "start": 0.00026047884045880387, "end": 0.00026119877814452064, "tip": "2048 B tiles 16x16 [15/32]\n260 \u00b5s + 720 ns\n1.25 MB @ 1.73 TB/s"}, {"lane": "sram", "start": 0.00026047884045880387, "end": 0.00029998021011620193, "tip": "2048 B tiles 16x16 [15/32]\n260 \u00b5s + 39.5 \u00b5s\nholding 1.05 MB"}, {"lane": "core", "start": 0.0002802295252875029, "end": 0.00029998021011620193, "tip": "2048 B tiles 16x16 [15/32]\n280 \u00b5s + 19.8 \u00b5s\n4.29 GOP @ 217 TOP/s"}, {"lane": "dram", "start": 0.0002802295252875029, "end": 0.00028094946297321967, "tip": "2048 B tiles 16x16 [16/32]\n280 \u00b5s + 720 ns\n1.25 MB @ 1.73 TB/s"}, {"lane": "sram", "start": 0.0002802295252875029, "end": 0.00031973089494490096, "tip": "2048 B tiles 16x16 [16/32]\n280 \u00b5s + 39.5 \u00b5s\nholding 1.05 MB"}, {"lane": "core", "start": 0.00029998021011620193, "end": 0.00031973089494490096, "tip": "2048 B tiles 16x16 [16/32]\n300 \u00b5s + 19.8 \u00b5s\n4.29 GOP @ 217 TOP/s"}, {"lane": "dram", "start": 0.00029998021011620193, "end": 0.0003007001478019187, "tip": "2048 B tiles 16x16 [17/32]\n300 \u00b5s + 720 ns\n1.25 MB @ 1.73 TB/s"}, {"lane": "sram", "start": 0.00029998021011620193, "end": 0.0003394815797736, "tip": "2048 B tiles 16x16 [17/32]\n300 \u00b5s + 39.5 \u00b5s\nholding 1.05 MB"}, {"lane": "core", "start": 0.00031973089494490096, "end": 0.0003394815797736, "tip": "2048 B tiles 16x16 [17/32]\n320 \u00b5s + 19.8 \u00b5s\n4.29 GOP @ 217 TOP/s"}, {"lane": "dram", "start": 0.00031973089494490096, "end": 0.00032045083263061773, "tip": "2048 B tiles 16x16 [18/32]\n320 \u00b5s + 720 ns\n1.25 MB @ 1.73 TB/s"}, {"lane": "sram", "start": 0.00031973089494490096, "end": 0.000359232264602299, "tip": "2048 B tiles 16x16 [18/32]\n320 \u00b5s + 39.5 \u00b5s\nholding 1.05 MB"}, {"lane": "core", "start": 0.0003394815797736, "end": 0.000359232264602299, "tip": "2048 B tiles 16x16 [18/32]\n339 \u00b5s + 19.8 \u00b5s\n4.29 GOP @ 217 TOP/s"}, {"lane": "dram", "start": 0.0003394815797736, "end": 0.00034020151745931676, "tip": "2048 B tiles 16x16 [19/32]\n339 \u00b5s + 720 ns\n1.25 MB @ 1.73 TB/s"}, {"lane": "sram", "start": 0.0003394815797736, "end": 0.00037898294943099805, "tip": "2048 B tiles 16x16 [19/32]\n339 \u00b5s + 39.5 \u00b5s\nholding 1.05 MB"}, {"lane": "core", "start": 0.000359232264602299, "end": 0.00037898294943099805, "tip": "2048 B tiles 16x16 [19/32]\n359 \u00b5s + 19.8 \u00b5s\n4.29 GOP @ 217 TOP/s"}, {"lane": "dram", "start": 0.000359232264602299, "end": 0.0003599522022880158, "tip": "2048 B tiles 16x16 [20/32]\n359 \u00b5s + 720 ns\n1.25 MB @ 1.73 TB/s"}, {"lane": "sram", "start": 0.000359232264602299, "end": 0.0003987336342596971, "tip": "2048 B tiles 16x16 [20/32]\n359 \u00b5s + 39.5 \u00b5s\nholding 1.05 MB"}, {"lane": "core", "start": 0.00037898294943099805, "end": 0.0003987336342596971, "tip": "2048 B tiles 16x16 [20/32]\n379 \u00b5s + 19.8 \u00b5s\n4.29 GOP @ 217 TOP/s"}, {"lane": "dram", "start": 0.00037898294943099805, "end": 0.0003797028871167148, "tip": "2048 B tiles 16x16 [21/32]\n379 \u00b5s + 720 ns\n1.25 MB @ 1.73 TB/s"}, {"lane": "sram", "start": 0.00037898294943099805, "end": 0.0004184843190883961, "tip": "2048 B tiles 16x16 [21/32]\n379 \u00b5s + 39.5 \u00b5s\nholding 1.05 MB"}, {"lane": "core", "start": 0.0003987336342596971, "end": 0.0004184843190883961, "tip": "2048 B tiles 16x16 [21/32]\n399 \u00b5s + 19.8 \u00b5s\n4.29 GOP @ 217 TOP/s"}, {"lane": "dram", "start": 0.0003987336342596971, "end": 0.00039945357194541385, "tip": "2048 B tiles 16x16 [22/32]\n399 \u00b5s + 720 ns\n1.25 MB @ 1.73 TB/s"}, {"lane": "sram", "start": 0.0003987336342596971, "end": 0.00043823500391709514, "tip": "2048 B tiles 16x16 [22/32]\n399 \u00b5s + 39.5 \u00b5s\nholding 1.05 MB"}, {"lane": "core", "start": 0.0004184843190883961, "end": 0.00043823500391709514, "tip": "2048 B tiles 16x16 [22/32]\n418 \u00b5s + 19.8 \u00b5s\n4.29 GOP @ 217 TOP/s"}, {"lane": "dram", "start": 0.0004184843190883961, "end": 0.0004192042567741129, "tip": "2048 B tiles 16x16 [23/32]\n418 \u00b5s + 720 ns\n1.25 MB @ 1.73 TB/s"}, {"lane": "sram", "start": 0.0004184843190883961, "end": 0.0004579856887457942, "tip": "2048 B tiles 16x16 [23/32]\n418 \u00b5s + 39.5 \u00b5s\nholding 1.05 MB"}, {"lane": "core", "start": 0.00043823500391709514, "end": 0.0004579856887457942, "tip": "2048 B tiles 16x16 [23/32]\n438 \u00b5s + 19.8 \u00b5s\n4.29 GOP @ 217 TOP/s"}, {"lane": "dram", "start": 0.00043823500391709514, "end": 0.0004389549416028119, "tip": "2048 B tiles 16x16 [24/32]\n438 \u00b5s + 720 ns\n1.25 MB @ 1.73 TB/s"}, {"lane": "sram", "start": 0.00043823500391709514, "end": 0.0004777363735744932, "tip": "2048 B tiles 16x16 [24/32]\n438 \u00b5s + 39.5 \u00b5s\nholding 1.05 MB"}, {"lane": "core", "start": 0.0004579856887457942, "end": 0.0004777363735744932, "tip": "2048 B tiles 16x16 [24/32]\n458 \u00b5s + 19.8 \u00b5s\n4.29 GOP @ 217 TOP/s"}, {"lane": "dram", "start": 0.0004579856887457942, "end": 0.00045870562643151095, "tip": "2048 B tiles 16x16 [25/32]\n458 \u00b5s + 720 ns\n1.25 MB @ 1.73 TB/s"}, {"lane": "sram", "start": 0.0004579856887457942, "end": 0.0004974870584031922, "tip": "2048 B tiles 16x16 [25/32]\n458 \u00b5s + 39.5 \u00b5s\nholding 1.05 MB"}, {"lane": "core", "start": 0.0004777363735744932, "end": 0.0004974870584031922, "tip": "2048 B tiles 16x16 [25/32]\n478 \u00b5s + 19.8 \u00b5s\n4.29 GOP @ 217 TOP/s"}, {"lane": "dram", "start": 0.0004777363735744932, "end": 0.00047845631126021, "tip": "2048 B tiles 16x16 [26/32]\n478 \u00b5s + 720 ns\n1.25 MB @ 1.73 TB/s"}, {"lane": "sram", "start": 0.0004777363735744932, "end": 0.0005172377432318912, "tip": "2048 B tiles 16x16 [26/32]\n478 \u00b5s + 39.5 \u00b5s\nholding 1.05 MB"}, {"lane": "core", "start": 0.0004974870584031922, "end": 0.0005172377432318912, "tip": "2048 B tiles 16x16 [26/32]\n497 \u00b5s + 19.8 \u00b5s\n4.29 GOP @ 217 TOP/s"}, {"lane": "dram", "start": 0.0004974870584031922, "end": 0.000498206996088909, "tip": "2048 B tiles 16x16 [27/32]\n497 \u00b5s + 720 ns\n1.25 MB @ 1.73 TB/s"}, {"lane": "sram", "start": 0.0004974870584031922, "end": 0.0005369884280605902, "tip": "2048 B tiles 16x16 [27/32]\n497 \u00b5s + 39.5 \u00b5s\nholding 1.05 MB"}, {"lane": "core", "start": 0.0005172377432318912, "end": 0.0005369884280605902, "tip": "2048 B tiles 16x16 [27/32]\n517 \u00b5s + 19.8 \u00b5s\n4.29 GOP @ 217 TOP/s"}, {"lane": "dram", "start": 0.0005172377432318912, "end": 0.000517957680917608, "tip": "2048 B tiles 16x16 [28/32]\n517 \u00b5s + 720 ns\n1.25 MB @ 1.73 TB/s"}, {"lane": "sram", "start": 0.0005172377432318912, "end": 0.0005567391128892892, "tip": "2048 B tiles 16x16 [28/32]\n517 \u00b5s + 39.5 \u00b5s\nholding 1.05 MB"}, {"lane": "core", "start": 0.0005369884280605902, "end": 0.0005567391128892892, "tip": "2048 B tiles 16x16 [28/32]\n537 \u00b5s + 19.8 \u00b5s\n4.29 GOP @ 217 TOP/s"}, {"lane": "dram", "start": 0.0005369884280605902, "end": 0.000537708365746307, "tip": "2048 B tiles 16x16 [29/32]\n537 \u00b5s + 720 ns\n1.25 MB @ 1.73 TB/s"}, {"lane": "sram", "start": 0.0005369884280605902, "end": 0.0005764897977179881, "tip": "2048 B tiles 16x16 [29/32]\n537 \u00b5s + 39.5 \u00b5s\nholding 1.05 MB"}, {"lane": "core", "start": 0.0005567391128892892, "end": 0.0005764897977179881, "tip": "2048 B tiles 16x16 [29/32]\n557 \u00b5s + 19.8 \u00b5s\n4.29 GOP @ 217 TOP/s"}, {"lane": "dram", "start": 0.0005567391128892892, "end": 0.0005574590505750059, "tip": "2048 B tiles 16x16 [30/32]\n557 \u00b5s + 720 ns\n1.25 MB @ 1.73 TB/s"}, {"lane": "sram", "start": 0.0005567391128892892, "end": 0.0005962404825466871, "tip": "2048 B tiles 16x16 [30/32]\n557 \u00b5s + 39.5 \u00b5s\nholding 1.05 MB"}, {"lane": "core", "start": 0.0005764897977179881, "end": 0.0005962404825466871, "tip": "2048 B tiles 16x16 [30/32]\n576 \u00b5s + 19.8 \u00b5s\n4.29 GOP @ 217 TOP/s"}, {"lane": "dram", "start": 0.0005764897977179881, "end": 0.0005772097354037049, "tip": "2048 B tiles 16x16 [31/32]\n576 \u00b5s + 720 ns\n1.25 MB @ 1.73 TB/s"}, {"lane": "sram", "start": 0.0005764897977179881, "end": 0.0006159911673753861, "tip": "2048 B tiles 16x16 [31/32]\n576 \u00b5s + 39.5 \u00b5s\nholding 1.05 MB"}, {"lane": "core", "start": 0.0005962404825466871, "end": 0.0006159911673753861, "tip": "2048 B tiles 16x16 [31/32]\n596 \u00b5s + 19.8 \u00b5s\n4.29 GOP @ 217 TOP/s"}, {"lane": "dram", "start": 0.0005962404825466871, "end": 0.0005969604202324039, "tip": "2048 B tiles 16x16 [32/32]\n596 \u00b5s + 720 ns\n1.25 MB @ 1.73 TB/s"}, {"lane": "sram", "start": 0.0005962404825466871, "end": 0.0006357418522040851, "tip": "2048 B tiles 16x16 [32/32]\n596 \u00b5s + 39.5 \u00b5s\nholding 1.05 MB"}, {"lane": "core", "start": 0.0006159911673753861, "end": 0.0006357418522040851, "tip": "2048 B tiles 16x16 [32/32]\n616 \u00b5s + 19.8 \u00b5s\n4.29 GOP @ 217 TOP/s"}], "total": 0.0006357418522040851};
+
+const LEFT = 210, RIGHT = 190, ROW = 42, TOP = 26, BOT = 30;
+const COLOUR = {dram: "#2a78d6", sram: "#8a8983", core: "#eb6834"};
+const svg = document.getElementById("chart");
+const tip = document.getElementById("tip");
+const wrap = document.getElementById("wrap");
+const NS = "http://www.w3.org/2000/svg";
+
+let view = {lo: 0, hi: DATA.total};   // visible time window, seconds
+let width = 0;
+
+function fmtTime(s) {
+  if (s === 0) return "0 s";
+  const u = [[1, "s"], [1e-3, "ms"], [1e-6, "\u00b5s"], [1e-9, "ns"], [1e-12, "ps"]];
+  for (const [scale, name] of u) if (Math.abs(s) >= scale) return trim(s / scale) + " " + name;
+  return trim(s / 1e-12) + " ps";
+}
+function trim(v) {
+  return (Math.abs(v) >= 100 ? v.toFixed(0) : Math.abs(v) >= 10 ? v.toFixed(1) : v.toFixed(2));
+}
+const el = (name, attrs, text) => {
+  const node = document.createElementNS(NS, name);
+  for (const k in attrs) node.setAttribute(k, attrs[k]);
+  if (text !== undefined) node.textContent = text;
+  return node;
+};
+
+function x(t) { return LEFT + (t - view.lo) / (view.hi - view.lo) * (width - LEFT - RIGHT); }
+function tAt(px) { return view.lo + (px - LEFT) / (width - LEFT - RIGHT) * (view.hi - view.lo); }
+// offsetX is relative to the event *target*, which is a bar as soon as the
+// cursor is over one — so zoom would anchor on the wrong instant exactly when
+// you are aiming at something. Measure against the svg instead.
+function localX(e) { return e.clientX - svg.getBoundingClientRect().left; }
+
+function ticks() {
+  const span = view.hi - view.lo, target = 6;
+  const raw = span / target, mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  const step = [1, 2, 2.5, 5, 10].map(m => m * mag).find(s => s >= raw) || 10 * mag;
+  const out = [];
+  for (let t = Math.ceil(view.lo / step) * step; t <= view.hi; t += step) out.push(t);
+  return out;
+}
+
+function draw() {
+  width = svg.clientWidth || svg.parentNode.clientWidth || 1200;
+  const height = TOP + DATA.rows.length * ROW + BOT;
+  svg.setAttribute("height", height);
+  while (svg.firstChild) svg.removeChild(svg.firstChild);
+  const plotW = width - LEFT - RIGHT;
+
+  for (const t of ticks()) {
+    const px = x(t);
+    if (px < LEFT - 1 || px > width - RIGHT + 1) continue;
+    const bottom = TOP + DATA.rows.length * ROW;
+    svg.appendChild(el("line", {class: "tickline", x1: px, x2: px, y1: TOP, y2: bottom}));
+    svg.appendChild(el("text",
+      {class: "tick", x: px, y: height - 10, "text-anchor": "middle"}, fmtTime(t)));
+  }
+
+  DATA.rows.forEach((row, i) => {
+    const y0 = TOP + i * ROW;
+    const end = {x: LEFT - 12, "text-anchor": "end"};
+    svg.appendChild(el("line",
+      {class: "rowline", x1: LEFT, x2: width - RIGHT, y1: y0 + ROW, y2: y0 + ROW}));
+    svg.appendChild(el("text", {...end, class: "rowname", y: y0 + 17}, row.title));
+    svg.appendChild(el("text", {...end, class: "rowdetail", y: y0 + 29}, row.detail));
+    svg.appendChild(el("text", {...end, class: "rowdetail", y: y0 + 39}, row.note));
+    svg.appendChild(el("text", {
+      class: "rowqty" + (row.lane ? "" : " off"), x: width - RIGHT + 12, y: y0 + ROW / 2 + 4,
+    }, row.quantity));
+
+    if (!row.lane) {
+      svg.appendChild(el("rect",
+        {x: LEFT, y: y0 + ROW / 2 - 5, width: plotW, height: 10, fill: "var(--idle)"}));
+      return;
+    }
+    for (const s of DATA.spans) {
+      if (s.lane !== row.lane) continue;
+      if (s.end < view.lo || s.start > view.hi) continue;
+      const x0 = Math.max(x(s.start), LEFT), x1 = Math.min(x(s.end), width - RIGHT);
+      const rect = el("rect", {
+        x: x0, y: y0 + 7, width: Math.max(x1 - x0, 1.2), height: ROW - 16,
+        fill: COLOUR[row.lane], stroke: "var(--surface)", "stroke-width": 0.7,
+      });
+      rect.dataset.tip = s.tip;
+      svg.appendChild(rect);
+    }
+  });
+}
+
+svg.addEventListener("wheel", e => {
+  e.preventDefault();
+  const anchor = tAt(localX(e));
+  const factor = Math.exp(e.deltaY * 0.0015);
+  let lo = anchor - (anchor - view.lo) * factor, hi = anchor + (view.hi - anchor) * factor;
+  // A floor on the window keeps float precision sane at extreme zoom; the
+  // ceiling is the whole run, since there is nothing outside it to look at.
+  if (hi - lo < DATA.total * 1e-6) return;
+  view = {lo: Math.max(lo, -DATA.total * 0.02), hi: Math.min(hi, DATA.total * 1.02)};
+  draw();
+}, {passive: false});
+
+let dragging = null;
+svg.addEventListener("pointerdown", e => {
+  dragging = {px: localX(e), lo: view.lo, hi: view.hi};
+  svg.classList.add("drag"); svg.setPointerCapture(e.pointerId);
+});
+svg.addEventListener("pointerup", e => {
+  dragging = null; svg.classList.remove("drag"); svg.releasePointerCapture(e.pointerId);
+});
+svg.addEventListener("pointermove", e => {
+  if (dragging) {
+    const moved = localX(e) - dragging.px;
+    const shift = moved / (width - LEFT - RIGHT) * (dragging.hi - dragging.lo);
+    view = {lo: dragging.lo - shift, hi: dragging.hi - shift};
+    draw();
+    return;
+  }
+  const target = e.target.dataset && e.target.dataset.tip;
+  if (target) {
+    tip.textContent = target;
+    tip.style.opacity = 1;
+    const box = wrap.getBoundingClientRect();
+    tip.style.left = Math.min(e.clientX - box.left + 14, box.width - 260) + "px";
+    tip.style.top = (e.clientY - box.top + 14) + "px";
+  } else {
+    tip.style.opacity = 0;
+  }
+});
+svg.addEventListener("dblclick", () => { view = {lo: 0, hi: DATA.total}; draw(); });
+addEventListener("resize", draw);
+draw();
+</script>

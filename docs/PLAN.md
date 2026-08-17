@@ -139,8 +139,8 @@ arrow, no milestone re-ordering.
   `compute_dtype()`, which is right for W8A8 and wrong for W8A16; the transformer path was left on
   the old rule deliberately, since changing it moves every mixed-precision number in the repo.
   **Open for Session 5.**
-- **`analysis/pipeline.py` + `kanata.py`** — the tile schedule behind `max(load, compute)`,
-  as a Kanata log for Konata and as a per-chip figure. Constrained to be a *decomposition* of the
+- **`analysis/pipeline.py`** — the tile schedule behind `max(load, compute)`, as a per-chip
+  resource timeline. Constrained to be a *decomposition* of the
   reported numbers, never a second model (D19). It surfaced that the roofline's `max()` omits
   pipeline fill/drain, `min(t_dram, t_compute)/tiles`, now reported separately rather than folded
   into a latency. **Folding it in is Session 5 work**, since it moves every double-buffered result.

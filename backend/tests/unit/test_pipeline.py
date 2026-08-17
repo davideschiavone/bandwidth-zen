@@ -1,4 +1,4 @@
-"""The tile schedule behind the roofline, and its Kanata serialisation.
+"""The tile schedule behind the roofline.
 
 The property that matters throughout: the trace is a *decomposition* of numbers
 the report already published, so it can never disagree with them. Every test
@@ -13,7 +13,6 @@ from bwz.analysis import analyze, idealised, machine_model
 from bwz.analysis.pipeline import Lane, PipelineTrace, Stage, build_trace, tile_count
 from bwz.analysis.roofline import MachineModel
 from bwz.graph import GraphPhase, build_graph
-from bwz.kanata import to_kanata
 from bwz.report import Report
 from bwz.spec import DeploymentSpec, DType, MatmulSpec, load_chip, load_model
 
@@ -197,44 +196,3 @@ def test_coalescing_preserves_the_span() -> None:
     assert coarse.steps == 8
     # Coarser steps mean a larger fill/drain, because fill/drain is one step.
     assert coarse.total_s > fine.total_s
-
-
-def test_kanata_is_well_formed() -> None:
-    """Structural invariants of the log: monotone ticks, every row opened before
-    it is used and retired after, every stage started before it ends."""
-    trace, _ = _trace(_spec(4096, 4096, 4096, "int8"), "chip_b", max_steps=16)
-    text = to_kanata(trace, title="test", resolution=500)
-    lines = [line for line in text.splitlines() if line and not line.startswith("//")]
-
-    assert lines[0] == "Kanata\t0004"
-    assert lines[1] == "C=\t0"
-
-    open_rows: set[str] = set()
-    retired: set[str] = set()
-    active: set[tuple[str, str]] = set()
-    cycle = 0
-    for line in lines[2:]:
-        parts = line.split("\t")
-        kind = parts[0]
-        if kind == "C":
-            step = int(parts[1])
-            assert step > 0
-            cycle += step
-        elif kind == "I":
-            assert parts[1] not in open_rows
-            open_rows.add(parts[1])
-        elif kind == "L":
-            assert parts[1] in open_rows
-        elif kind == "S":
-            assert parts[1] in open_rows and parts[1] not in retired
-            active.add((parts[1], parts[3]))
-        elif kind == "E":
-            assert (parts[1], parts[3]) in active
-            active.discard((parts[1], parts[3]))
-        elif kind == "R":
-            assert parts[1] in open_rows
-            retired.add(parts[1])
-
-    assert open_rows == retired
-    assert not active, f"stages never ended: {active}"
-    assert cycle > 0

@@ -131,15 +131,12 @@ share one datapath — the narrow side saves bytes and buys no throughput.
 See where the time went — one figure per chip, since the schedule is a property of the machine:
 
 ```bash
-make plots                                                  # → docs/plots/
-uv run bwz matmul -M 4096 -N 4096 -K 4096 -c a100_80gb \
-  --kanata run.kanata                                       # write a Kanata trace
-make konata TRACE=backend/run.kanata                        # open it in Konata
+make plots        # → docs/plots/ (PNGs, plus a zoomable timeline-*.html per chip)
 ```
 
 ![A100 roofline](docs/plots/roofline-a100_80gb-fp16.png)
 
-![A100 tile schedule](docs/plots/pipeline-matmul-a100_80gb-fp16.png)
+![A100 resource timeline](docs/plots/timeline-a100_80gb-fp16.png)
 
 The same 4096³ matmul is 4% DRAM-busy on A100 and touches DRAM not at all on `chip_a`, whose 55 MB
 of SRAM holds all of operand B. The spans are a decomposition of the reported latency rather than a

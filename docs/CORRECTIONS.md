@@ -537,3 +537,36 @@ and `make konata` still opens it. It is no longer what the figure is *for*.
 Layout note, since it cost two attempts: row counts vary by chip (five for A100, three for
 `chip_a`), so every vertical position is now derived in **inches** from the row count and converted
 once. Guessing figure fractions put the second register on top of the footer.
+
+---
+
+## D21 — Konata removed; the timeline is our own zoomable page (2026-08-17)
+
+D20 kept the Kanata log as a secondary output. Two things then became clear from use.
+
+**First, it could not answer the question.** Opening `ciao.kan` in Konata shows sixty-four rows
+labelled `6104 B tiles 16x16 [n/64]` and no DRAM row — because the Kanata format has no notion of
+one. Rows are instructions; the lanes inside a row are stage tracks, not hardware. "Where is my
+DRAM row" has no answer in that format, and dedicating one is not a matter of emitting different
+records.
+
+**Second, the reason to want Konata was interactivity**, not its layout: *"the plots you produce
+are not interactive … nor can they be zoomed"*. Correct, and the PNG cannot become so.
+
+Decision (user, 2026-08-17): delete Konata and the Kanata emitter entirely — `bwz/kanata.py`,
+`scripts/konata.sh`, the `--kanata` flags, the `make konata` target, the committed `.kanata` files
+and every mention outside this log — and put the interactivity in an artifact we own.
+`scripts/timeline_html.py` renders the trace as one self-contained HTML page: same
+resource rows as the PNG, with wheel-zoom about the cursor, drag-pan, double-click reset, and a
+hover tooltip carrying each span's bytes, rate and duration. No server, no port, no download, no
+CDN — `file://` is enough. It ships at 256 steps against the PNG's 32, because a static figure has
+to stay legible at one scale and a zoomable one does not.
+
+Renamed at the same time, since it was the direct cause of "I still see the old one": two different
+figures were both called `pipeline-*`. Now `machine-<chip>.png` is the block diagram and
+`timeline-<chip>-<dtype>.{png,html}` is the schedule.
+
+What was actually lost with Konata: nothing this project needs. What was gained by fetching it: a
+pinned-release script, a port allocator and a cache validator, all now deleted. The lesson worth
+keeping is that reaching for a third-party viewer imported its data model along with its features,
+and the data model was the part that did not fit.

@@ -429,19 +429,15 @@ So `max(load, compute)` is the `tiles → ∞` limit, and the error it carries i
 operations end to end, overlapping load and compute only *within* one, because that is the model's
 own schedule (D5a). Its span therefore equals the reported latency exactly.
 
-Two outputs, same data:
-
 ```
-make plots                                                          # docs/plots/pipeline-matmul-*.png
-bwz matmul -M 4096 -N 4096 -K 4096 -c a100_80gb --kanata run.kanata # step detail, for Konata
+make plots        # docs/plots/timeline-<chip>-<dtype>.png
 ```
 
 The figure's rows are **hardware resources** — every memory level and compute unit the profile
 declares — with bytes, bandwidth and operations written on each, because that is the axis an
-architecture comparison needs (`docs/CORRECTIONS.md` D20). The Kanata log is instruction-centric
-and remains available for per-step inspection.
+architecture comparison needs (`docs/CORRECTIONS.md` D20).
 
-![A100 tile schedule](plots/pipeline-matmul-a100_80gb-fp16.png)
+![A100 resource timeline](plots/timeline-a100_80gb-fp16.png)
 
 One figure per chip, because the schedule is a property of the machine: the same 4096³ matmul is
 4% DRAM-busy on A100 and touches DRAM not at all on chip_a, whose 55 MB of SRAM holds all of `B`.

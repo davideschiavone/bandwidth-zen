@@ -2,13 +2,13 @@
 
     uv run --group plots python scripts/plot_pipeline.py --chip a100_80gb
 
-**Rows are resources, not steps.** Konata's view is instruction-centric — one row
-per tile step, stages within the row — which answers "what happened to this tile"
-and not "what was the memory system doing while the array worked". For comparing
-two architectures only the second question matters, so this figure gives every
-declared memory level and every declared compute unit its own row and writes the
-quantity beside it: bytes moved and at what rate, operations retired and at what
-fraction of peak, how much the buffers hold.
+**Rows are resources, not steps.** A per-instruction view — one row per tile step,
+stages within the row — answers "what happened to this tile" and not "what was the
+memory system doing while the array worked". For comparing two architectures only
+the second question matters, so this figure gives every declared memory level and
+every declared compute unit its own row and writes the quantity beside it: bytes
+moved and at what rate, operations retired and at what fraction of peak, how much
+the buffers hold.
 
 Rows come from the chip profile, so the picture shows what the machine *has*, and
 a resource the v1 model does not use is drawn grey rather than quietly omitted.
@@ -33,12 +33,12 @@ from pathlib import Path
 import matplotlib
 import matplotlib.pyplot as plt
 from matplotlib.patches import FancyBboxPatch, Rectangle
+from timeline_html import Box, render
 
 import bwz
 from bwz.analysis import analyze, idealised, machine_model
 from bwz.analysis.pipeline import Lane, PipelineTrace, Span, build_trace
 from bwz.graph import GraphPhase, build_graph
-from bwz.kanata import to_kanata
 from bwz.spec import DeploymentSpec, DType, HardwareSpec, MatmulSpec, load_chip
 from bwz.units import format_bandwidth, format_bytes, format_quantity, format_time
 
@@ -178,6 +178,99 @@ def _ticks(ax: plt.Axes, end: float, count: int) -> None:
     fractions = [i / (count - 1) for i in range(count)]
     ax.set_xticks(fractions)
     ax.set_xticklabels([format_time(f * end) for f in fractions], fontsize=8.5)
+
+
+def _boxes(trace: PipelineTrace, chip: HardwareSpec, dtype: DType) -> list[Box]:
+    """The three headline figures, shared by the PNG and the HTML."""
+    totals, busy, concurrency = trace.totals, trace.busy_s, trace.concurrency
+    span = trace.total_s or 1.0
+    peak = machine_model(chip, dtype).peak_flops_per_s
+    buffers = max(concurrency[Lane.SRAM][1], 1)
+    dram_rate = format_bandwidth(totals[Lane.DRAM] / busy[Lane.DRAM]) if busy[Lane.DRAM] else "—"
+    core_rate = totals[Lane.CORE] / busy[Lane.CORE] if busy[Lane.CORE] else 0.0
+    return [
+        Box(
+            "dram",
+            "COPIED FROM DRAM",
+            format_bytes(totals[Lane.DRAM]),
+            f"{dram_rate} while active\n"
+            f"{format_time(busy[Lane.DRAM])} — {busy[Lane.DRAM] / span:.0%} of the span",
+        ),
+        Box(
+            "sram",
+            "HELD ON CHIP",
+            format_bytes(totals[Lane.SRAM]),
+            f"{buffers} buffers x {format_bytes(totals[Lane.SRAM] / buffers)}\n"
+            f"of {format_bytes(chip.on_chip_capacity_bytes)} capacity",
+        ),
+        Box(
+            "core",
+            "COMPUTED",
+            format_quantity(totals[Lane.CORE], "OP"),
+            f"{format_quantity(core_rate, 'OP/s')} of {format_quantity(peak, 'OP/s')} peak\n"
+            f"{format_time(busy[Lane.CORE])} — {busy[Lane.CORE] / span:.0%} of the span",
+        ),
+    ]
+
+
+def write_html(
+    chip: HardwareSpec,
+    dtype: DType,
+    trace: PipelineTrace,
+    spec: MatmulSpec,
+    command: str,
+    out: Path,
+) -> None:
+    """The same figure, zoomable, as one self-contained file."""
+    rows = rows_for(chip, dtype)
+    page = render(
+        title=f"{chip.name} — {spec.name} at {dtype.value}",
+        subtitle=_subtitle(trace),
+        footer=(
+            f"bwz {bwz.__version__}{_git()} — every bar is a slice of the reported latency: "
+            f"the DRAM row sums to t_dram and the compute row to t_compute. "
+            f"<br><code>$ {command}</code>"
+        ),
+        boxes=_boxes(trace, chip, dtype),
+        rows=[
+            {
+                "title": row.title,
+                "detail": row.detail,
+                "note": row.note,
+                "lane": row.lane.value if row.lane else None,
+                "quantity": _quantity(row, trace),
+            }
+            for row in rows
+        ],
+        spans=[
+            {
+                "lane": span.lane.value,
+                "start": span.start_s,
+                "end": span.end_s,
+                "tip": _tip(span),
+            }
+            for span in trace.spans
+        ],
+        total_s=trace.total_s,
+    )
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(page, encoding="utf-8")
+    print(f"wrote {out}")
+
+
+def _tip(span: Span) -> str:
+    """A span's own numbers, for the hover."""
+    head = f"{span.label}\n{format_time(span.start_s)} + {format_time(span.duration_s)}"
+    if span.lane is Lane.DRAM:
+        return (
+            f"{head}\n{format_bytes(span.bytes_moved)} @ {format_bandwidth(span.rate_bytes_per_s)}"
+        )
+    if span.lane is Lane.CORE:
+        return (
+            f"{head}\n{format_quantity(span.flops, 'OP')} @ "
+            f"{format_quantity(span.rate_flops_per_s, 'OP/s')}"
+        )
+    return f"{head}\nholding {format_bytes(span.resident_bytes)}"
 
 
 def _quantity(row: Row, trace: PipelineTrace) -> str:
@@ -488,7 +581,7 @@ def main() -> None:
     parser.add_argument("--ideal", action="store_true", help="Both de-ratings at 1.0")
     parser.add_argument("--steps", type=int, default=32, help="Steps to draw")
     parser.add_argument("--zoom", type=int, default=6, help="Steps in the zoomed register")
-    parser.add_argument("--kanata", action="store_true", help="Also write the Kanata log")
+    parser.add_argument("--html", action="store_true", help="Also write the zoomable HTML timeline")
     parser.add_argument("--out", type=Path, default=Path("../docs/plots"))
     args = parser.parse_args()
 
@@ -507,15 +600,18 @@ def main() -> None:
             trace,
             spec,
             command,
-            args.out / f"pipeline-matmul-{chip.id}-{dtype.value}.png",
+            args.out / f"timeline-{chip.id}-{dtype.value}.png",
             args.zoom,
         )
-        if args.kanata:
-            target = args.out / f"pipeline-matmul-{chip.id}-{dtype.value}.kanata"
-            target.write_text(
-                to_kanata(trace, title=f"{spec.name} on {chip.name}"), encoding="utf-8"
+        if args.html:
+            write_html(
+                chip,
+                dtype,
+                trace,
+                spec,
+                command,
+                args.out / f"timeline-{chip.id}-{dtype.value}.html",
             )
-            print(f"wrote {target}")
 
 
 if __name__ == "__main__":
