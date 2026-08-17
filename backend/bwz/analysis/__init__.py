@@ -284,6 +284,10 @@ def _assumptions(
         "last reader completes — optimistic.",
         "A phase costs the sum of its operations; no overlap is modelled between one kernel's "
         "prefetch and the previous kernel's arithmetic.",
+        "Traffic is charged in exact bytes. Real DRAM moves whole bursts, so a transfer narrower "
+        "than one — a gather of short embedding rows, any small tensor — costs more than this "
+        "says, and a scattered gather loses row-buffer locality besides. Immaterial at "
+        "Llama-3-8B's 8 kB rows; not immaterial on a narrow model.",
         "DRAM traffic is compulsory traffic: each operand crosses the bus once. Re-reads forced "
         "by tiling a working set that does not fit on chip are not modelled, so a DRAM-bound "
         "latency here is a lower bound (docs/MODEL.md 6.2).",
