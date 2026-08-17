@@ -10,6 +10,8 @@ Regenerate all of them:
 make plots
 ```
 
+Individual invocations and every script flag are in [`../CLI.md`](../CLI.md) §5.
+
 Nothing in `bwz/` imports a plotting library (CLAUDE.md #3). The scripts live in
 `backend/scripts/` and import the engine; the dependency never points the other way. matplotlib is
 in its own `plots` dependency group, so `make test` does not pull it in.

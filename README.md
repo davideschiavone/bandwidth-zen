@@ -52,6 +52,9 @@ make venv         # creates backend/.venv (uv venv --python 3.11 + uv sync --all
 Then either prefix commands with `uv run` from `backend/` (recommended — no activation needed),
 or activate classically with `source backend/.venv/bin/activate`.
 
+**[`docs/CLI.md`](docs/CLI.md) is the full command reference** — every flag, and the exact
+invocation behind every number quoted in this README.
+
 ```bash
 make dev          # backend on :8000, UI on :5173  (no-op until M4 — backend-only phase)
 ```
@@ -255,7 +258,7 @@ backend/bwz/
   profiles/     chip and model YAML
 backend/scripts/  figure generation (imports the engine; the engine never imports it)
 frontend/src/   React + TS dashboard (roofline plot, Gantt, Pareto explorer)
-docs/           MODEL.md · CALIBRATION.md · SCHEMA.md · CORRECTIONS.md · plots/ (+ its README)
+docs/           CLI.md · MODEL.md · CALIBRATION.md · SCHEMA.md · CORRECTIONS.md · plots/
 ```
 
 The analysis core is pure and dependency-free: `analyze()` is a deterministic function of its

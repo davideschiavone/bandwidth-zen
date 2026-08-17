@@ -1,7 +1,8 @@
 # CLAUDE.md
 
 Operating manual for Claude Code working in this repository. Read this before every task.
-The full build specification lives in `PROMPT.md`; the physics lives in `docs/MODEL.md`.
+The full build specification lives in `PROMPT.md`; the physics lives in `docs/MODEL.md`; every
+command and the invocation behind every published number lives in `docs/CLI.md`.
 
 ---
 
@@ -103,6 +104,7 @@ Nothing in `analysis/` may import from `api/`. Nothing in `graph/` may import fr
 | A new model family | `spec/model_spec.py` + `graph/<family>.py`, dispatched in `graph/builder.py` | `docs/SCHEMA.md`, `docs/MODEL.md`, golden test |
 | A new dtype | `spec/dtypes.py` only — widths are definitions, not calibration | `docs/SCHEMA.md` dtype lists |
 | A figure | `backend/scripts/plot_*.py`, never inside `bwz/` | `docs/plots/README.md`, `make plots` |
+| A CLI command or flag | `cli.py` | `docs/CLI.md` — with real output, not a description |
 | A new UI panel | `frontend/src/components/` | `Dashboard.tsx`, vitest |
 
 ---

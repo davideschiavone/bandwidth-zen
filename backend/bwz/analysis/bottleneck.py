@@ -1,4 +1,4 @@
-"""Classification, flip margins and optimisation suggestions. ``docs/MODEL.md`` §6.5.
+"""Classification, flip margins and optimisation suggestions. ``docs/MODEL.md`` §6.6.
 
 The flip margin is the part worth reading twice. A bottleneck label on its own
 is a claim without an error bar: "DRAM-bound" reads identically whether the DRAM

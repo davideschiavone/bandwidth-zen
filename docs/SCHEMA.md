@@ -1,6 +1,7 @@
 # Spec schema reference
 
-YAML/JSON reference for chip profiles, model specs, and deployment specs.
+YAML/JSON reference for chip profiles, model specs, and deployment specs. For the commands that
+consume them, see [`CLI.md`](CLI.md).
 **Authoritative source: the pydantic models in `backend/bwz/spec/`** — this document describes them;
 where the two disagree, the code wins and this file is the bug.
 

@@ -109,7 +109,7 @@ later cross-checks against its summed weight tensors.
   batch; `decode_vs_bandwidth` comes out ~linear in `bw_dram`.
 
 **Done when:** the CLAUDE.md sanity checks hold, and the D8 acceptance demo is reproduced.
-Achieved — see `docs/MODEL.md` §6.6 for the full table. Llama-3-8B fp16 decode on H100 →
+Achieved — see `docs/MODEL.md` §6.7 for the full table. Llama-3-8B fp16 decode on H100 →
 DRAM_BW_BOUND at **165 tok/s** (not the 35–55 CLAUDE.md pairs with its own 16 GB figure: see D12);
 prefill @2k → COMPUTE_BOUND at 67.7%; Gemma-3-4B batch 1 → 0.24% utilisation but **DRAM-bound**,
 with MobileNetV3 on H100 as the LATENCY_BOUND case instead (D13). D8: ridge points 6165 / 1541;
@@ -121,6 +121,41 @@ published reference points (D8).
 Two D8 figures move, both because the systolic tail effect is modelled (D14): `chip_b` is
 COMPUTE_BOUND at batch 1, so its decode rates are 9.3 / 20.6 / 48.2 rather than 11.7 / 34 / 128,
 and the head-to-head margin over chip_a collapses from 33% to ~11%.
+
+## Session 4b — Unplanned, user-driven (2026-08-15/16)
+
+Not in the original plan; added because the questions that came up while reading M3's output could
+not be answered with what M3 shipped. All of it single-chip, all of it inside the M3 dependency
+arrow, no milestone re-ordering.
+
+- **`family: matmul`** (`spec/model_spec.py`, `graph/matmul.py`, `bwz matmul`). A one-operation
+  workload: the smallest thing that exercises the matmul cost model, the systolic tail, the memory
+  planner and the roofline with no network around it to explain a number away. A family rather than
+  a hand-costed `custom` op because `CustomOp` carries no shape, so the tail effect would silently
+  come back as 100% (D17).
+- **Per-operand widths and an accumulator** — `a_dtype`, `b_dtype`, `out_dtype`, plus `DType.INT32`
+  as a storage-only width (D18). Two rules fell out: the result width changes bytes only and never
+  operations, and a mixed-width matmul runs at the *wider* operand. The latter contradicts
+  `compute_dtype()`, which is right for W8A8 and wrong for W8A16; the transformer path was left on
+  the old rule deliberately, since changing it moves every mixed-precision number in the repo.
+  **Open for Session 5.**
+- **`analysis/pipeline.py` + `kanata.py`** — the tile schedule behind `max(load, compute)`,
+  as a Kanata log for Konata and as a per-chip figure. Constrained to be a *decomposition* of the
+  reported numbers, never a second model (D19). It surfaced that the roofline's `max()` omits
+  pipeline fill/drain, `min(t_dram, t_compute)/tiles`, now reported separately rather than folded
+  into a latency. **Folding it in is Session 5 work**, since it moves every double-buffered result.
+- **`--ideal`** (both efficiency de-ratings to 1.0), so a number can be checked against a datasheet
+  by hand and the unfitted part of a prediction is visible rather than baked in.
+- **`scripts/plot_roofline.py`, `scripts/plot_pipeline.py`, `make plots`** — figures computed by
+  calling `analyze()`, outside the package, in their own dependency group.
+- **Docs**: `docs/CLI.md` (every command, with real output), `docs/plots/README.md`, SCHEMA §2.4.
+
+Two documentation bugs found and fixed rather than left: `precision.accumulate` is declared and
+read by nothing, and README's model summary advertised a tile-reuse search and alpha-beta
+collectives as though implemented.
+
+Also fixed: `backend/pyproject.toml` carried `readme = "../README.md"`, which hatchling rejects as
+outside the project directory — `make venv` failed on a fresh clone.
 
 ## Session 5 — Calibration + backtest (early M7 slice)
 
@@ -183,7 +218,11 @@ figures and SGLang/vLLM published H100-cluster throughput. Samsung/edge profiles
 make lint test        # ruff + mypy --strict + pytest, all green
 uv run bwz run --model llama3_8b --chip h100_sxm --batch 1 \
   --input-tokens 2048 --output-tokens 256   # sane report, DRAM_BW_BOUND decode
-uv run bwz compare --chips chip_a,chip_b --models 1b,2b,4b \
+uv run bwz compare --chips chip_a,chip_b \
+  --models gemma3_preset_1b,gemma3_preset_2b,gemma3_4b \
   --input-tokens 512 --context 4096         # D8 head-to-head + crossover S*
+make plots            # figures regenerate and match what is committed
 make validate         # prints predicted-vs-published table, MAPE within target
 ```
+
+Every command in this repo, with the output it actually produces, is in [`CLI.md`](CLI.md).

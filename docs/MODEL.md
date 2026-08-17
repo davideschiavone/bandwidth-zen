@@ -3,6 +3,9 @@
 Every formula the engine uses, with derivation and limits of validity.
 Filled in milestone by milestone; the authoritative build spec is `PROMPT.md` §3.
 
+To *run* any of this rather than read it, see [`CLI.md`](CLI.md), which carries the exact command
+behind every figure quoted below.
+
 ## Status
 
 | Section | Milestone | Status |

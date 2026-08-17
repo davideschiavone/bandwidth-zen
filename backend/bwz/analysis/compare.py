@@ -1,6 +1,6 @@
 """Chip-versus-chip comparison: head-to-head, prefill curves, crossover points.
 
-``docs/MODEL.md`` §6.6. Pure functions over :func:`bwz.analysis.analyze`, so they
+``docs/MODEL.md`` §6.7. Pure functions over :func:`bwz.analysis.analyze`, so they
 inherit its determinism and can be swept in parallel.
 
 The crossover is the question these exist to answer: below some prompt length one
