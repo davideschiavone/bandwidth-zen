@@ -24,7 +24,15 @@ KONATA_URL="https://github.com/shioyadan/Konata/releases/download/${KONATA_VERSI
 
 cache_root="${XDG_CACHE_HOME:-$HOME/.cache}/bandwidth-zen"
 install_dir="${cache_root}/konata-${KONATA_VERSION}"
-helper="${install_dir}/konata-${KONATA_VERSION}/konata.sh"
+payload="${install_dir}/konata-${KONATA_VERSION}"
+helper="${payload}/konata.sh"
+index="${payload}/index.html"
+
+# A cached copy counts only if BOTH pieces are there. The helper refuses to run
+# without index.html beside it, so checking only for the helper turns an
+# interrupted download into a dead end: "index.html was not found next to
+# konata.sh", with no hint that deleting the cache would fix it.
+have_konata() { [ -f "$helper" ] && [ -f "$index" ]; }
 
 usage() {
     cat >&2 <<'EOF'
@@ -53,7 +61,12 @@ for trace in "$@"; do
     fi
 done
 
-if [ ! -f "$helper" ]; then
+if have_konata; then
+    : # cached and complete — no network access at all
+else
+    if [ -e "$install_dir" ]; then
+        echo "konata.sh: cached Konata at ${install_dir} is incomplete; refetching" >&2
+    fi
     echo "konata.sh: fetching Konata ${KONATA_VERSION} into ${install_dir}" >&2
     for tool in curl unzip python3; do
         command -v "$tool" >/dev/null || { echo "konata.sh: need $tool" >&2; exit 1; }
@@ -79,10 +92,27 @@ if [ ! -f "$helper" ]; then
         fi
     fi
 
-    mkdir -p "$install_dir"
-    unzip -oq "$tmp/konata.zip" -d "$install_dir"
-    chmod +x "$helper"
+    # Extract to a staging directory and swap it in, so an interrupted run
+    # leaves either the old cache or none — never a half one that passes the
+    # check above.
+    unzip -oq "$tmp/konata.zip" -d "$tmp/stage"
+    if [ ! -f "$tmp/stage/konata-${KONATA_VERSION}/konata.sh" ] ||
+       [ ! -f "$tmp/stage/konata-${KONATA_VERSION}/index.html" ]; then
+        echo "konata.sh: the archive did not contain konata-${KONATA_VERSION}/{konata.sh,index.html}" >&2
+        exit 1
+    fi
+    chmod +x "$tmp/stage/konata-${KONATA_VERSION}/konata.sh"
+    mkdir -p "$cache_root"
+    rm -rf "$install_dir"
+    mv "$tmp/stage" "$install_dir"
+
+    # `exec` below replaces this shell, so the EXIT trap would never fire and the
+    # downloaded zip would be left behind in /tmp. Clean up while we still can.
+    rm -rf "$tmp"
+    trap - EXIT
 fi
+
+have_konata || { echo "konata.sh: install failed; remove $install_dir and retry" >&2; exit 1; }
 
 # Konata's own helper serves index.html and the traces over 127.0.0.1 and blocks
 # until interrupted. It prints the URL to open.

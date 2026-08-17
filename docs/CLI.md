@@ -285,11 +285,25 @@ make konata TRACE="docs/plots/pipeline-matmul-a100_80gb-fp16.kanata \
 application, not a Python package, so it cannot live in the venv; and its release is 520 KB of
 somebody else's build output, which a checksum pins more honestly than a copy in our tree would.
 
+**Cache behaviour**, which is the whole of what the script decides:
+
+| Cache state | What happens |
+|---|---|
+| complete (`konata.sh` **and** `index.html` present) | used as-is; the network is never touched |
+| absent | fetched, checksummed, extracted |
+| present but incomplete — interrupted download, a deleted file, an empty directory | `cached Konata … is incomplete; refetching` |
+
+The install is staged in a temp directory and swapped in only once both files are verified, so an
+interrupted run leaves either the previous cache or none — never a half one that would pass the
+check and then fail with "index.html was not found next to konata.sh".
+
 - `KONATA_VERSION=v1.2.0 make konata TRACE=…` uses a different release. The hash check is skipped
   then, because the pinned hash belongs to the default.
 - `KONATA_PORT=31000 …` if 30080 is taken.
-- **Offline:** download `konata-v1.1.0.zip` by hand, extract into
-  `~/.cache/bandwidth-zen/konata-v1.1.0/`, and the script never touches the network.
+- **Offline:** download `konata-v1.1.0.zip` by hand and `unzip` it into
+  `~/.cache/bandwidth-zen/konata-v1.1.0/`, giving
+  `~/.cache/bandwidth-zen/konata-v1.1.0/konata-v1.1.0/index.html`. The script then never reaches
+  the network. A failed download prints that path.
 
 ### Reading it
 
