@@ -110,14 +110,20 @@ def deployment_of(
         header.append(
             f" * {unit.weight_sets} weight sets per array, {resident} chip-wide: a tile must be"
         )
-        header.append(
-            " * written INTO the array before it can compute, so "
-            + (
-                f"{_int(reloads)} of them are re-written."
-                if reloads
-                else "all of B stays resident."
+        header.append(" * written INTO the array before it can compute.")
+        header.append(" *")
+        # Within ONE pass every tile is written once whether or not it fits: M is
+        # the innermost loop, so a tile is used once and never revisited. What
+        # capacity decides is the cost of the NEXT invocation on the same B.
+        if reloads:
+            header.append(
+                f" * B is {_int(tiles)} tiles and only {resident} fit, so {_int(reloads)} of them"
             )
-        )
+            header.append(" * displace an earlier one. Each is still written once in this pass —")
+            header.append(" * what capacity costs is the NEXT run on the same B: all of it again.")
+        else:
+            header.append(f" * All {_int(tiles)} tiles fit, so B is written once and a second run")
+            header.append(" * on the same weights writes nothing at all.")
     else:
         header.append(" * The array stores no weights: both operands are re-read per instruction,")
         header.append(" * so there is no residency limit on the array itself.")
@@ -174,8 +180,8 @@ for (int w = 0; w < WAVES; ++w) {{
 
     /* ---- DRAM, one port, in issue order (D22) ------------------------- */
     for (int u = 0; u < UNITS; ++u) {{
-{set_line}        load_B(u, tile(w, u));        /* {b_bytes} — solid bar   */
-        load_A(u, tile(w, u));        /* {a_bytes} — hatched bar */
+{set_line}        load_B(u, tile(w, u));        /* {b_bytes} — solid bar; each tile fetched once */
+        load_A(u, kslice(w));         /* {a_bytes} — hatched bar; this wave's share of A */
 {write}    }}
 
     /* ---- the arrays, all UNITS of them at once ------------------------ */

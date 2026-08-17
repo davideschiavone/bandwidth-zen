@@ -66,7 +66,10 @@ def test_the_listing_quotes_the_tile_and_wave_counts_it_computed() -> None:
     """The text and the fields cannot disagree — they are the same numbers.
 
     8192-cubed INT8 on Metis: ceil(8192/512)^2 = 256 tiles over 4 AI cores is
-    64 waves, and 256 tiles against 16 array-resident ones is 240 re-writes.
+    64 waves, and 256 tiles against 16 array-resident ones means 240 displace an
+    earlier tile — NOT 240 extra writes. Within one pass M is innermost, so each
+    tile serves all M rows once and is never revisited; the listing has to say
+    that rather than imply a re-write (D30 correction).
     """
     _chip, _machine, _graph, _trace, listing = _run("metis_aipu", 8192, 8192, 8192)
 
@@ -76,7 +79,8 @@ def test_the_listing_quotes_the_tile_and_wave_counts_it_computed() -> None:
     assert "#define TILES        256" in listing.code
     assert "#define WAVES        64" in listing.code
     assert "#define UNITS        4" in listing.code
-    assert "240 of them are re-written" in listing.code
+    assert "256 tiles and only 16 fit, so 240 of them" in listing.code
+    assert "Each is still written once in this pass" in listing.code
 
 
 def test_an_imc_array_gets_weight_sets_and_a_write_and_a_tensor_core_does_not() -> None:

@@ -292,10 +292,12 @@ def _assumptions(
         (
             f"{machine.unit.name} holds {machine.unit.weight_sets} weight tiles per array and "
             f"{machine.unit.resident_tile_capacity()} across the chip. An in-memory-compute "
-            f"weight cannot join a MAC until it has been written into a bank, so an operation "
-            f"needing more tiles than that must re-write the array as it runs. The time for those "
-            f"re-writes is not charged: it would need an on-chip bandwidth term, which the v1 "
-            f"machine model does not have (D5b, D30)."
+            f"weight cannot join a MAC until it has been written into a bank. Within one pass "
+            f"every tile is written exactly once whether or not it fits, since M is the innermost "
+            f"loop and a tile is never revisited; what the capacity decides is the cost of the "
+            f"NEXT run on the same weights — free if B fits, all of it again if it does not. "
+            f"Neither the writes nor that reuse are charged any time: both need an on-chip "
+            f"bandwidth term, which the v1 machine model does not have (D5b, D30)."
             if machine.unit.weight_sets > 1
             else f"{machine.unit.name} stores no weights of its own — operands are read per "
             f"instruction — so there is no weight-residency limit on the array itself (D30)."

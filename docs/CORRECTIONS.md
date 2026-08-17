@@ -956,13 +956,37 @@ intermediate register file (RF) usage". There is no persistent weight store in t
 which is exactly why a GPU can stream 16 GB of weights per token and Metis cannot. So `weight_sets`
 stays 1 on every GPU profile and the term is inert there by physics, not by omission.
 
-**Modelled: the capacity. Not modelled: the reload time.** A 4096-cubed INT8 matmul on Metis is 64
-tiles against 16 resident, so 48 tiles — 12.6 MB — must be re-written into the arrays mid-operation.
-Charging that needs a bandwidth on the L1-to-IMC path, and v1 has no on-chip bandwidth term by
-explicit decision (D5a, D5b). The paper publishes the *activation* feed (512 bits/cycle/core from
-L1) but not the weight-write port. So the reload capacity is disclosed in `report.assumptions` and
-the time is not charged. Trigger to revisit: a published weight-write bandwidth, at which point D5b
-reopens with a sourced number instead of an estimate.
+**Modelled: the capacity. Not modelled: the write time.** A 4096-cubed INT8 matmul on Metis is 64
+tiles against 16 resident, so 48 of them displace an earlier tile. Charging the writes needs a
+bandwidth on the L1-to-IMC path, and v1 has no on-chip bandwidth term by explicit decision
+(D5a, D5b). The paper publishes the *activation* feed (512 bits/cycle/core from L1) but not the
+weight-write port. So the capacity is disclosed in `report.assumptions` and the time is not charged.
+Trigger to revisit: a published weight-write bandwidth, at which point D5b reopens with a sourced
+number instead of an estimate.
+
+> **Correction (2026-08-17), from a user's question that I answered wrongly first.** This paragraph
+> originally said those 48 tiles "must be **re**-written … mid-operation", and D32's listing printed
+> "240 of them are re-written". Both are false. The question that exposed it was the obvious one:
+> *why load B every wave if three weight sets are still holding tiles?*
+>
+> **Within one pass every tile is written exactly once, whether or not it fits.** `M` is the
+> innermost loop, so a B tile serves all `M` rows and is then never revisited — walking the wave
+> schedule confirms 256 distinct tiles, 256 total writes, none written twice. Exceeding the array's
+> capacity costs **nothing** in a single pass; the tiles simply displace one another as they go.
+>
+> What the capacity actually decides is the cost of the **next invocation on the same weights**:
+>
+> | B | fits the 16 slots? | first run | second run |
+> |---|---|---|---|
+> | ≤ 16 tiles (≤ 2048x2048 int8) | yes | write once | **0 writes** |
+> | 17 tiles | no | write 17 | write 17 again |
+> | 256 tiles (8192-cubed) | no | write 256 | write 256 again |
+>
+> That is the real significance of 4 MiB of D-IMC, and it is an **inference** threshold rather than
+> a matmul one: a CNN layer whose weights fit is written into the arrays once and every subsequent
+> frame streams only activations. Which is exactly the design point the paper's 2502 FPS ResNet-50
+> sits at, and exactly what a one-shot `bwz matmul` cannot show. The engine still models neither
+> side — same missing on-chip bandwidth — but it now says the right thing about which one matters.
 
 **Why the activation stream is not a separate term.** The input feeder takes 512 one-bit activations
 per cycle per core and accumulates over 8 cycles — 512 INT8 activations per 8 cycles, which is
