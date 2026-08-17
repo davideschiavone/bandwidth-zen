@@ -339,18 +339,30 @@ def write_html(
 
 
 def _tip(span: Span) -> str:
-    """A span's own numbers, for the hover."""
-    head = f"{span.label}\n{format_time(span.start_s)} + {format_time(span.duration_s)}"
+    """A span's own numbers, for the hover.
+
+    The first line names the transaction — LOAD, STORE, EXEC, HOLD — because a
+    bar's colour tells you which resource it is on and nothing about what it was
+    doing there.
+    """
+    when = f"{format_time(span.start_s)} + {format_time(span.duration_s)}"
     if span.lane is Lane.DRAM:
+        kind = "STORE — result written back" if span.stage is Stage.STORE else "LOAD — operands in"
         return (
-            f"{head}\n{format_bytes(span.bytes_moved)} @ {format_bandwidth(span.rate_bytes_per_s)}"
+            f"{kind}\n{span.label}\n{when}\n"
+            f"{format_bytes(span.bytes_moved)} @ {format_bandwidth(span.rate_bytes_per_s)}"
         )
     if span.lane is Lane.CORE:
+        kind = f"EXEC — {span.op_type}" if span.stage is Stage.EXEC else "DISPATCH — kernel launch"
         return (
-            f"{head}\n{format_quantity(span.flops, 'OP')} @ "
+            f"{kind}\n{span.label}\n{when}\n"
+            f"{format_quantity(span.flops, 'OP')} @ "
             f"{format_quantity(span.rate_flops_per_s, 'OP/s')}"
         )
-    return f"{head}\nholding {format_bytes(span.resident_bytes)}"
+    return (
+        f"HOLD — {span.op_type or 'tile'} on chip\n{span.label}\n{when}\n"
+        f"holding {format_bytes(span.resident_bytes)}"
+    )
 
 
 def _quantity(row: Row, trace: PipelineTrace) -> str:
