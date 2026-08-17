@@ -1,7 +1,7 @@
 # A transformer encoder small enough to count by hand.
 #
 # Not a real model — every dimension is chosen so the arithmetic stays in small
-# integers, so `bwz run --model tiny_encoder --show-ops 20` can be checked line
+# integers, so `bwz run --model single_layer_encoder --show-ops 20` can be checked line
 # by line against a calculator. Deliberately the plainest configuration the spec
 # allows: one layer, a non-gated FFN (2 matrices, not 3), tied embeddings (one
 # table, not two), no positional weights.
@@ -35,9 +35,9 @@
 # Check it with (--show-ops 20 just asks for more lines than the 14 ops there are;
 # an encoder has one phase, so output_tokens and phase do not apply):
 #
-#   bwz run --model tiny_encoder --chip a100_80gb --input-tokens 4 --show-ops 20 --ideal
-id: tiny_encoder
-name: Tiny encoder (hand-countable)
+#   bwz run --model single_layer_encoder --chip a100_80gb --input-tokens 4 --show-ops 20 --ideal
+id: single_layer_encoder
+name: Single-layer encoder (hand-countable)
 family: transformer_encoder
 hypothetical: true
 notes: >-

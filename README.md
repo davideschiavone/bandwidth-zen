@@ -268,13 +268,26 @@ edge NPU, a server CPU baseline. Each profile cites its datasheet in `source_url
 **Models:** GPT-3, BERT-base, Llama-3-8B, Llama-2-70B, Mistral-7B, Mixtral-8x7B, Gemma-4,
 MobileNetV3, ViT-B/16, Stable Diffusion U-Net.
 
-Plus **`tiny_encoder`** — a one-layer encoder sized so every number can be checked with a
+Plus **`single_layer_encoder`** — a one-layer encoder sized so every number can be checked with a
 calculator: 664 parameters, 5280 operations over 4 tokens, with the derivation in the profile's own
 header.
 
 ```bash
-uv run bwz run --model tiny_encoder --chip a100_80gb --input-tokens 4 --show-ops 20 --ideal
+uv run bwz run --model single_layer_encoder --chip a100_80gb --input-tokens 4 --show-ops 20 --ideal
 ```
+
+Or size one from the command line, the way `bwz matmul` takes M/N/K — the shape is arguments, so a
+dimension can be changed and its effect read straight off:
+
+```bash
+uv run bwz single-layer-encoder --chip a100_80gb --ideal          # 664 params, 5280 ops
+uv run bwz single-layer-encoder --chip a100_80gb --ideal --ffn 32 # 920 params, 7392 ops
+uv run bwz single-layer-encoder --chip a100_80gb --ideal -S 16    # 664 params, 29184 ops
+```
+
+Flags: `--hidden --heads --head-dim --ffn --vocab --tokens --batch --ffn-type --norm --tie/--untie
+--weights --ideal --show-ops`. One layer always — that is the point; for anything deeper write a
+profile.
 
 `--show-ops 20` just asks for more lines than the 14 operations there are. `--output-tokens` and
 `--phase` are not needed: an encoder has one phase, and the report says so in its assumptions if

@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 
 import typer
+from pydantic import ValidationError
 from rich import box
 from rich.console import Console
 from rich.table import Table
@@ -29,8 +30,10 @@ from bwz.spec import (
     CNNSpec,
     CustomSpec,
     DType,
+    FFNType,
     HardwareSpec,
     MatmulSpec,
+    NormType,
     SpecLoadError,
     TransformerSpec,
     bytes_per_element,
@@ -281,6 +284,25 @@ def run(
 
     summary = report.summary
     assert summary is not None
+    _present(report, chip, weights, ideal=ideal, show_ops=show_ops)
+
+
+def _present(
+    report: Report,
+    chip_id: str,
+    weights: DType,
+    *,
+    ideal: bool,
+    show_ops: int,
+) -> None:
+    """The body of a report: summary, memory, why, operations, assumptions.
+
+    Shared so that every command that produces a ``Report`` presents it the same
+    way — a reader should not have to learn a second layout because the shape
+    came from arguments rather than a profile.
+    """
+    summary = report.summary
+    assert summary is not None
     console.print(_summary_table(report))
     if summary.ttft_s is not None:
         console.print(f"  TTFT      {format_time(summary.ttft_s)}")
@@ -302,9 +324,11 @@ def run(
     for margin in report.flip_margins:
         flag = " [yellow](rests on an estimated input)[/yellow]" if margin.rests_on_estimate else ""
         console.print(f"  • {margin.description}{flag}")
+    machine = machine_model(
+        _chip_for(chip_id, ideal), compute_dtype(_chip_for(chip_id, ideal), weights, weights)
+    )
     for phase_result in report.phases:
-        governing = compute_dtype(_chip_for(chip, ideal), weights, weights)
-        for hint in suggestions(phase_result, machine_model(_chip_for(chip, ideal), governing)):
+        for hint in suggestions(phase_result, machine):
             console.print(f"  → {hint}")
 
     if show_ops:
@@ -557,6 +581,126 @@ def matmul(
     console.print(f"\n[bold]Assumptions[/bold] ({len(report.assumptions)})")
     for assumption in report.assumptions:
         console.print(f"  • {assumption}", highlight=False)
+
+
+@app.command(name="single-layer-encoder")
+def single_layer_encoder(
+    chip: str = typer.Option(..., "--chip", "-c", help="Chip profile id or path"),
+    hidden: int = typer.Option(8, "--hidden", "-d", help="Model width"),
+    heads: int = typer.Option(2, "--heads", help="Attention heads"),
+    head_dim: int | None = typer.Option(None, "--head-dim", help="Defaults to hidden // heads"),
+    ffn: int = typer.Option(16, "--ffn", help="FFN inner width"),
+    vocab: int = typer.Option(16, "--vocab", help="Vocabulary size"),
+    tokens: int = typer.Option(4, "--tokens", "-S", help="Sequence length"),
+    batch: int = typer.Option(1, "--batch", "-b"),
+    ffn_type: FFNType = typer.Option(FFNType.RELU, "--ffn-type"),
+    norm: NormType = typer.Option(NormType.RMSNORM, "--norm"),
+    tie: bool = typer.Option(True, "--tie/--untie", help="Tie the embedding and output tables"),
+    weights: DType = typer.Option(DType.FP16, "--weights", help="Precision"),
+    ideal: bool = typer.Option(
+        False,
+        "--ideal",
+        help="Zero every unfitted calibration constant — both efficiencies and the "
+        "per-dispatch overhead: a hardware ceiling, not a prediction",
+    ),
+    show_ops: int = typer.Option(20, "--show-ops", help="Show the N most expensive operations"),
+    as_json: bool = typer.Option(False, "--json", help="Emit the raw Report as JSON"),
+) -> None:
+    """One encoder layer, sized from the command line, small enough to count by hand.
+
+    The transformer counterpart of `bwz matmul`: the shape is arguments rather
+    than a profile, so a dimension can be changed and its effect read straight
+    off. One layer, always — that is the point. For anything deeper, write a
+    profile and use `bwz run`.
+
+    Bidirectional attention over all S tokens, no KV cache and no LM head: an
+    encoder has no later step to reuse a cache for, and what sits on top of it is
+    task-specific (docs/CORRECTIONS.md D24).
+    """
+    try:
+        spec = TransformerSpec.model_validate(
+            {
+                "id": "single_layer_encoder_cli",
+                "name": f"1-layer encoder d={hidden} h={heads} ffn={ffn}",
+                "family": "transformer_encoder",
+                "hypothetical": True,
+                "params": {
+                    "layers": 1,
+                    "hidden": hidden,
+                    "heads": heads,
+                    "head_dim": head_dim,
+                    "ffn_hidden": ffn,
+                    "ffn_type": ffn_type,
+                    "vocab": vocab,
+                    "max_context": max(tokens, 1),
+                    "norm": norm,
+                    "positional": "none",
+                    "tie_embeddings": tie,
+                },
+            }
+        )
+        deployment = DeploymentSpec.model_validate(
+            {
+                "batch": batch,
+                "input_tokens": tokens,
+                "output_tokens": 0,
+                "phase": Phase.PREFILL,
+                "precision": {"weights": weights, "activations": weights, "kv_cache": weights},
+            }
+        )
+        report = _report_for(spec, chip, deployment, ideal=ideal)
+    except (SpecLoadError, ValidationError) as exc:
+        console.print(f"[red]bwz:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    if as_json:
+        console.print_json(report.to_json())
+        return
+    if not report.feasible:
+        console.print("[red]Infeasible.[/red]")
+        for reason in report.infeasibility:
+            console.print(f"  • {reason}")
+        raise typer.Exit(code=2)
+
+    console.print(_shape_table(spec, deployment))
+    _present(report, chip, weights, ideal=ideal, show_ops=show_ops)
+
+
+def _shape_table(spec: TransformerSpec, deployment: DeploymentSpec) -> Table:
+    """Where every parameter is, as a sum a reader can check.
+
+    The point of sizing a model from the command line is watching one term move,
+    so the terms are listed rather than only their total.
+    """
+    p = spec.params
+    table = Table(title=f"{spec.name}, S={deployment.input_tokens}", box=box.SIMPLE)
+    table.add_column("what")
+    table.add_column("parameters", justify="right")
+    table.add_column("derivation")
+    table.add_row(
+        "Q, K, V, O",
+        f"{p.attention_params_per_layer():,}",
+        f"{p.hidden}x{p.q_width} + 2 x {p.hidden}x{p.kv_width} + {p.q_width}x{p.hidden}",
+    )
+    table.add_row(
+        "FFN",
+        f"{p.ffn_params_per_layer():,}",
+        f"{p.ffn_type.n_matrices} x {p.hidden} x {p.ffn_hidden}",
+    )
+    table.add_row(
+        "norms",
+        f"{p.norm_params_per_layer():,}",
+        f"2 x {p.norm.value} over {p.hidden} channels",
+    )
+    table.add_row("[bold]per layer[/bold]", f"[bold]{p.params_per_layer():,}[/bold]", "")
+    table.add_row(
+        "embeddings",
+        f"{p.embedding_params():,}",
+        f"{p.vocab} x {p.hidden}" + (", tied" if p.tie_embeddings else ", untied so x2"),
+    )
+    table.add_row("final norm", f"{p.norm_params_per_layer() // 2:,}", "")
+    table.add_row("[bold]total[/bold]", f"[bold]{spec.parameter_count():,}[/bold]", "")
+    return table
 
 
 @app.command()

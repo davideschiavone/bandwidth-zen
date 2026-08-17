@@ -664,10 +664,10 @@ token-by-token phase to separate. Now encoders return `(PREFILL,)`.
 MLM head, a pooler — is task-specific. Counting one here would be inventing a layer, so the head is
 built for decoders only.
 
-Ships with `profiles/models/tiny_encoder.yaml`: one layer, hidden 8, 2 heads of 4, FFN 16,
+Ships with `profiles/models/single_layer_encoder.yaml`: one layer, hidden 8, 2 heads of 4, FFN 16,
 vocab 16, tied embeddings, ReLU FFN. Small enough that every figure is a product of two small
 integers — **664 parameters** and **5280 operations** over 4 tokens — with the full derivation in
-the profile's own header and in `tests/unit/test_tiny_encoder.py`, which recomputes both from the
+the profile's own header and in `tests/unit/test_single_layer_encoder.py`, which recomputes both from the
 dimensions rather than asserting what the engine happened to produce.
 
 **It was given a KV cache.** K and V were tagged `KV_CACHE`, so the memory plan reported a

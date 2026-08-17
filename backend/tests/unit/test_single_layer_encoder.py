@@ -46,7 +46,7 @@ def test_parameter_count_by_hand() -> None:
 
     assert (attention, ffn, norms, per_layer) == (256, 256, 16, 528)
     assert total == 664
-    assert load_model("tiny_encoder").parameter_count() == total
+    assert load_model("single_layer_encoder").parameter_count() == total
 
 
 def test_operation_count_by_hand() -> None:
@@ -74,7 +74,7 @@ def test_operation_count_by_hand() -> None:
     assert (projections, ffn, attention, norms) == (2048, 2048, 672, 384)
     assert total == 5280
 
-    report = analyze(load_model("tiny_encoder"), load_chip("a100_80gb"), _deployment())
+    report = analyze(load_model("single_layer_encoder"), load_chip("a100_80gb"), _deployment())
     assert report.phases[0].flops == pytest.approx(total)
 
 
@@ -85,13 +85,51 @@ def test_attention_is_bidirectional() -> None:
     scores all 16. Getting that wrong would understate attention by 37.5% here
     and by nearly half at long sequences.
     """
-    graph = build_graph(load_model("tiny_encoder"), _deployment(), GraphPhase.PREFILL)
+    graph = build_graph(load_model("single_layer_encoder"), _deployment(), GraphPhase.PREFILL)
     attention = next(op for op in graph.ops if op.op_type is OpType.ATTENTION)
     assert isinstance(attention.attrs, AttentionAttrs)
 
     assert attention.attrs.causal is False
     scored = HEADS * TOKENS * TOKENS
     assert scored == 32  # a causal decoder would score 2 * 10 = 20
+
+
+def test_the_cli_shape_matches_the_profile() -> None:
+    """`bwz single-layer-encoder` with its defaults is the shipped profile.
+
+    The command exists so a dimension can be changed and its effect read off;
+    the profile exists so the derivation has somewhere to live. They must not
+    drift apart.
+    """
+    from bwz.spec import TransformerSpec
+
+    cli = TransformerSpec.model_validate(
+        {
+            "id": "x",
+            "name": "x",
+            "family": "transformer_encoder",
+            "hypothetical": True,
+            "params": {
+                "layers": 1,
+                "hidden": HIDDEN,
+                "heads": HEADS,
+                "ffn_hidden": FFN,
+                "ffn_type": "relu",
+                "vocab": VOCAB,
+                "max_context": TOKENS,
+                "norm": "rmsnorm",
+                "positional": "none",
+                "tie_embeddings": True,
+            },
+        }
+    )
+    profile = load_model("single_layer_encoder")
+    assert cli.parameter_count() == profile.parameter_count() == 664
+
+    chip = load_chip("a100_80gb")
+    assert analyze(cli, chip, _deployment()).phases[0].flops == pytest.approx(
+        analyze(profile, chip, _deployment()).phases[0].flops
+    )
 
 
 def test_an_encoder_has_no_kv_cache() -> None:
@@ -102,10 +140,10 @@ def test_an_encoder_has_no_kv_cache() -> None:
     read again, and the planner tracks cache separately from activations, so it
     also skewed the residency waterfall.
     """
-    report = analyze(load_model("tiny_encoder"), load_chip("a100_80gb"), _deployment())
+    report = analyze(load_model("single_layer_encoder"), load_chip("a100_80gb"), _deployment())
     assert report.memory.kv_cache_bytes == 0.0
 
-    graph = build_graph(load_model("tiny_encoder"), _deployment(), GraphPhase.PREFILL)
+    graph = build_graph(load_model("single_layer_encoder"), _deployment(), GraphPhase.PREFILL)
     assert not any("cache" in name for name in graph.tensors)
 
 
@@ -116,7 +154,7 @@ def test_an_encoder_has_one_phase_and_no_lm_head() -> None:
     encoder — classifier, MLM head, pooler — is task-specific, so counting one
     would be inventing a layer.
     """
-    model = load_model("tiny_encoder")
+    model = load_model("single_layer_encoder")
     assert phases_for(model, _deployment()) == (GraphPhase.PREFILL,)
 
     graph = build_graph(model, _deployment(), GraphPhase.PREFILL)
