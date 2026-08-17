@@ -31,7 +31,7 @@ from bwz.spec.deployment import DeploymentSpec
 from bwz.spec.hardware_spec import HardwareSpec
 from bwz.spec.loaders import AnyModelSpec
 from bwz.spec.model_spec import MatmulSpec, ModelFamily, TransformerSpec
-from bwz.units import format_bytes
+from bwz.units import format_bytes, format_quantity
 
 __all__ = [
     "MachineModel",
@@ -251,6 +251,23 @@ def _assumptions(
         f"assumed to stream from DRAM even where on-chip capacity could hold them.",
         f"Peak throughput is the maximum over compute units, not their sum: "
         f"{machine.unit.name} at {machine.dtype.value}.",
+        (
+            f"Matrix work (matmul, attention, conv) runs on {machine.unit.name} at "
+            f"{format_quantity(machine.effective_flops_per_s, 'OP/s')}; norms, activations and "
+            f"other elementwise work runs on {machine.vector_unit.name} at "
+            f"{format_quantity(machine.effective_vector_flops_per_s, 'OP/s')} — a tensor core "
+            f"does matrix-multiply-accumulate and nothing else (D27)."
+            if machine.has_vector_unit
+            else f"{machine.chip.name} declares no non-systolic compute unit, so elementwise and "
+            f"transcendental work is charged at the array's rate. That is optimistic: such work "
+            f"does not use the array (D27)."
+        ),
+        "Non-linear functions — GELU's erf, softmax's exp, RMSNorm's rsqrt — are charged as plain "
+        "arithmetic at the vector rate. Hardware without a special-function unit evaluates them by "
+        "polynomial approximation over many ALU ops, and hardware with one typically runs it at a "
+        "fraction of the ALU rate; no shipped profile declares either figure, so the cost here is "
+        "a lower bound. On Llama-3-8B prefill all non-matrix work is 1.4% of the phase, so a 4x "
+        "transcendental penalty would move the total by 4% (D27).",
         f"Achieved-throughput derating and shape utilisation are applied separately and multiply; "
         f"a batch-1 GEMM on a {machine.unit.systolic_dims} array loses far more to shape than to "
         f"derating.",

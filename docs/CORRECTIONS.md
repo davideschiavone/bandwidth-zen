@@ -707,3 +707,33 @@ feature worse than useless.
 
 The pseudo-C is meant to compile if pasted, so it carries no nested `/* */` (C forbids them) and a
 test enforces that too. Indices and extents are real; types and memory layout are not.
+
+---
+
+## D27 — A tensor core does matrix-multiply-accumulate and nothing else (2026-08-17)
+
+Asked whether a GELU can run on the tensor core. It cannot, and the engine was charging it as if it
+could.
+
+`machine_model` picked one unit — the highest-throughput one supporting the dtype — and
+`op_roofline` costed **every** operation against it. On A100 that meant norms, GELU, softmax tails
+and residuals were charged at the tensor cores' 312 TOP/s rather than the CUDA cores' 19.5 TOP/s:
+**16x too fast**. The error compounded, because `operation_utilisation` returns 1.0 for non-GEMM
+operations, so a norm received 100% of a peak it can never reach.
+
+Now `MachineModel` carries two engines. `MATRIX_OP_TYPES` — matmul, attention, conv — run on the
+array; everything else runs on the fastest **non-systolic** unit the profile declares.
+Llama-3-8B's `attn_norm` goes from 38.4 ns to 615 ns, which is the honest figure.
+
+A profile declaring only a systolic array — `chip_a` — has nowhere to put elementwise work, so it
+is still charged at the array's rate and the assumptions drawer says exactly that. Adding a vector
+unit to those profiles needs a published figure nobody has yet.
+
+**Left open, and stated rather than buried:** the per-element constants in `calibration.py` are
+*algebraic* operation counts, not machine instructions. A GELU is 8 arithmetic operations on paper;
+hardware without a special-function unit evaluates its erf by polynomial approximation over many
+more ALU ops, and hardware with one typically runs it at a fraction of the ALU rate. No shipped
+profile declares either number, so every non-linear cost is a lower bound. The bound is small for a
+transformer and not for everything: all non-matrix work is 1.4% of Llama-3-8B prefill, so even a 4x
+transcendental penalty moves the phase by 4% — but on a model whose arithmetic is mostly
+activations, or an NPU with no vector unit at all, it is the whole story.

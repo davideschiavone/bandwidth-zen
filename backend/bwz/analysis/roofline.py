@@ -34,6 +34,13 @@ from bwz.report import Bound, OpResult
 from bwz.spec.dtypes import DType
 from bwz.spec.hardware_spec import ComputeUnit, HardwareSpec
 
+MATRIX_OP_TYPES = frozenset({OpType.MATMUL, OpType.ATTENTION, OpType.CONV})
+"""Operations a systolic array or tensor core can execute. Everything else —
+norms, GELU, softmax tails, residuals, pooling — is elementwise or transcendental
+work for the vector units, which on A100 run 16x slower than the tensor cores
+(19.5 against 312 TOP/s). Charging them at the matrix rate overstated them by
+that factor (docs/CORRECTIONS.md D27)."""
+
 DISPATCHED_OP_TYPES = frozenset(
     {OpType.MATMUL, OpType.ATTENTION, OpType.CONV, OpType.POOL, OpType.EMBEDDING}
 )
@@ -49,10 +56,27 @@ class MachineModel:
     chip: HardwareSpec
     dtype: DType
     unit: ComputeUnit
+    """The matrix engine: what a GEMM runs on, and what the headline peak quotes."""
     peak_flops_per_s: float
     effective_flops_per_s: float
+    vector_unit: ComputeUnit
+    """Where non-matrix work goes. The same unit when the profile declares only
+    one, which is optimistic and recorded as an assumption."""
+    effective_vector_flops_per_s: float
     effective_bandwidth_bytes_per_s: float
     per_op_overhead_s: float
+
+    def rate_for(self, op_type: OpType) -> float:
+        """Effective throughput available to *op_type*."""
+        return (
+            self.effective_flops_per_s
+            if op_type in MATRIX_OP_TYPES
+            else self.effective_vector_flops_per_s
+        )
+
+    @property
+    def has_vector_unit(self) -> bool:
+        return self.vector_unit is not self.unit
 
     @property
     def ridge_point(self) -> float:
@@ -122,9 +146,17 @@ def machine_model(chip: HardwareSpec, dtype: DType) -> MachineModel:
         else DEFAULT_KERNEL_LAUNCH_OVERHEAD_S
     )
     peak = chip.peak_flops_per_s(dtype)
-    unit = max(
-        (u for u in chip.compute_units if u.supports(dtype)),
-        key=lambda u: u.peak_flops_per_s(chip.clock_hz, dtype),
+    supported = [u for u in chip.compute_units if u.supports(dtype)]
+    unit = max(supported, key=lambda u: u.peak_flops_per_s(chip.clock_hz, dtype))
+    # The fastest unit that is *not* a systolic array is where elementwise and
+    # transcendental work goes. A profile that declares only an array leaves us
+    # charging that work at the array's rate, which is optimistic and said so in
+    # the assumptions.
+    vector_candidates = [u for u in supported if u.systolic_dims is None]
+    vector = (
+        max(vector_candidates, key=lambda u: u.peak_flops_per_s(chip.clock_hz, dtype))
+        if vector_candidates
+        else unit
     )
     return MachineModel(
         chip=chip,
@@ -132,6 +164,8 @@ def machine_model(chip: HardwareSpec, dtype: DType) -> MachineModel:
         unit=unit,
         peak_flops_per_s=peak,
         effective_flops_per_s=peak * achieved,
+        vector_unit=vector,
+        effective_vector_flops_per_s=vector.peak_flops_per_s(chip.clock_hz, dtype) * achieved,
         effective_bandwidth_bytes_per_s=chip.dram.bandwidth_bytes_per_s * efficiency,
         per_op_overhead_s=overhead,
     )
@@ -168,10 +202,8 @@ def op_roofline(
     t_dram = dram_bytes / machine.effective_bandwidth_bytes_per_s
 
     utilisation = operation_utilisation(op, machine.unit)
-    if cost.flops > 0 and utilisation > 0:
-        t_compute = cost.flops / (machine.effective_flops_per_s * utilisation)
-    else:
-        t_compute = 0.0
+    rate = machine.rate_for(op.op_type)
+    t_compute = cost.flops / (rate * utilisation) if cost.flops > 0 and utilisation > 0 else 0.0
 
     t_fixed = machine.per_op_overhead_s if op.op_type in DISPATCHED_OP_TYPES else 0.0
 
