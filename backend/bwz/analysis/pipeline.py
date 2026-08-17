@@ -236,6 +236,24 @@ def tile_count(op: Operation, machine: MachineModel) -> int:
     return (padded(op.attrs.k, rows) // rows) * (padded(op.attrs.n, cols) // cols)
 
 
+def _engine_work(group: list[OpResult], *, matrix: bool) -> tuple[float, float, str]:
+    """``(seconds, operations, dominant family)`` for one engine's share of *group*.
+
+    The family is picked from the operations that engine actually ran, so a
+    coalesced block reports ``matmul`` on the array and ``norm`` on the vector
+    unit rather than ``matmul`` on both. Returns an empty name when the engine
+    did nothing in this group, and the caller then emits no span for it.
+    """
+    mine = [r for r in group if (r.op_type in MATRIX_OP_TYPES) is matrix]
+    if not mine:
+        return 0.0, 0.0, ""
+    return (
+        sum(r.t_compute_s for r in mine),
+        sum(r.flops for r in mine),
+        max(mine, key=lambda r: r.flops).op_type.value,
+    )
+
+
 def _work_by_op(results: tuple[OpResult, ...]) -> tuple[tuple[str, float, float], ...]:
     """Arithmetic and compute time per operator family, biggest first."""
     totals: dict[str, list[float]] = {}
@@ -363,20 +381,14 @@ def _operation_trace(
     # engine rather than attributed to whichever family happens to dominate it.
     # Without this the vector lane came out empty on a model that spends real
     # time on norms and activations (D28).
-    matrix = [
-        (
-            sum(r.t_compute_s for r in g if r.op_type in MATRIX_OP_TYPES),
-            sum(r.flops for r in g if r.op_type in MATRIX_OP_TYPES),
-        )
-        for g in groups
-    ]
-    vector = [
-        (
-            sum(r.t_compute_s for r in g if r.op_type not in MATRIX_OP_TYPES),
-            sum(r.flops for r in g if r.op_type not in MATRIX_OP_TYPES),
-        )
-        for g in groups
-    ]
+    #
+    # Each half also names *itself*. Naming both halves after the group's
+    # dominant family — which is a matmul in essentially every group — labelled
+    # the vector lane's spans `matmul`, so a norm bar on the vector unit hovered
+    # as "EXEC — matmul on the vector unit". A matrix family cannot execute
+    # there; that is the whole content of D27.
+    matrix = [_engine_work(g, matrix=True) for g in groups]
+    vector = [_engine_work(g, matrix=False) for g in groups]
     labels = [
         g[0].op_id if len(g) == 1 else f"{g[0].op_id} .. {g[-1].op_id}  ({len(g)} ops)"
         for g in groups
@@ -579,8 +591,8 @@ def _serial_steps(
     durations: list[float],
     labels: list[str],
     op_types: list[str],
-    matrix_per_step: list[tuple[float, float]],
-    vector_per_step: list[tuple[float, float]],
+    matrix_per_step: list[tuple[float, float, str]],
+    vector_per_step: list[tuple[float, float, str]],
     phase: GraphPhase,
     fixed_per_step: list[float],
     double_buffered: bool,
@@ -663,7 +675,7 @@ def _serial_steps(
         # vector unit that follows it. Two bars rather than one is the point —
         # they are different silicon and a reader should see which was busy.
         cursor = exec_start
-        for lane, (seconds, work) in (
+        for lane, (seconds, work, family) in (
             (Lane.CORE, matrix_per_step[i]),
             (Lane.VECTOR, vector_per_step[i]),
         ):
@@ -678,7 +690,8 @@ def _serial_steps(
                     cursor + seconds,
                     i,
                     phase,
-                    op_type=op_types[i],
+                    # This engine's own dominant family, never the group's.
+                    op_type=family,
                     flops=work,
                 )
             )
