@@ -52,6 +52,15 @@ make venv         # creates backend/.venv (uv venv --python 3.11 + uv sync --all
 Then either prefix commands with `uv run` from `backend/` (recommended — no activation needed),
 or activate classically with `source backend/.venv/bin/activate`.
 
+**Every command documents itself — this is the fastest way to see current flags**, grouped and
+validated, rather than trusting this README's snapshot of them:
+
+```bash
+uv run bwz --help                                       # the subcommands, in typical order
+uv run bwz matmul --help                                 # every matmul flag, incl. dataflow strategy
+uv run python scripts/plot_pipeline.py --help            # the figure script: workload / chip / strategy / output
+```
+
 **[`docs/CLI.md`](docs/CLI.md) is the full command reference** — every flag, and the exact
 invocation behind every number quoted in this README.
 
@@ -177,7 +186,8 @@ uv run bwz matmul -M 10000 -N 10000 -K 10000 --chip a100_80gb --dtype fp16 --ide
 
 `-M -N -K` the dimensions · `-c/--chip` · `-d/--dtype` both operands · `--a`/`--b` per-operand
 widths · `--out` the **result** width, i.e. the accumulator · `--ideal` · `--pipeline/--no-pipeline`
-· `--json`.
+· `--a-strategy`/`--b-dataflow` and `--a-residency-tiles`/`--a-prefetch-depth`/`--iterations` —
+dataflow strategy, next section · `--json`.
 
 `M` folds the batch in — a batch of 128 rows is `-M 128`. There is no `--batch`, no context and no
 phase, because one matmul has none of those.
@@ -191,6 +201,30 @@ uv run bwz matmul -M 4096 -N 4096 -K 4096 -c a100_80gb --a fp16 --b int8        
 
 All four do the same 137.4 GOP. The result width changes bytes only, never operations; a mixed
 matmul runs at the **wider** operand, because both share one datapath.
+
+### A and B: how a matmul's operands move
+
+Two more flags on `bwz matmul` (and `bwz run`, and `plot_pipeline.py`), answering two different
+questions about a lone matmul's DRAM traffic — full derivation in `docs/CLI.md` §2.5:
+
+```bash
+uv run bwz matmul -M 8192 -N 8192 -K 8192 -c metis_aipu -d int8 --ideal --a-strategy stream
+```
+
+**`--a-strategy` is a byte-amount knob** — how often A crosses DRAM. `stage` (default) reads each
+k-slice once and feeds every tile that needs it; `stream` re-reads A per tile instead — the honest
+picture for a GPU, whose GEMMs genuinely refetch operands — which is **16x** the traffic on this
+shape (1.07 GB against 67.1 MB staged); `whole` stages all of A before the first tile, same bytes as
+`stage`, only the timing changes.
+
+**`--b-dataflow` is a timing knob** — B is fetched exactly once either way (D30), so
+`write-ahead`/`on-demand`/`persistent` only move *when* the write lands relative to compute, never
+how many bytes cross. The one exception is `--iterations N > 1` with `persistent`: it amortises B's
+write over a resident weight set that a repeat invocation would not have to rewrite.
+
+Both `whole` and `persistent` **clamp rather than error** when they don't fit — `whole` needs the
+scratchpad to hold all of A, `persistent` needs the array to hold all of B — falling back to
+`stage`/`write-ahead` and naming the fallback in the assumptions drawer, never silently.
 
 ### `bwz single-layer-encoder` — the shape is the dimensions
 
@@ -276,9 +310,10 @@ there is no second, coarser register to keep legible) · `--out` apply to all th
 pick the workload — passing two of them is rejected, not resolved by silent priority.
 
 The dataflow strategy flags (`--a-strategy`, `--b-dataflow`, `--a-residency-tiles`,
-`--a-prefetch-depth`, `--iterations` — `docs/CLI.md` §2.5) belong to the default matmul workload the
-same way the shape flags belong to `--encoder`: passing either set with the wrong workload is an
-error naming the flag and why, not one that quietly did nothing —
+`--a-prefetch-depth`, `--iterations` — [what they mean](#a-and-b-how-a-matmuls-operands-move),
+`docs/CLI.md` §2.5) belong to the default matmul workload the same way the shape flags belong to
+`--encoder`: passing either set with the wrong workload is an error naming the flag and why, not one
+that quietly did nothing —
 
 ```bash
 $ … plot_pipeline.py --chip a100_80gb --head-dim 64
