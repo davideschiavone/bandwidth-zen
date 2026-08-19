@@ -22,13 +22,15 @@ every assumption it made.
 - **Predicts** latency via a flat roofline (compute ridge vs DRAM ridge; the on-chip SRAM enters
   as a tile-buffer capacity) plus tail-effect and pipeline-fill utilization modelling
 - **Separates prefill from decode** for LLMs — they are different machines, and the tool shows why
-- **Scales out** across chips: tensor / pipeline / data / expert parallelism with alpha-beta
-  collective costs over hierarchical topologies (NVLink intra-node, InfiniBand inter-node)
+- **Declares parallelism**: tensor / pipeline / data / expert sharding degrees are validated in the
+  deployment spec today; multi-chip collective costs (alpha-beta over NVLink/InfiniBand topologies)
+  land at M5 — every number this README quotes is a single-chip result
 - **Plans memory**: weights + KV cache + peak live activations + workspace vs. device capacity,
   including the context length at which you hit the memory wall
-- **Explains**: ranked bottlenecks, roofline position per op, Gantt timeline, and quantified
+- **Explains**: ranked bottlenecks, roofline position per op, resource timeline, and quantified
   suggestions ("quantize to INT8: −38% latency" — re-simulated, not guessed)
-- **Explores**: sweep batch × precision × parallelism and get the Pareto frontier
+- **Compares**: chips head-to-head on the same model and precision, with the prefill-crossover
+  point where a slower-but-cheaper chip catches up
 
 ## What it is not
 
@@ -149,12 +151,21 @@ All four do the same 137.4 GOP. The int32 result quadruples C from 16.8 MB to 67
 the arithmetic intensity; the mixed-operand case runs at the **fp16** rate, because both operands
 share one datapath — the narrow side saves bytes and buys no throughput.
 
-Sweep and take the Pareto frontier:
+Put two chips head to head on the same model:
 
 ```bash
-uv run bwz sweep --model llama3_8b --chip h100_sxm \
-  --knob batch=1,4,16,64,256 --knob precision=fp16,int8 --knob tp=1,2,4,8 \
-  --objective latency,throughput --out sweep.json
+uv run bwz compare --chips chip_a,chip_b --models gemma3_4b
+```
+
+```
+                      Head to head @ S=512, batch 1, int8
+
+  model       chip     params   resident     TTFT   tok/s   bound            util
+  gemma3_4b   chip_a   3.88 G      1.40%   114 ms     8.7   DRAM_BW_BOUND   0.03%
+  gemma3_4b   chip_b   3.88 G     25.75%    87 ms    11.0   DRAM_BW_BOUND   0.17%
+
+Prefill crossover
+  gemma3_4b: no crossover in [1, 100000] — chip_b is faster throughout
 ```
 
 Docker:
@@ -177,6 +188,7 @@ what each one is *for*.
 | `bwz single-layer-encoder` | one encoder layer, sized from the command line |
 | `bwz run` | a model profile on a chip |
 | `bwz compare` | chips head to head, with the prefill crossover |
+| `bwz version` | print the installed `bwz` version |
 
 ### `bwz matmul` — the shape is M, N, K
 
@@ -252,10 +264,38 @@ uv run bwz run --model single_layer_encoder --chip a100_80gb --input-tokens 4 --
 ```
 
 `-m/--model` · `-c/--chip` · `-b/--batch` · `--input-tokens` · `--output-tokens` · `--context` ·
-`--weights` · `--phase` · `--attention` · `--show-ops N` · `--ideal` · `--json`.
+`--weights` · `--phase` · `--attention` · `--show-ops N` · `--ideal` · `--json` · the [dataflow
+strategy flags](#a-and-b-how-a-matmuls-operands-move) too, accepted for parity with `bwz matmul` but
+inert here — a model's graph is never one bare matmul.
 
 `--show-ops N` lists the N most expensive operations with their arithmetic, DRAM bytes and time —
 `20` simply asks for more lines than the encoder's 14 operations.
+
+### `bwz compare` — chips head to head
+
+```bash
+uv run bwz compare --chips chip_a,chip_b --models gemma3_4b
+```
+
+```
+                      Head to head @ S=512, batch 1, int8
+
+  model       chip     params   resident     TTFT   tok/s   bound            util
+  gemma3_4b   chip_a   3.88 G      1.40%   114 ms     8.7   DRAM_BW_BOUND   0.03%
+  gemma3_4b   chip_b   3.88 G     25.75%    87 ms    11.0   DRAM_BW_BOUND   0.17%
+
+Prefill crossover
+  gemma3_4b: no crossover in [1, 100000] — chip_b is faster throughout
+```
+
+`--chips` · `--models` (both comma-separated) · `-b/--batch` · `--input-tokens` · `--output-tokens`
+· `--context` · `--weights` · `--crossover/--no-crossover` · `--ideal`.
+
+Every chip runs the same model at the same precision, so the comparison is apples to apples. The
+crossover search bisects for the prompt length at which prefill (TTFT) swaps which chip is faster:
+each chip pays a fixed weight-load cost plus compute that grows with prompt length, so if the two
+curves cross it happens at most once, reported as a token count rather than a fabricated one when
+they don't. `chip_b` wins throughout here, so there is none to report.
 
 ### `--ideal`
 
