@@ -136,9 +136,7 @@ def systolic_utilisation(
     return k_efficiency * n_efficiency * m_efficiency * wave_occupancy(tiles, units)
 
 
-def operation_utilisation(
-    op: Operation, unit: ComputeUnit, dtype: DType | None = None
-) -> float:
+def operation_utilisation(op: Operation, unit: ComputeUnit, dtype: DType | None = None) -> float:
     """Shape-induced utilisation for *op* on *unit*.
 
     Returns 1.0 when the profile declares no array geometry — there is then no

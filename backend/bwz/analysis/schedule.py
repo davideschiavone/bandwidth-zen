@@ -55,9 +55,7 @@ def run_phase(
             cost_of(op, graph.tensors),
             machine,
             resident_fraction=resident_fraction,
-            activation_resident_fraction=(
-                0.0 if single_matmul else activation_resident_fraction
-            ),
+            activation_resident_fraction=(0.0 if single_matmul else activation_resident_fraction),
             double_buffered=double_buffered,
             terminal_output_bytes=sum(
                 graph.tensors[name].size_bytes for name in op.outputs if name not in consumed

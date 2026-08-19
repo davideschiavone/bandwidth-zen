@@ -344,3 +344,38 @@ def test_a_tile_step_is_a_wave_not_a_single_tile() -> None:
     assert coarse.coalesced
     assert coarse.spans[0].label.endswith("4 at a time")
     assert "in parallel" not in coarse.spans[0].label
+
+
+def test_fill_drain_differs_enough_between_chips_to_distort_a_ratio() -> None:
+    """Why the comparison headline must be quoted from the reported latency.
+
+    D33's k-slice staging concentrates A into a few large events instead of a
+    per-wave trickle, so much less of it overlaps compute. On an 8192-cubed INT8
+    matmul the pipeline fill/drain is a rounding error on A100 and 17.7% of the
+    latency on Metis — so a ratio measured off the drawn bars reads 3.93x where
+    the report says 3.34x, an 18% error in the one number a comparison figure
+    exists to show (D35).
+
+    This asserts the *engine* side of that: the gap is real and asymmetric. The
+    figure's job is to quote `reported_latency_s`, which `_subtitle` now does.
+    """
+    fast, fast_report = _trace(_spec(8192, 8192, 8192, "int8"), "a100_80gb", max_steps=256)
+    slow, slow_report = _trace(_spec(8192, 8192, 8192, "int8"), "metis_aipu", max_steps=256)
+
+    def share(trace: PipelineTrace) -> float:
+        return trace.fill_drain_s / trace.reported_latency_s
+
+    assert share(fast) < 0.01, "A100 overlaps almost everything"
+    assert share(slow) > 0.10, "Metis stages A in lumps, so much less overlaps"
+
+    reported = slow.reported_latency_s / fast.reported_latency_s
+    drawn = slow.total_s / fast.total_s
+    assert reported == pytest.approx(3.34, rel=0.02)
+    assert drawn == pytest.approx(3.93, rel=0.02)
+    assert drawn > reported * 1.15, "the two disagree by enough to mislead"
+
+    # Whichever is quoted, the spans still decompose the reported terms (D19).
+    for trace, report in ((fast, fast_report), (slow, slow_report)):
+        op = report.phases[0].ops[0]
+        assert trace.busy_s[Lane.DRAM] == pytest.approx(op.t_dram_s, rel=1e-9)
+        assert trace.reported_latency_s == pytest.approx(op.latency_s, rel=1e-9)

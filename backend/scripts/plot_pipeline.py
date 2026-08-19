@@ -248,7 +248,11 @@ def panel_rows(panels: list[Panel]) -> list[Row]:
                     panel=index,
                     header=True,
                     quantity=(
-                        f"{format_time(panel.work.trace.total_s)} · "
+                        # Reported latency, not the drawn span: the bars run past
+                        # it by the fill/drain the roofline omits, and a band
+                        # header quoting the longer number would disagree with
+                        # the report (D35).
+                        f"{format_time(panel.work.trace.reported_latency_s)} · "
                         f"{panel.work.bound.value.replace('_', ' ').lower()}"
                     ),
                     colour=CHIP_COLOURS[index % len(CHIP_COLOURS)],
@@ -415,7 +419,7 @@ def _boxes(panels: list[Panel]) -> list[Box]:
         rate = format_bandwidth(totals[Lane.DRAM] / busy[Lane.DRAM]) if busy[Lane.DRAM] else "—"
         core_rate = totals[Lane.CORE] / busy[Lane.CORE] if busy[Lane.CORE] else 0.0
         vector_rate = totals[Lane.VECTOR] / busy[Lane.VECTOR] if busy[Lane.VECTOR] else 0.0
-        band = f"{chip.name} — {format_time(trace.total_s)}" if banded else ""
+        band = f"{chip.name} — {format_time(trace.reported_latency_s)}" if banded else ""
         out += [
             Box(
                 "dram",
@@ -1136,18 +1140,40 @@ def _draw_roofline(
 
 def _subtitle(panels: list[Panel]) -> str:
     """One chip: the span and how it was scheduled. Two: that, plus the ratio the
-    figure exists to show, stated rather than left to be measured off the axis."""
+    figure exists to show, stated rather than left to be measured off the axis.
+
+    The ratio is quoted from the **reported latency**, never from the drawn span.
+    The two differ by pipeline fill/drain, which the roofline's ``max()`` omits
+    and which differs wildly between machines: on an 8192-cubed INT8 matmul it is
+    0.0% of A100's latency and 17.7% of Metis's, so a ratio read off the bars
+    said 3.93x where the report says 3.34x. A headline disagreeing with the
+    report by 18% is the failure D19 exists to prevent (D35).
+    """
     if len(panels) == 1:
         return _trace_subtitle(panels[0].work.trace)
-    ordered = sorted(panels, key=lambda p: p.work.trace.total_s)
+    ordered = sorted(panels, key=lambda p: p.work.trace.reported_latency_s)
     fastest, slowest = ordered[0], ordered[-1]
-    ratio = slowest.work.trace.total_s / (fastest.work.trace.total_s or 1.0)
+    quickest = fastest.work.trace.reported_latency_s or 1.0
+    ratio = slowest.work.trace.reported_latency_s / quickest
     spans = " · ".join(
-        f"{panel.chip.id} {format_time(panel.work.trace.total_s)}" for panel in panels
+        f"{panel.chip.id} {format_time(panel.work.trace.reported_latency_s)}" for panel in panels
+    )
+    # Name the gap between what is drawn and what is reported wherever it is big
+    # enough to see, rather than dropping the disclosure the single-chip
+    # subtitle has always carried (D35).
+    drawn = [
+        f"{panel.chip.id} +{format_time(panel.work.trace.fill_drain_s)}"
+        for panel in panels
+        if panel.work.trace.reported_latency_s > 0
+        and panel.work.trace.fill_drain_s / panel.work.trace.reported_latency_s >= 0.01
+    ]
+    gap = " · ".join(drawn)
+    tail = (
+        f" Bars run past it by the pipeline fill/drain the roofline omits ({gap})." if drawn else ""
     )
     return (
-        f"Shared absolute time axis. {spans}. "
-        f"{fastest.chip.id} is {ratio:.2f}x faster than {slowest.chip.id} on this workload."
+        f"Shared absolute time axis, reported latency. {spans}. "
+        f"{fastest.chip.id} is {ratio:.2f}x faster than {slowest.chip.id} on this workload.{tail}"
     )
 
 

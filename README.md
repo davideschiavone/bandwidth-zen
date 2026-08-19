@@ -327,9 +327,9 @@ produced it and the commit it came from:
 | `timeline-<chip>-<dtype>.html` | the same, **zoomable**, with the roofline and the arithmetic below it |
 | `timeline-compare-<a>-vs-<b>-….{png,html}` | two chips, one workload, one shared absolute axis, both rooflines |
 
-![A100 roofline](docs/plots/roofline-a100_80gb-fp16.png)
-
-![A100 resource timeline](docs/plots/timeline-a100_80gb-fp16.png)
+None of them is committed — they are outputs of the engine, regenerable in one command, and a
+750 kB PNG per run is churn nobody can review. `make plots` writes the set above into
+`docs/plots/`, which `.gitignore` covers.
 
 **Rows are hardware resources**, read off the chip profile — every memory level and every compute
 unit it declares, each with its own quantity: bytes moved and at what rate, operations retired and

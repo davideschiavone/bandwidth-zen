@@ -160,8 +160,7 @@ def deployment_of(
         )
         + " */",
         f"#define NTILES_PER_KS {n_tiles_per_ks:<7} /* n-tiles per k-slice: ceil(N / COLS) */",
-        "#define KSLICE(w, u)  (((w) * UNITS + (u)) / NTILES_PER_KS * ROWS)"
-        " /* this tile's k */",
+        "#define KSLICE(w, u)  (((w) * UNITS + (u)) / NTILES_PER_KS * ROWS) /* this tile's k */",
     ]
     if unit.weight_sets > 1:
         defines.insert(
@@ -221,18 +220,23 @@ def deployment_of(
 }}
 """.rstrip()
 
-    footer = (
-        f"\n/* span {format_time(trace.total_s)} = "
-        + (
-            f"max(t_dram {format_time(result.t_dram_s)}, "
-            f"t_compute {format_time(result.t_compute_s)})"
-            if trace.double_buffered
-            else f"t_dram {format_time(result.t_dram_s)} + "
-            f"t_compute {format_time(result.t_compute_s)}"
-        )
-        + (f" + fill/drain {format_time(trace.fill_drain_s)}" if trace.fill_drain_s > 0 else "")
-        + " */"
+    # Both numbers, always: the REPORTED latency is what the engine predicts and
+    # what every table quotes, and the drawn span is that plus the fill/drain the
+    # roofline's max() omits. Printing only the span invites it to be read as the
+    # prediction, and on Metis at 8192-cubed the two differ by 18% (D35).
+    terms = (
+        f"max(t_dram {format_time(result.t_dram_s)}, t_compute {format_time(result.t_compute_s)})"
+        if trace.double_buffered
+        else f"t_dram {format_time(result.t_dram_s)} + t_compute {format_time(result.t_compute_s)}"
     )
+    footer = f"\n/* reported latency {format_time(trace.reported_latency_s)} = {terms}"
+    if trace.fill_drain_s > 0:
+        footer += (
+            f";\n * drawn span {format_time(trace.total_s)} adds "
+            f"{format_time(trace.fill_drain_s)} of pipeline fill/drain, which the\n"
+            f" * roofline's max() leaves out of the prediction (D19)"
+        )
+    footer += " */"
 
     code = "\n".join(header) + "\n\n" + "\n".join(defines) + "\n" + body + footer
     return Deployment(

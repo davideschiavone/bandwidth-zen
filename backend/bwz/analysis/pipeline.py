@@ -391,8 +391,7 @@ def _tile_trace(
     # The k-slice openings' A bars carry their own names; the other steps have
     # no A traffic at all under D33, so nothing else needs an activation label.
     activation_labels = [
-        f"A k-slice {g}/{k_slices} — staged once, feeds its tiles" if g else ""
-        for g in ks_opened
+        f"A k-slice {g}/{k_slices} — staged once, feeds its tiles" if g else "" for g in ks_opened
     ]
 
     spans = _pipelined_tiles(

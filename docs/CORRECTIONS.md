@@ -1141,8 +1141,9 @@ really does interleave with the fetches.
 Numbers that moved on 8192-cubed INT8:
 
 - Metis: DRAM traffic 40.4 MB → **67.1 MB** of A, so `t_dram` 5.12 ms → **5.90 ms**, and the
-  verdict flips **compute-bound → DRAM-bound** at 5.98 ms total (~87% of peak TOPS achieved, not
-  ~93%). The 80 µs the figure called "imc_write" was never a write: it was the pipeline fill/drain
+  verdict flips **compute-bound → DRAM-bound**: a reported latency of **5.90 ms**, against a drawn
+  span of 6.94 ms — the difference being the fill/drain the roofline omits, which this staging makes
+  large enough to matter and which D35 then had to keep out of the comparison headline. The 80 µs the figure called "imc_write" was never a write: it was the pipeline fill/drain
   term `min(t_dram, t_compute) / tiles`.
 - A100: the same A-once rule applies (the benchmark has no consumer of A either) — 36.7 → 67.1 MB
   of reads, but 2.04 TB/s of bandwidth makes it a 32 µs change against 1.77 ms of compute. The
@@ -1173,3 +1174,50 @@ batch-1 sanity checks and `chip_b`'s compute-bound-at-batch-1 golden (D8) still 
 array is *slower*, not more pipeline-bound. The branch is keyed on `0 < multiplier < 1` only: A100
 at INT8 has multiplier 2.0 (wider, not serial — D18) and must not take the crossbar branch, even
 though a dtype is present.
+
+## D35 — A comparison quotes the reported latency, not the length of its bars (2026-08-19)
+
+D33's k-slice staging concentrates A into a few large events instead of a per-wave trickle, so far
+less of it overlaps compute and the pipeline fill/drain grows. That is correct — the D19 invariant
+still holds exactly, DRAM busy reproducing `t_dram` to 1e-18 s — but it collided with a defect
+`--compare` had carried since D29 and made it material.
+
+`_subtitle()` computed its headline "Nx faster" from `trace.total_s`, the **drawn** span. The drawn
+span is the reported latency **plus** the fill/drain that the roofline's `max()` leaves out, and
+that term is wildly asymmetric between machines:
+
+| | reported latency | drawn span | fill/drain |
+|---|---|---|---|
+| `a100_80gb` | 1.7668 ms | 1.7671 ms | **0.0%** |
+| `metis_aipu` | 5.8992 ms | 6.9437 ms | **17.7%** |
+
+So the figure announced **3.93x** where the report says **3.34x** — an 18% error in the single
+number a comparison figure exists to state, on the side that flatters neither chip honestly. A
+picture that disagrees with the report is the failure D19 was written to prevent, and this was that
+failure in the headline rather than in a bar.
+
+Fixed by quoting `reported_latency_s` everywhere a figure states a *duration*: the subtitle's spans
+and ratio, each band header's right-hand quantity, and the info-box band labels. The **bars**
+deliberately still show the drawn span — they are a schedule, and the fill/drain is really there —
+so the subtitle now names the gap instead of hiding it:
+
+> Shared absolute time axis, reported latency. a100_80gb 1.77 ms · metis_aipu 5.9 ms. a100_80gb is
+> 3.34x faster than metis_aipu on this workload. Bars run past it by the pipeline fill/drain the
+> roofline omits (metis_aipu +1.04 ms).
+
+That restores, in the comparison, the disclosure the single-chip subtitle has always carried and
+which D29 dropped when it replaced `_trace_subtitle` with the shared-axis text. It fires only where
+the gap is ≥1% of the latency, so a figure with nothing to disclose says nothing.
+
+`deploy.py`'s listing footer had the same ambiguity — it printed `span 6.94 ms = max(...) +
+fill/drain` with no mention of the prediction — and now prints the reported latency first and the
+drawn span as the thing that adds to it.
+
+A test pins the asymmetry itself (`test_fill_drain_differs_enough_between_chips_to_distort_a_ratio`)
+rather than the wording: A100 under 1%, Metis over 10%, reported ratio 3.34x, drawn 3.93x, and the
+D19 decomposition still exact on both.
+
+**Housekeeping in the same commit.** `make lint` was failing — `ruff format --check` on the four
+files D33/D34 touched. And D33's removal of `docs/plots/*` from history left two dead image embeds
+in `README.md`, which rendered locally after `make plots` and were broken on GitHub; they are now a
+sentence saying the figures are regenerable and deliberately untracked.
