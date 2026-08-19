@@ -66,6 +66,19 @@ app = typer.Typer(
 )
 console = Console()
 
+# Named --help panels (Rich groups options under a heading instead of one flat
+# list), shared across commands so the same knob always lands under the same
+# name. Order here has no effect; a panel's position in --help follows where
+# its first option is declared in the command's signature.
+PANEL_WORKLOAD = "workload"
+PANEL_SHAPE = "shape"
+PANEL_ARCHITECTURE = "architecture"
+PANEL_PRECISION = "precision"
+PANEL_DEPLOYMENT = "deployment"
+PANEL_DATAFLOW = "dataflow strategy (docs/CLI.md §2.5)"
+PANEL_DATAFLOW_INERT = "dataflow strategy — inert on a network (docs/CLI.md §2.5)"
+PANEL_OUTPUT = "output"
+
 
 class Catalog(StrEnum):
     CHIPS = "chips"
@@ -269,21 +282,35 @@ def _dataflow_options(
 
 @app.command()
 def run(
-    model: str = typer.Option(..., "--model", "-m", help="Model profile id or path"),
-    chip: str = typer.Option(..., "--chip", "-c", help="Chip profile id or path"),
-    batch: int = typer.Option(1, "--batch", "-b"),
-    input_tokens: int = typer.Option(2048, "--input-tokens"),
-    output_tokens: int = typer.Option(256, "--output-tokens"),
-    context: int | None = typer.Option(None, "--context", help="KV context; defaults to in+out"),
-    weights: DType = typer.Option(DType.FP16, "--weights", help="Weight precision"),
-    phase: Phase = typer.Option(Phase.BOTH, "--phase"),
-    attention: AttentionImpl = typer.Option(AttentionImpl.FLASH2, "--attention"),
+    model: str = typer.Option(
+        ..., "--model", "-m", help="Model profile id or path", rich_help_panel=PANEL_WORKLOAD
+    ),
+    chip: str = typer.Option(
+        ..., "--chip", "-c", help="Chip profile id or path", rich_help_panel=PANEL_WORKLOAD
+    ),
+    batch: int = typer.Option(1, "--batch", "-b", rich_help_panel=PANEL_DEPLOYMENT),
+    input_tokens: int = typer.Option(2048, "--input-tokens", rich_help_panel=PANEL_DEPLOYMENT),
+    output_tokens: int = typer.Option(256, "--output-tokens", rich_help_panel=PANEL_DEPLOYMENT),
+    context: int | None = typer.Option(
+        None,
+        "--context",
+        help="KV context; defaults to in+out",
+        rich_help_panel=PANEL_DEPLOYMENT,
+    ),
+    weights: DType = typer.Option(
+        DType.FP16, "--weights", help="Weight precision", rich_help_panel=PANEL_DEPLOYMENT
+    ),
+    phase: Phase = typer.Option(Phase.BOTH, "--phase", rich_help_panel=PANEL_DEPLOYMENT),
+    attention: AttentionImpl = typer.Option(
+        AttentionImpl.FLASH2, "--attention", rich_help_panel=PANEL_DEPLOYMENT
+    ),
     a_strategy: AStrategy = typer.Option(
         AStrategy.STAGE,
         "--a-strategy",
         help="How A is loaded for a lone matmul: stage (once per k-slice, D33), "
         "stream (per tile, D31) or whole (all of A before the first tile). Inert on a "
         "network, whose activations are governed by inter-operation residency instead.",
+        rich_help_panel=PANEL_DATAFLOW_INERT,
     ),
     b_dataflow: BDataflow = typer.Option(
         BDataflow.WRITE_AHEAD,
@@ -291,6 +318,7 @@ def run(
         help="When B's array write lands: write-ahead (a wave early, hidden behind "
         "compute), on-demand (at compute, exposed) or persistent (once, never "
         "displaced — needs tiles <= units * weight_sets).",
+        rich_help_panel=PANEL_DATAFLOW_INERT,
     ),
     a_residency_tiles: int | None = typer.Option(
         None,
@@ -298,12 +326,14 @@ def run(
         help="Override tiles served per A staging event under stage/whole; must be a "
         "power-of-2 divisor of NTILES_PER_KS (clamped otherwise). Default: the whole "
         "k-slice.",
+        rich_help_panel=PANEL_DATAFLOW_INERT,
     ),
     a_prefetch_depth: int | None = typer.Option(
         None,
         "--a-prefetch-depth",
         help="Override the double-buffered staging depth for A. Schedule-only — "
         "changes no byte count. Default: derived from double buffering, as today.",
+        rich_help_panel=PANEL_DATAFLOW_INERT,
     ),
     iterations: int = typer.Option(
         1,
@@ -311,15 +341,24 @@ def run(
         help="Invocations this report represents. Only b_dataflow=persistent reads "
         "it, amortising B's write over a resident weight set a repeat invocation "
         "would not have to rewrite.",
+        rich_help_panel=PANEL_DATAFLOW_INERT,
     ),
-    show_ops: int = typer.Option(0, "--show-ops", help="Show the N most expensive operations"),
+    show_ops: int = typer.Option(
+        0,
+        "--show-ops",
+        help="Show the N most expensive operations",
+        rich_help_panel=PANEL_OUTPUT,
+    ),
     ideal: bool = typer.Option(
         False,
         "--ideal",
         help="Zero every unfitted calibration constant — both efficiencies and the "
         "per-dispatch overhead: a hardware ceiling, not a prediction",
+        rich_help_panel=PANEL_OUTPUT,
     ),
-    as_json: bool = typer.Option(False, "--json", help="Emit the raw Report as JSON"),
+    as_json: bool = typer.Option(
+        False, "--json", help="Emit the raw Report as JSON", rich_help_panel=PANEL_OUTPUT
+    ),
 ) -> None:
     """Predict how a model runs on a chip."""
     try:
@@ -471,26 +510,44 @@ def _lane_table(trace: PipelineTrace) -> Table:
 
 @app.command()
 def matmul(
-    m: int = typer.Option(..., "--m", "-M", help="Rows of operand A; folds batch in"),
-    n: int = typer.Option(..., "--n", "-N", help="Columns of operand B"),
-    k: int = typer.Option(..., "--k", "-K", help="Contracted (inner) dimension"),
-    chip: str = typer.Option(..., "--chip", "-c", help="Chip profile id or path"),
-    dtype: DType = typer.Option(
-        DType.FP16, "--dtype", "-d", help="Width of both operands, and of the result unless --out"
+    m: int = typer.Option(
+        ..., "--m", "-M", help="Rows of operand A; folds batch in", rich_help_panel=PANEL_SHAPE
     ),
-    a_dtype: DType | None = typer.Option(None, "--a", help="Width of the M x K operand A"),
-    b_dtype: DType | None = typer.Option(None, "--b", help="Width of the K x N operand B"),
+    n: int = typer.Option(
+        ..., "--n", "-N", help="Columns of operand B", rich_help_panel=PANEL_SHAPE
+    ),
+    k: int = typer.Option(
+        ..., "--k", "-K", help="Contracted (inner) dimension", rich_help_panel=PANEL_SHAPE
+    ),
+    chip: str = typer.Option(
+        ..., "--chip", "-c", help="Chip profile id or path", rich_help_panel=PANEL_SHAPE
+    ),
+    dtype: DType = typer.Option(
+        DType.FP16,
+        "--dtype",
+        "-d",
+        help="Width of both operands, and of the result unless --out",
+        rich_help_panel=PANEL_PRECISION,
+    ),
+    a_dtype: DType | None = typer.Option(
+        None, "--a", help="Width of the M x K operand A", rich_help_panel=PANEL_PRECISION
+    ),
+    b_dtype: DType | None = typer.Option(
+        None, "--b", help="Width of the K x N operand B", rich_help_panel=PANEL_PRECISION
+    ),
     out_dtype: DType | None = typer.Option(
         None,
         "--out",
         help="Width of the M x N result. Defaults to the wider operand; set int32 or fp32 for a "
         "widening accumulator",
+        rich_help_panel=PANEL_PRECISION,
     ),
     a_strategy: AStrategy = typer.Option(
         AStrategy.STAGE,
         "--a-strategy",
         help="How A is loaded: stage (once per k-slice, D33), stream (per tile, D31) "
         "or whole (all of A before the first tile).",
+        rich_help_panel=PANEL_DATAFLOW,
     ),
     b_dataflow: BDataflow = typer.Option(
         BDataflow.WRITE_AHEAD,
@@ -498,6 +555,7 @@ def matmul(
         help="When B's array write lands: write-ahead (a wave early, hidden behind "
         "compute), on-demand (at compute, exposed) or persistent (once, never "
         "displaced — needs tiles <= units * weight_sets).",
+        rich_help_panel=PANEL_DATAFLOW,
     ),
     a_residency_tiles: int | None = typer.Option(
         None,
@@ -505,12 +563,14 @@ def matmul(
         help="Override tiles served per A staging event under stage/whole; must be a "
         "power-of-2 divisor of NTILES_PER_KS (clamped otherwise). Default: the whole "
         "k-slice.",
+        rich_help_panel=PANEL_DATAFLOW,
     ),
     a_prefetch_depth: int | None = typer.Option(
         None,
         "--a-prefetch-depth",
         help="Override the double-buffered staging depth for A. Schedule-only — "
         "changes no byte count. Default: derived from double buffering, as today.",
+        rich_help_panel=PANEL_DATAFLOW,
     ),
     iterations: int = typer.Option(
         1,
@@ -518,17 +578,24 @@ def matmul(
         help="Invocations this report represents. Only b_dataflow=persistent reads "
         "it, amortising B's write over a resident weight set a repeat invocation "
         "would not have to rewrite.",
+        rich_help_panel=PANEL_DATAFLOW,
     ),
     ideal: bool = typer.Option(
         False,
         "--ideal",
         help="Zero every unfitted calibration constant — both efficiencies and the "
         "per-dispatch overhead: a hardware ceiling, not a prediction",
+        rich_help_panel=PANEL_OUTPUT,
     ),
     pipeline: bool = typer.Option(
-        True, "--pipeline/--no-pipeline", help="Show which resource is busy for how long"
+        True,
+        "--pipeline/--no-pipeline",
+        help="Show which resource is busy for how long",
+        rich_help_panel=PANEL_OUTPUT,
     ),
-    as_json: bool = typer.Option(False, "--json", help="Emit the raw Report as JSON"),
+    as_json: bool = typer.Option(
+        False, "--json", help="Emit the raw Report as JSON", rich_help_panel=PANEL_OUTPUT
+    ),
 ) -> None:
     """Run one A[M,K] x B[K,N] -> C[M,N]: the smallest probe of a chip's roofline.
 
@@ -705,26 +772,51 @@ def matmul(
 
 @app.command(name="single-layer-encoder")
 def single_layer_encoder(
-    chip: str = typer.Option(..., "--chip", "-c", help="Chip profile id or path"),
-    hidden: int = typer.Option(8, "--hidden", "-d", help="Model width"),
-    heads: int = typer.Option(2, "--heads", help="Attention heads"),
-    head_dim: int | None = typer.Option(None, "--head-dim", help="Defaults to hidden // heads"),
-    ffn: int = typer.Option(16, "--ffn", help="FFN inner width"),
-    vocab: int = typer.Option(16, "--vocab", help="Vocabulary size"),
-    tokens: int = typer.Option(4, "--tokens", "-S", help="Sequence length"),
-    batch: int = typer.Option(1, "--batch", "-b"),
-    ffn_type: FFNType = typer.Option(FFNType.RELU, "--ffn-type"),
-    norm: NormType = typer.Option(NormType.RMSNORM, "--norm"),
-    tie: bool = typer.Option(True, "--tie/--untie", help="Tie the embedding and output tables"),
-    weights: DType = typer.Option(DType.FP16, "--weights", help="Precision"),
+    chip: str = typer.Option(
+        ..., "--chip", "-c", help="Chip profile id or path", rich_help_panel=PANEL_SHAPE
+    ),
+    hidden: int = typer.Option(
+        8, "--hidden", "-d", help="Model width", rich_help_panel=PANEL_SHAPE
+    ),
+    heads: int = typer.Option(2, "--heads", help="Attention heads", rich_help_panel=PANEL_SHAPE),
+    head_dim: int | None = typer.Option(
+        None, "--head-dim", help="Defaults to hidden // heads", rich_help_panel=PANEL_SHAPE
+    ),
+    ffn: int = typer.Option(16, "--ffn", help="FFN inner width", rich_help_panel=PANEL_SHAPE),
+    vocab: int = typer.Option(16, "--vocab", help="Vocabulary size", rich_help_panel=PANEL_SHAPE),
+    tokens: int = typer.Option(
+        4, "--tokens", "-S", help="Sequence length", rich_help_panel=PANEL_SHAPE
+    ),
+    batch: int = typer.Option(1, "--batch", "-b", rich_help_panel=PANEL_SHAPE),
+    ffn_type: FFNType = typer.Option(
+        FFNType.RELU, "--ffn-type", rich_help_panel=PANEL_ARCHITECTURE
+    ),
+    norm: NormType = typer.Option(NormType.RMSNORM, "--norm", rich_help_panel=PANEL_ARCHITECTURE),
+    tie: bool = typer.Option(
+        True,
+        "--tie/--untie",
+        help="Tie the embedding and output tables",
+        rich_help_panel=PANEL_ARCHITECTURE,
+    ),
+    weights: DType = typer.Option(
+        DType.FP16, "--weights", help="Precision", rich_help_panel=PANEL_PRECISION
+    ),
     ideal: bool = typer.Option(
         False,
         "--ideal",
         help="Zero every unfitted calibration constant — both efficiencies and the "
         "per-dispatch overhead: a hardware ceiling, not a prediction",
+        rich_help_panel=PANEL_OUTPUT,
     ),
-    show_ops: int = typer.Option(20, "--show-ops", help="Show the N most expensive operations"),
-    as_json: bool = typer.Option(False, "--json", help="Emit the raw Report as JSON"),
+    show_ops: int = typer.Option(
+        20,
+        "--show-ops",
+        help="Show the N most expensive operations",
+        rich_help_panel=PANEL_OUTPUT,
+    ),
+    as_json: bool = typer.Option(
+        False, "--json", help="Emit the raw Report as JSON", rich_help_panel=PANEL_OUTPUT
+    ),
 ) -> None:
     """One encoder layer, sized from the command line, small enough to count by hand.
 
@@ -825,19 +917,29 @@ def _shape_table(spec: TransformerSpec, deployment: DeploymentSpec) -> Table:
 
 @app.command()
 def compare(
-    chips: str = typer.Option(..., "--chips", help="Comma-separated chip ids, e.g. chip_a,chip_b"),
-    models: str = typer.Option(..., "--models", help="Comma-separated model ids"),
-    batch: int = typer.Option(1, "--batch", "-b"),
-    input_tokens: int = typer.Option(512, "--input-tokens"),
-    output_tokens: int = typer.Option(1, "--output-tokens"),
-    context: int | None = typer.Option(None, "--context"),
-    weights: DType = typer.Option(DType.INT8, "--weights"),
-    crossover: bool = typer.Option(True, "--crossover/--no-crossover"),
+    chips: str = typer.Option(
+        ...,
+        "--chips",
+        help="Comma-separated chip ids, e.g. chip_a,chip_b",
+        rich_help_panel=PANEL_WORKLOAD,
+    ),
+    models: str = typer.Option(
+        ..., "--models", help="Comma-separated model ids", rich_help_panel=PANEL_WORKLOAD
+    ),
+    batch: int = typer.Option(1, "--batch", "-b", rich_help_panel=PANEL_DEPLOYMENT),
+    input_tokens: int = typer.Option(512, "--input-tokens", rich_help_panel=PANEL_DEPLOYMENT),
+    output_tokens: int = typer.Option(1, "--output-tokens", rich_help_panel=PANEL_DEPLOYMENT),
+    context: int | None = typer.Option(None, "--context", rich_help_panel=PANEL_DEPLOYMENT),
+    weights: DType = typer.Option(DType.INT8, "--weights", rich_help_panel=PANEL_DEPLOYMENT),
+    crossover: bool = typer.Option(
+        True, "--crossover/--no-crossover", rich_help_panel=PANEL_OUTPUT
+    ),
     ideal: bool = typer.Option(
         False,
         "--ideal",
         help="Zero every unfitted calibration constant — both efficiencies and the "
         "per-dispatch overhead: a hardware ceiling, not a prediction",
+        rich_help_panel=PANEL_OUTPUT,
     ),
 ) -> None:
     """Head-to-head across chips, with the prefill crossover point."""
