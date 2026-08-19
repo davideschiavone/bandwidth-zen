@@ -52,6 +52,17 @@ app = typer.Typer(
     name="bwz",
     help="bandwidth-zen: analytical performance model for neural-network inference.",
     no_args_is_help=True,
+    rich_markup_mode="rich",
+    epilog=(
+        "[bold]Typical order:[/bold] [cyan]matmul[/cyan] probes one GEMM on one chip — the "
+        "smallest roofline check, and where the dataflow strategy flags "
+        "([cyan]--a-strategy[/cyan]/[cyan]--b-dataflow[/cyan], see [cyan]docs/CLI.md[/cyan] §2.5) "
+        "live. [cyan]run[/cyan] costs a full model. [cyan]compare[/cyan] puts chips head to head. "
+        "[cyan]list[/cyan] shows the bundled chip/model ids these all take.\n\n"
+        "Each command prints numbers, derivations and an assumptions drawer — nothing here plots. "
+        "For the same run as a zoomable picture: "
+        "[cyan]uv run python scripts/plot_pipeline.py --help[/cyan]."
+    ),
 )
 console = Console()
 

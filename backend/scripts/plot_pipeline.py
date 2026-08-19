@@ -49,6 +49,7 @@ import argparse
 import shlex
 import subprocess
 import sys
+import textwrap
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -962,77 +963,209 @@ def _common_dtypes(chips: list[HardwareSpec]) -> str:
     return ", ".join(sorted(d.value for d in shared))
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--chip", action="append", default=None, help="Chip id; repeatable")
-    parser.add_argument(
-        "--compare",
-        action="store_true",
-        help="Draw every --chip in ONE figure on a shared, absolute time axis, rows banded per "
-        "chip, with both rooflines below. Without it each chip gets its own figure, x normalised "
-        "to that chip's own span — both views are kept because they answer different questions",
+def _build_parser() -> argparse.ArgumentParser:
+    """Three questions, in order: what to run, on what, and (for a lone matmul
+    only) how its operands should move. Flags are grouped by which question
+    they answer, and a flag from one workload's group used with another
+    workload is a hard error rather than a silent no-op — CLAUDE.md #8's
+    "actionable errors" applies to the CLI surface as much as to a `Report`.
+    """
+    parser = argparse.ArgumentParser(
+        prog="plot_pipeline.py",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=(
+            "Draw one self-contained, zoomable HTML timeline: where the time went, on "
+            "which piece of hardware, for one chip or a head-to-head of several.\n\n"
+            "Three questions: WORKLOAD (what to run — pick exactly one), CHIP (what to "
+            "run it on — repeatable, add --compare for a head-to-head), and, only for "
+            "the default matmul workload, DATAFLOW STRATEGY (how A and B move, "
+            "docs/CLI.md §2.5). See docs/plots/README.md for how to read the page."
+        ),
+        epilog=textwrap.dedent(
+            """\
+            examples:
+              # a matmul, the default workload
+              plot_pipeline.py --chip a100_80gb --matmul 8192,8192,8192
+
+              # a model instead -- one page per phase (prefill, decode)
+              plot_pipeline.py --chip a100_80gb --model llama3_8b -S 512
+
+              # an ad-hoc single-layer encoder, sized from the shape flags
+              plot_pipeline.py --chip a100_80gb --encoder --hidden 4096 --heads 64 \\
+                  --ffn 16384 -S 4096
+
+              # two chips, one shared page, head to head
+              plot_pipeline.py --chip a100_80gb --chip metis_aipu --compare --model gemma3_4b -S 512
+
+              # a lone matmul's dataflow strategy (docs/CLI.md §2.5)
+              plot_pipeline.py --chip metis_aipu --matmul 8192,8192,8192 \\
+                  --a-strategy stream --b-dataflow persistent
+
+            --matmul / --model / --encoder are mutually exclusive: pick one workload.
+            The encoder shape flags (--hidden --heads --head-dim --ffn --vocab) and
+            --tokens/-S only mean anything for --encoder or --model; the dataflow
+            strategy flags (--a-strategy --b-dataflow --a-residency-tiles
+            --a-prefetch-depth --iterations) only mean anything for the default matmul
+            workload. Passing one with the wrong workload is rejected rather than
+            silently ignored.
+            """
+        ),
     )
-    parser.add_argument("--matmul", default="4096,4096,4096", metavar="M,N,K")
-    parser.add_argument(
-        "--model", default=None, help="Draw a model instead of a matmul; one figure per phase"
+
+    workload = parser.add_argument_group(
+        "workload — pick exactly one (default: --matmul 4096,4096,4096)"
+    ).add_mutually_exclusive_group()
+    workload.add_argument(
+        "--matmul", default="4096,4096,4096", metavar="M,N,K", help="A[M,K] x B[K,N] -> C[M,N]"
     )
-    parser.add_argument(
-        "--tokens", "-S", type=int, default=512, help="Sequence length for --model / --encoder"
+    workload.add_argument(
+        "--model", default=None, metavar="ID", help="Draw a model instead; one page per phase"
     )
-    parser.add_argument(
+    workload.add_argument(
         "--encoder",
         action="store_true",
-        help="Draw a single-layer encoder built from the shape flags below, not a profile",
+        help="Draw a single-layer encoder sized from the shape flags below, not a profile",
     )
-    parser.add_argument("--hidden", type=int, default=8, help="--encoder: model width")
-    parser.add_argument("--heads", type=int, default=2, help="--encoder: attention heads")
-    parser.add_argument("--head-dim", type=int, default=None, help="--encoder: defaults to d/h")
-    parser.add_argument("--ffn", type=int, default=16, help="--encoder: FFN inner width")
-    parser.add_argument("--vocab", type=int, default=16, help="--encoder: vocabulary")
-    parser.add_argument("--weights", default=None, help="Precision; defaults per chip")
-    parser.add_argument("--ideal", action="store_true", help="Both de-ratings at 1.0")
-    parser.add_argument(
-        "--steps",
+
+    shape = parser.add_argument_group("encoder shape — only with --encoder")
+    shape.add_argument("--hidden", type=int, default=None, help="Model width (default 8)")
+    shape.add_argument("--heads", type=int, default=None, help="Attention heads (default 2)")
+    shape.add_argument("--head-dim", type=int, default=None, help="Defaults to hidden/heads")
+    shape.add_argument("--ffn", type=int, default=None, help="FFN inner width (default 16)")
+    shape.add_argument("--vocab", type=int, default=None, help="Vocabulary (default 16)")
+    shape.add_argument(
+        "--tokens",
+        "-S",
         type=int,
-        default=256,
-        help="Steps in the trace (default 256). The only resolution knob — the page "
-        "zooms, so there is no separate static-figure register to keep legible",
+        default=None,
+        help="Sequence length for --model / --encoder (default 512)",
     )
-    parser.add_argument(
+
+    chip = parser.add_argument_group("chip & precision")
+    chip.add_argument("--chip", action="append", default=None, help="Chip id; repeatable")
+    chip.add_argument(
+        "--compare",
+        action="store_true",
+        help="Draw every --chip in ONE page on a shared, absolute time axis, rows banded per "
+        "chip, with both rooflines below. Without it each chip gets its own page, x normalised "
+        "to that chip's own span — both views are kept because they answer different questions",
+    )
+    chip.add_argument("--weights", default=None, help="Precision; defaults per chip")
+    chip.add_argument("--ideal", action="store_true", help="Both de-ratings at 1.0")
+
+    dataflow = parser.add_argument_group(
+        "dataflow strategy — only with the default matmul workload (docs/CLI.md §2.5)"
+    )
+    dataflow.add_argument(
         "--a-strategy",
         choices=[s.value for s in AStrategy],
-        default=AStrategy.STAGE.value,
-        help="How A is loaded for a lone matmul: stage (once per k-slice, D33), stream "
+        default=None,
+        help="How A is loaded: stage (once per k-slice, D33, the default), stream "
         "(per tile, D31) or whole (all of A before the first tile)",
     )
-    parser.add_argument(
+    dataflow.add_argument(
         "--b-dataflow",
         choices=[d.value for d in BDataflow],
-        default=BDataflow.WRITE_AHEAD.value,
+        default=None,
         help="When B's array write lands: write-ahead (a wave early, hidden behind "
-        "compute), on-demand (at compute, exposed) or persistent (once, never displaced)",
+        "compute, the default), on-demand (at compute, exposed) or persistent "
+        "(once, never displaced)",
     )
-    parser.add_argument(
+    dataflow.add_argument(
         "--a-residency-tiles",
         type=int,
         default=None,
         help="Override tiles served per A staging event under stage/whole; must be a "
         "power-of-2 divisor of NTILES_PER_KS (clamped otherwise)",
     )
-    parser.add_argument(
+    dataflow.add_argument(
         "--a-prefetch-depth",
         type=int,
         default=None,
         help="Override the double-buffered staging depth for A. Schedule-only",
     )
-    parser.add_argument(
+    dataflow.add_argument(
         "--iterations",
         type=int,
-        default=1,
-        help="Invocations this report represents; only b_dataflow=persistent reads it",
+        default=None,
+        help="Invocations this report represents (default 1); only b_dataflow=persistent reads it",
     )
-    parser.add_argument("--out", type=Path, default=Path("../docs/plots"))
+
+    output = parser.add_argument_group("output")
+    output.add_argument(
+        "--steps",
+        type=int,
+        default=256,
+        help="Steps in the trace (default 256). The only resolution knob — the page "
+        "zooms, so there is no separate static-figure register to keep legible",
+    )
+    output.add_argument("--out", type=Path, default=Path("../docs/plots"), help="Output directory")
+    return parser
+
+
+def _reject_flags_for_the_wrong_workload(
+    parser: argparse.ArgumentParser, args: argparse.Namespace
+) -> None:
+    """Fill in the real defaults for the chosen workload, and refuse a flag
+    scoped to a workload that was not chosen — a flag combination this script
+    would otherwise silently ignore, which is worse than an error naming it
+    (CLAUDE.md #8): `--head-dim` with `--matmul` never reaches an encoder to
+    apply to, and previously said nothing about that at all.
+    """
+
+    def given(**flags: object) -> list[str]:
+        return [f"--{name.replace('_', '-')}" for name, value in flags.items() if value is not None]
+
+    if args.encoder:
+        args.hidden = 8 if args.hidden is None else args.hidden
+        args.heads = 2 if args.heads is None else args.heads
+        args.ffn = 16 if args.ffn is None else args.ffn
+        args.vocab = 16 if args.vocab is None else args.vocab
+    else:
+        bad = given(
+            hidden=args.hidden,
+            heads=args.heads,
+            head_dim=args.head_dim,
+            ffn=args.ffn,
+            vocab=args.vocab,
+        )
+        if bad:
+            verb = "applies" if len(bad) == 1 else "apply"
+            them = "it" if len(bad) == 1 else "them"
+            parser.error(
+                f"{', '.join(bad)} only {verb} to --encoder; pass --encoder or drop {them}"
+            )
+
+    if args.model or args.encoder:
+        args.tokens = 512 if args.tokens is None else args.tokens
+    elif args.tokens is not None:
+        parser.error("--tokens/-S only applies to --model / --encoder; pass one or drop it")
+
+    if args.model or args.encoder:
+        bad = given(
+            a_strategy=args.a_strategy,
+            b_dataflow=args.b_dataflow,
+            a_residency_tiles=args.a_residency_tiles,
+            a_prefetch_depth=args.a_prefetch_depth,
+            iterations=args.iterations,
+        )
+        if bad:
+            verb = "applies" if len(bad) == 1 else "apply"
+            them = "it" if len(bad) == 1 else "them"
+            parser.error(
+                f"{', '.join(bad)} only {verb} to the default matmul workload, not "
+                f"--model/--encoder; drop {them} or drop --model/--encoder (docs/CLI.md §2.5)"
+            )
+    else:
+        args.a_strategy = args.a_strategy or AStrategy.STAGE.value
+        args.b_dataflow = args.b_dataflow or BDataflow.WRITE_AHEAD.value
+        args.iterations = 1 if args.iterations is None else args.iterations
+
+
+def main() -> None:
+    parser = _build_parser()
     args = parser.parse_args()
+    _reject_flags_for_the_wrong_workload(parser, args)
 
     m, n, k = (int(part) for part in args.matmul.split(","))
     command = "uv run --group plots python " + " ".join(shlex.quote(a) for a in sys.argv)

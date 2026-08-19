@@ -269,13 +269,21 @@ It draws one of three things, and the flags mirror the report commands above:
     --ideal --out ..
 ```
 
-`--chip` (repeatable) · `--compare` · `--matmul M,N,K` (plus `--a-strategy`, `--b-dataflow`,
-`--a-residency-tiles`, `--a-prefetch-depth`, `--iterations` — a lone matmul's dataflow strategy,
-`docs/CLI.md` §2.5) · `--model ID` · `--encoder` with `--hidden --heads --head-dim --ffn --vocab` ·
-`-S/--tokens` · `--weights` · `--ideal` · `--steps` (default 256 — the only resolution knob; the
-page zooms, so there is no second, coarser register to keep legible) · `--out`.
+`--help` groups every flag by which workload it belongs to. `--chip` (repeatable) · `--compare` ·
+`--weights` · `--ideal` · `--steps` (default 256 — the only resolution knob; the page zooms, so
+there is no second, coarser register to keep legible) · `--out` apply to all three. `--matmul M,N,K`
+· `--model ID` · `--encoder` (with `--hidden --heads --head-dim --ffn --vocab` and `-S/--tokens`)
+pick the workload — passing two of them is rejected, not resolved by silent priority.
 
-The shape flags belong to `--encoder`; a profile already carries its dimensions.
+The dataflow strategy flags (`--a-strategy`, `--b-dataflow`, `--a-residency-tiles`,
+`--a-prefetch-depth`, `--iterations` — `docs/CLI.md` §2.5) belong to the default matmul workload the
+same way the shape flags belong to `--encoder`: passing either set with the wrong workload is an
+error naming the flag and why, not one that quietly did nothing —
+
+```bash
+$ … plot_pipeline.py --chip a100_80gb --head-dim 64
+plot_pipeline.py: error: --head-dim only applies to --encoder; pass --encoder or drop it
+```
 
 ### `--compare` — two chips, one workload, one picture
 
