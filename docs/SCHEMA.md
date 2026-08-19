@@ -245,11 +245,26 @@ parallelism: {tp: 2, pp: 1, dp: 1, ep: 1, microbatches: 8}
 num_chips: 2
 optimize_for: latency      # latency | throughput | energy
 constraints: {max_latency_s: 0.05, max_power_w: 700, max_memory_bytes: 8.0e+10}
+a_strategy: stage           # stage | stream | whole — a lone matmul's A residency (D33/D36)
+b_dataflow: write-ahead     # write-ahead | on-demand | persistent — when B's array write lands
+a_residency_tiles: null     # power-of-2 divisor of NTILES_PER_KS; null = the whole k-slice
+a_prefetch_depth: null      # schedule-only; null = derived from double buffering, as today
+iterations: 1                # invocations this report represents; only persistent reads it
 ```
 
 **Validated here (intra-spec):** `tp x pp x dp x ep == num_chips`; decode requires
 `output_tokens > 0`; training has no phase split; `pp > 1` needs at least `pp` microbatches;
-`structured_2_4` implies ratio 0.5.
+`structured_2_4` implies ratio 0.5; `a_residency_tiles`, `a_prefetch_depth` and `iterations` are
+each `> 0` when set.
+
+**`a_strategy`, `b_dataflow` and `iterations` are single-matmul-only knobs** (`bwz matmul`,
+`scripts/plot_pipeline.py --matmul`): `analysis/schedule.py` reads them only when the graph is one
+bare matmul, so they are silently inert on a network, whose activations are already governed by
+inter-operation residency (D15). Feasibility here is a **clamp, not a validation error**
+(CLAUDE.md #8): `a_strategy: whole` that does not fit the scratchpad falls back to `stage`, and
+`b_dataflow: persistent` that does not fit the array's resident tile capacity falls back to
+`write-ahead` — both noted in `report.assumptions`, never raised. See `docs/MODEL.md` §6.3a and
+`docs/CORRECTIONS.md` D36.
 
 **`precision.accumulate` is not read by anything.** The transformer and CNN builders size output
 tensors at the activation dtype, so declaring `accumulate: fp32` against `activations: fp16` does

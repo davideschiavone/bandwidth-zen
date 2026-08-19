@@ -54,6 +54,44 @@ class OptimizeFor(StrEnum):
     ENERGY = "energy"
 
 
+class AStrategy(StrEnum):
+    """How operand A is loaded for a lone matmul (``docs/CORRECTIONS.md`` D33/D36).
+
+    A byte-amount knob: every tile of a k-slice's group reads the same staged
+    slice, so how large that residency is changes how many times A crosses DRAM.
+    """
+
+    STAGE = "stage"
+    """Fetch each k-slice once, resident for all ``NTILES_PER_KS`` of its tiles
+    (D33). A crosses DRAM exactly once."""
+    STREAM = "stream"
+    """Fetch per tile (D31) — the honest setting for a GPU, whose GEMMs
+    genuinely re-read operands: ``NTILES_PER_KS`` times the staged traffic."""
+    WHOLE = "whole"
+    """Stage all of A before the first tile. Same total bytes as ``stage`` — A
+    still crosses DRAM exactly once — only the timing changes: one ramp instead
+    of a staging event per k-slice."""
+
+
+class BDataflow(StrEnum):
+    """When B's array write lands relative to compute (``docs/CORRECTIONS.md`` D33).
+
+    A timing knob only: within one pass every B tile is fetched exactly once
+    whatever this is set to (D30) — v1 has no on-chip write-bandwidth term to
+    charge (D5b), so the choice moves where the write sits in the loop nest, not
+    how many bytes cross. ``persistent`` is the exception across *iterations*:
+    a weight set that stays resident need not be rewritten on a repeat pass.
+    """
+
+    WRITE_AHEAD = "write-ahead"
+    """The reload lands in the weight set freed a wave earlier, hidden behind
+    that wave's compute (D33, current default)."""
+    ON_DEMAND = "on-demand"
+    """Written at compute, exposed on the critical path."""
+    PERSISTENT = "persistent"
+    """Loaded once, never displaced. Needs ``tiles <= units * weight_sets``."""
+
+
 class Precision(SpecModel):
     """Per-tensor-class numeric formats."""
 
@@ -140,6 +178,39 @@ class DeploymentSpec(SpecModel):
     num_chips: int = Field(default=1, gt=0)
     optimize_for: OptimizeFor = OptimizeFor.LATENCY
     constraints: Constraints = Constraints()
+    a_strategy: AStrategy = AStrategy.STAGE
+    b_dataflow: BDataflow = BDataflow.WRITE_AHEAD
+    a_residency_tiles: int | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "Override how many of a k-slice's NTILES_PER_KS tiles one A staging "
+            "serves, under a_strategy stage/whole. Must be a power-of-2 divisor "
+            "of NTILES_PER_KS; a value that is not gets clamped to the largest "
+            "one that is (CLAUDE.md #8), noted in report.assumptions. Meaningless "
+            "under stream, which always fetches per tile."
+        ),
+    )
+    a_prefetch_depth: int | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "Override the double-buffered staging depth used to schedule A's "
+            "k-slice fetches. Schedule-only: changes the drawn pipeline fill/"
+            "drain, never a byte count. None keeps today's depth, derived from "
+            "whether on-chip capacity fits two tiles."
+        ),
+    )
+    iterations: int = Field(
+        default=1,
+        gt=0,
+        description=(
+            "Invocations this report represents. analyze() still costs one "
+            "report, not N runs; only b_dataflow=persistent reads this, to "
+            "amortise B's write over a resident weight set that a repeat "
+            "invocation would not have to rewrite (docs/CORRECTIONS.md D33)."
+        ),
+    )
 
     @model_validator(mode="after")
     def _check_chip_count(self) -> DeploymentSpec:

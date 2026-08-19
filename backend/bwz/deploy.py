@@ -28,6 +28,7 @@ from bwz.analysis.pipeline import Lane, PipelineTrace, tile_count
 from bwz.analysis.roofline import MachineModel
 from bwz.graph.ops import MatmulAttrs, Operation
 from bwz.report import PhaseResult
+from bwz.spec.deployment import AStrategy, BDataflow
 from bwz.spec.hardware_spec import HardwareSpec
 from bwz.units import format_bytes, format_time
 
@@ -66,12 +67,19 @@ def deployment_of(
     *,
     workload: str,
     operation: Operation | None = None,
+    a_strategy: AStrategy = AStrategy.STAGE,
+    b_dataflow: BDataflow = BDataflow.WRITE_AHEAD,
 ) -> Deployment:
     """Build the listing for *chip* running *workload*.
 
     *operation* is the single matmul when there is one; the tile count comes from
     :func:`analysis.pipeline.tile_count`, the same function the schedule and the
     utilisation model both divide by, so all three cannot disagree.
+
+    *a_strategy* and *b_dataflow* are the **effective** choices — already
+    clamped by :func:`analysis.dataflow.plan_dataflow` — so the loop nest this
+    prints cannot claim a strategy the schedule above it does not actually run.
+    Their defaults reproduce the listing this module always printed.
     """
     unit = machine.unit
     dims = unit.systolic_dims
@@ -111,21 +119,43 @@ def deployment_of(
         f" * {_int(tiles)} tiles over {units} array{'s' if units != 1 else ''}"
         f" -> {_int(waves)} wave{'s' if waves != 1 else ''}.",
     ]
+    if a_strategy is AStrategy.STREAM:
+        a_lines = [
+            f" * A is re-read per tile ({n_tiles_per_ks}x the staged total, D31) — the honest",
+            " * picture for a machine whose GEMMs genuinely refetch operands.",
+        ]
+    elif a_strategy is AStrategy.WHOLE:
+        a_lines = [
+            f" * A is staged whole ({format_bytes(result.dram_activation_read_bytes)} of",
+            " * scratchpad), every k-slice before wave 0 — the same total as staging per",
+            " * k-slice (D33), only the timing changes.",
+        ]
+    else:
+        a_lines = [
+            f" * A is staged once per k-slice ({_int(k_slice_bytes)} B of scratchpad); every",
+            " * tile of that k-slice reads the staging. A crosses DRAM exactly once",
+            " * (D33).",
+        ]
+
     if unit.weight_sets > 1:
         header.append(
             f" * {unit.weight_sets} weight sets per array, {resident} chip-wide: a tile must be"
         )
         header.append(" * written INTO the array before it can compute.")
-        header.append(" * Sets rotate: the next wave's tile lands in the set that finished")
-        header.append(" * computing three waves ago, so each write hides behind this wave's")
-        header.append(" * arithmetic — the independent-address overlap weight sets exist for")
-        header.append(" * (D33). The first wave's sets fill during the first A staging.")
+        if b_dataflow is BDataflow.ON_DEMAND:
+            header.append(" * On-demand: the write lands at compute, exposed on the critical path")
+            header.append(" * rather than hidden behind an earlier wave's arithmetic (D33).")
+        elif b_dataflow is BDataflow.PERSISTENT:
+            header.append(f" * Persistent: all {_int(tiles)} tiles fit the {resident} resident")
+            header.append(" * sets, so each is written once, in wave 0, and never displaced —")
+            header.append(" * no later wave writes the array again.")
+        else:
+            header.append(" * Sets rotate: the next wave's tile lands in the set that finished")
+            header.append(" * computing three waves ago, so each write hides behind this wave's")
+            header.append(" * arithmetic — the independent-address overlap weight sets exist for")
+            header.append(" * (D33). The first wave's sets fill during the first A staging.")
         header.append(" *")
-        header.append(
-            f" * A is staged once per k-slice ({_int(k_slice_bytes)} B of scratchpad); every"
-        )
-        header.append(" * tile of that k-slice reads the staging. A crosses DRAM exactly once")
-        header.append(" * (D33).")
+        header.extend(a_lines)
         header.append(" *")
         # Within ONE pass every tile is written once whether or not it fits: M is
         # the innermost loop, so a tile is used once and never revisited. What
@@ -142,8 +172,7 @@ def deployment_of(
     else:
         header.append(" * The array stores no weights: both operands are re-read per instruction,")
         header.append(" * so there is no residency limit on the array itself.")
-        header.append(" * A k-slices are staged as they stream and each is consumed by the tiles")
-        header.append(" * of its k-slice: A crosses DRAM exactly once (D33).")
+        header.extend(a_lines)
     header.append(" */")
 
     defines = [
@@ -173,24 +202,62 @@ def deployment_of(
         )
 
     # An in-memory array must be *written* before it can compute, but the sets
-    # are independently addressed, so the write lands a full wave early and
+    # are independently addressed, so a write-ahead lands a full wave early and
     # hides behind that wave's arithmetic (D33); an array that reads its
     # operands per instruction has nothing to write, and saying otherwise would
-    # invent a residency it does not have (D30).
+    # invent a residency it does not have (D30). on-demand and persistent are
+    # the other two placements the same fact admits: exposed at compute, or
+    # paid once and never again.
     write_ahead = (
         "        if (w + 1 < WAVES) /* write-ahead (D33): the next wave's tile lands */\n"
         "            imc_write(u, (w + 1) % WEIGHT_SETS, tile(w + 1, u));"
         "   /* in the set freed 3 waves ago — hidden behind this wave */\n"
-        if unit.weight_sets > 1
+        if unit.weight_sets > 1 and b_dataflow is BDataflow.WRITE_AHEAD
+        else ""
+    )
+    persistent_write = (
+        "        if (w == 0)  /* persistent (D33): loaded once, never displaced */\n"
+        "            imc_write(u, u, tile(0, u));\n"
+        if unit.weight_sets > 1 and b_dataflow is BDataflow.PERSISTENT
+        else ""
+    )
+    on_demand_write = (
+        "        imc_write(u, w % WEIGHT_SETS, tile(w, u));"
+        "  /* on-demand (D33): exposed on the critical path */\n"
+        if unit.weight_sets > 1 and b_dataflow is BDataflow.ON_DEMAND
         else ""
     )
     prologue = (
         "/* prologue: wave 0's B tiles land in sets 0..UNITS-1 while the first A\n"
         " * k-slice stages; afterwards the write-ahead keeps every set a full wave\n"
         " * ahead of its compute. */\n"
-        if unit.weight_sets > 1
+        if unit.weight_sets > 1 and b_dataflow is BDataflow.WRITE_AHEAD
+        else "/* prologue: wave 0's B tiles land in sets 0..UNITS-1 and are never\n"
+        " * displaced — TILES <= UNITS * WEIGHT_SETS holds, or this fell back to\n"
+        " * write-ahead (checked upstream). */\n"
+        if unit.weight_sets > 1 and b_dataflow is BDataflow.PERSISTENT
         else ""
     )
+    a_prologue = (
+        f"stage_all_of_A();  /* {format_bytes(result.dram_activation_read_bytes)} — hatched "
+        f"bar; every k-slice ramped in before wave 0, same total as staging per k-slice (D33) "
+        f"*/\n"
+        if a_strategy is AStrategy.WHOLE
+        else ""
+    )
+    if a_strategy is AStrategy.STREAM:
+        a_dram_line = (
+            "        load_A(u, tile(w, u));"
+            f" /* {a_stage} — hatched bar; re-read every tile (D31) */\n"
+        )
+    elif a_strategy is AStrategy.WHOLE:
+        a_dram_line = ""  # staged once, up front, in the prologue above.
+    else:
+        a_dram_line = (
+            "        if (tile(w, u) % NTILES_PER_KS == 0)  /* this tile opens a k-slice */\n"
+            f"            stage_A(u, KSLICE(w, u)); /* {a_stage} — hatched bar; staged once "
+            f"(D33) */\n"
+        )
     inner = (
         "            for (int c = 0; c < SUB_CYCLES; ++c)\n"
         "                feed(u, w % WEIGHT_SETS, &A[m][KSLICE(w, u)]);"
@@ -201,20 +268,26 @@ def deployment_of(
     if sub_cycles > 1 and unit.weight_sets == 1:
         inner = inner.replace("w % WEIGHT_SETS, ", "")
 
+    if on_demand_write:
+        compute_block = f"""    parallel_for (int u = 0; u < UNITS; ++u) {{
+{on_demand_write}        for (int m = 0; m < {stream_rows}; ++m)   /* M streams; it never tiles */
+{inner}    }}
+"""
+    else:
+        compute_block = f"""    parallel_for (int u = 0; u < UNITS; ++u)
+        for (int m = 0; m < {stream_rows}; ++m)   /* M streams; it never tiles */
+{inner}"""
+
     body = f"""
-{prologue}for (int w = 0; w < WAVES; ++w) {{
+{a_prologue}{prologue}for (int w = 0; w < WAVES; ++w) {{
 
     /* ---- DRAM, one port, in issue order (D22) ------------------------- */
     for (int u = 0; u < UNITS; ++u) {{
         load_B(u, tile(w, u));        /* {b_bytes} — solid bar; each tile fetched once */
-        if (tile(w, u) % NTILES_PER_KS == 0)  /* this tile opens a k-slice */
-            stage_A(u, KSLICE(w, u)); /* {a_stage} — hatched bar; staged once (D33) */
-{write_ahead}    }}
+{a_dram_line}{write_ahead}{persistent_write}    }}
 
     /* ---- the arrays, all UNITS of them at once ------------------------ */
-    parallel_for (int u = 0; u < UNITS; ++u)
-        for (int m = 0; m < {stream_rows}; ++m)   /* M streams; it never tiles */
-{inner}    /* ---- DRAM again: the result drains behind the next fetch ---------- */
+{compute_block}    /* ---- DRAM again: the result drains behind the next fetch ---------- */
     for (int u = 0; u < UNITS; ++u)
         store_C(u, tile(w, u));       /* {c_bytes} — hollow bar */
 }}

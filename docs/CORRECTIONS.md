@@ -1221,3 +1221,107 @@ D19 decomposition still exact on both.
 files D33/D34 touched. And D33's removal of `docs/plots/*` from history left two dead image embeds
 in `README.md`, which rendered locally after `make plots` and were broken on GitHub; they are now a
 sentence saying the figures are regenerable and deliberately untracked.
+
+## D36 — A's residency and B's write timing are command-line strategies, not fixed rules (2026-08-19)
+
+D33 hard-coded the single-matmul roofline to "A crosses DRAM exactly once" and D30/D33's deploy
+listing hard-coded B's write to "write-ahead". Both were the *right default* and the *wrong ceiling*
+— a user should be able to ask "what if this chip's GEMMs genuinely re-fetch A, the way a GPU's do"
+or "what if B is small enough to stay resident across calls" without editing the engine. `bwz matmul
+--a-strategy {stage,stream,whole}` and `--b-dataflow {write-ahead,on-demand,persistent}` generalise
+D31/D33/D30 into one parametric rule each, with the existing behaviour as the default so every
+number in D33/D34/D35 is unchanged.
+
+**A is a byte-amount knob.** `A_traffic = |A| · NTILES_PER_KS / residency_tiles`: `stage` (default)
+and `whole` serve a whole k-slice per staging event (`residency_tiles = NTILES_PER_KS`), so both
+reproduce D33's "crosses DRAM exactly once" exactly and differ only in *when* the events land —
+`stage` at each k-slice boundary, `whole` all of them ramped in before wave 0, at zero extra bytes.
+`stream` serves one tile per event (`residency_tiles = 1`) and re-reads A `NTILES_PER_KS` times —
+the D31 picture, restored as an explicit choice rather than a bug to fix. `--a-residency-tiles`
+generalises further to any power-of-2 divisor of `NTILES_PER_KS` in between, clamped down (never
+raised as an error, CLAUDE.md #8) when the requested value is not one.
+
+**B is a timing knob, provably.** D30's own correction note proved it: within one pass every B tile
+is fetched exactly once whichever placement is chosen, because M is the innermost loop and a tile is
+never revisited. `write-ahead`, `on-demand` and `persistent` therefore move zero bytes against each
+other in a single invocation — v1 has no on-chip write-bandwidth term to charge one placement more
+than another (D5b, D30) — and the deploy.py listing renders each as a different loop-nest placement
+with the identical `#define` numbers underneath, `check()`-verified as ever.
+
+**The one place bytes genuinely move is across *iterations*, and that needed a real design
+decision — asked of the user rather than picked.** `persistent` promised "0 B on a repeat run" but
+`analyze()` costs one report, not N runs, so "0 B" meant nothing until the deployment could say how
+many invocations it was being asked about. The chosen answer: `DeploymentSpec.iterations: int = 1`,
+read only by `persistent`. When it fits (`tiles <= units * weight_sets`) and `iterations > 1`, the
+first invocation writes B in full and the other `iterations - 1` write nothing, so the *report* —
+still one invocation's numbers — charges the amortised share `1/iterations` of one write. This is
+the regime D30's correction identified as the real significance of Metis's 4 MiB of D-IMC: a CNN
+layer whose weights fit is written once and every later frame streams only activations, which is
+what the paper's 2502 FPS ResNet-50 point is actually about, and which a one-shot `bwz matmul`
+could not express before this.
+
+**Both `whole` and `persistent` clamp on the same shape that exposed D33's original numbers.**
+8192³ INT8 on Metis: `whole` needs the scratchpad to hold all 67.1 MB of A against 54.5 MB on chip,
+and `persistent` needs the 256 tiles B tiles to fit the array's 16 resident ones — neither does, so
+both fall back (to `stage` and `write-ahead` respectively) with the requested value, the value used
+and why, named in `report.assumptions` rather than happening silently. `analysis/dataflow.py` is the
+one place this resolution happens, so `run_phase`'s bytes, `build_trace`'s schedule and
+`deploy.py`'s listing read the same `DataflowPlan` and cannot disagree on which strategy actually
+ran.
+
+`Span.staged_once: bool` becomes `Span.a_fetch_mode: str` (`"stage"` / `"stream"` / `"whole"`),
+defaulting to `"stream"` — a network's inter-operation activation traffic has no k-slice structure
+to stage, so it is the same physical picture `a_strategy=stream` deliberately reproduces for a lone
+matmul, and the two now share one hover wording rather than a special-cased "streaming" string.
+
+## D37 — The PNG timeline is gone; the HTML page was never a duplicate (2026-08-19)
+
+`scripts/plot_pipeline.py` wrote a matplotlib PNG *and* the zoomable HTML page from the same trace,
+and the PNG existed first (D19–D22 predate the HTML). Once the HTML shipped, the PNG became strictly
+worse at everything the two shared: it cannot zoom, so it needed a second "first N steps" register
+and a `--zoom` flag purely to work around that, and it is a large regenerated binary nobody reviews
+in a diff. Removed: `draw()`, `_bars`, `_row_axis`, `_ticks`, `_info_boxes`, `_draw_roofline`,
+`_past`, `_short`, the `BOX_H`/`BAND_LABEL_H`/`BAND_GAP` layout constants, and the matplotlib import
+and `Agg` backend selection. `--html` and `--html-steps` lose their reason to exist — `--steps`
+(default now 256, the old HTML-only default, since there is no longer a separately-legible static
+figure to keep at 32) is the only resolution knob — and `--zoom` goes entirely: the page zooms.
+
+**`plot_pipeline.py` no longer imports a plotting library at all**, confirmed by parsing its own
+import list and by running it without `--group plots` — `uv run python scripts/plot_pipeline.py`
+writes the same `timeline-*.html` it always did, using nothing but the standard library, `bwz`
+itself, and the sibling `timeline_html.py` module (already pure stdlib). `scripts/plot_roofline.py`
+is untouched and still needs `--group plots`: it has no HTML equivalent, `roofline-*.png` and
+`machine-*.png` are not duplicates of anything, and whether *it* should also grow an HTML form is a
+separate decision this commit does not make. `make plots`, `docs/CLI.md` §5 and `docs/plots/README.md`
+are updated with real executed output; the stray `.png` timeline files `make plots` used to leave in
+`docs/plots/` (gitignored, never committed) are deleted, since the target no longer writes them.
+
+## D38 — A comparison states the rate, not just the duration (2026-08-19)
+
+`bwz compare`'s table and the HTML `COMPUTED` box both stated durations and byte counts; asked for
+the throughput explicitly, because "A100 takes 1.77 ms, Metis takes 5.9 ms" is a workload-size-
+dependent way to say what "622 TOP/s against 186 TOP/s" says directly, and the rate is what makes
+two chips comparable independently of how big the probed matmul happened to be. `PhaseResult`
+already carried it — `achieved_flops_per_s` and `utilization` — so this surfaces an existing report
+field rather than computing a new one in the plot script.
+
+**Re-derived, not trusted, per CLAUDE.md's standing warning about this session's own prior
+mistakes.** `bwz matmul -M 8192 -N 8192 -K 8192 --ideal` on int8:
+
+```
+a100_80gb   1.1 TOP / 1.77 ms =  622 TOP/s   (99.77% of 624 TOP/s peak, COMPUTE_BOUND)
+metis_aipu  1.1 TOP / 5.90 ms =  186 TOP/s   (88.88% of 210 TOP/s peak, DRAM_BW_BOUND)
+```
+
+622 / 186 = 3.34x, the inverse of Metis's 5.90 / 1.77 = 3.34x latency ratio — the same check D35
+already runs on the duration side, now run on the rate side too, and it agrees.
+
+**It must come from `phase.achieved_flops_per_s`, derived from the reported latency, never from the
+drawn span (D19, D35).** Placed in the `COMPUTED` box first line and in each comparison band header,
+next to the *existing* `array … @ 622 TOP/s while busy, of 624 TOP/s` line — `totals / busy`, the
+rate while the array specifically was busy — which is a different and also true number: on a
+DRAM-bound run the array can sit near its own peak whenever it does get a tile, while the chip's
+delivered rate is far below it because the array is idle most of the span. The two are labelled
+apart (`achieved` vs `while busy`) so a reader cannot mistake "the array ran at 622 TOP/s while it
+was running" for "the chip delivered 622 TOP/s on this workload" — confusing them was the failure
+this correction exists to prevent.

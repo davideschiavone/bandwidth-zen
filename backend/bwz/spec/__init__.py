@@ -8,7 +8,9 @@ Nothing here imports from any later stage.
 from __future__ import annotations
 
 from bwz.spec.deployment import (
+    AStrategy,
     AttentionImpl,
+    BDataflow,
     Constraints,
     DeploymentSpec,
     Mode,
@@ -58,8 +60,10 @@ from bwz.spec.model_spec import (
 )
 
 __all__ = [
+    "AStrategy",
     "AnyModelSpec",
     "AttentionImpl",
+    "BDataflow",
     "CNNSpec",
     "ComputeUnit",
     "Constraints",

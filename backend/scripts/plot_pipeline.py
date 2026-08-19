@@ -1,5 +1,5 @@
-"""Where the time went, on which piece of hardware — one figure per chip, or one
-figure for two chips.
+"""Where the time went, on which piece of hardware — one self-contained, zoomable
+HTML page per chip, or one page for two chips.
 
     uv run --group plots python scripts/plot_pipeline.py --chip a100_80gb
     uv run --group plots python scripts/plot_pipeline.py \\
@@ -19,10 +19,12 @@ A100 declares L1, L2 and HBM plus tensor and CUDA cores; only HBM (bandwidth), L
 (capacity) and the tensor cores carry anything here, and the grey rows are
 exactly where the model's boundary lies.
 
-Two registers: the whole run at total scale, and the first steps zoomed, since at
-total scale one step of a 65 536-tile matmul is a hairline.
+One register: the whole run, at ``--steps`` resolution (default 256). There is no
+separate zoomed register — the page itself zooms (wheel, about the cursor) and
+pans (drag) — so a 65 536-tile matmul's first tile is a scroll away rather than a
+second figure.
 
-**``--compare`` puts every ``--chip`` in one figure** (docs/CORRECTIONS.md D29).
+**``--compare`` puts every ``--chip`` in one page** (docs/CORRECTIONS.md D29).
 Three things change and nothing else does:
 
 1. The x axis becomes **shared and absolute** instead of normalised per chip, so a
@@ -44,21 +46,17 @@ two precisions would be comparing two different amounts of traffic — so
 from __future__ import annotations
 
 import argparse
-import math
 import shlex
 import subprocess
 import sys
-import textwrap
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-import matplotlib
-import matplotlib.pyplot as plt
-from matplotlib.patches import FancyBboxPatch, Rectangle
 from timeline_html import Box, render
 
 import bwz
 from bwz.analysis import analyze, idealised, machine_model
+from bwz.analysis.dataflow import DataflowPlan, plan_dataflow
 from bwz.analysis.pipeline import Lane, PipelineTrace, Span, Stage, build_trace
 from bwz.analysis.roofline import MATRIX_OP_TYPES, compute_dtype
 from bwz.deploy import check as check_deployment
@@ -66,9 +64,12 @@ from bwz.deploy import deployment_of
 from bwz.explain import Explanation, explain_graph
 from bwz.graph import GraphPhase, build_graph, build_graphs
 from bwz.graph.ops import Operation
+from bwz.operators.base import cost_of
 from bwz.report import Bound, PhaseResult
 from bwz.spec import (
     AnyModelSpec,
+    AStrategy,
+    BDataflow,
     DeploymentSpec,
     DType,
     HardwareSpec,
@@ -78,24 +79,6 @@ from bwz.spec import (
     load_model,
 )
 from bwz.units import format_bandwidth, format_bytes, format_quantity, format_time
-
-matplotlib.use("Agg")
-
-SURFACE = "#fcfcfb"
-INK = "#0b0b0b"
-INK_SECONDARY = "#52514e"
-INK_MUTED = "#8a8983"
-GRID = "#e6e5e1"
-BOX = "#f2f1ed"
-# Slots 1 and 2 of the documented categorical palette, plus a neutral for the
-# buffer. Three roles, not eight, and every row is directly labelled.
-COLOUR = {
-    Lane.DRAM: "#2a78d6",
-    Lane.SRAM: "#8a8983",
-    Lane.CORE: "#eb6834",
-    Lane.VECTOR: "#1baf7a",  # slot 3: a third engine, not a shade of the array
-}
-IDLE = "#e6e5e1"
 
 # Chip identity, used only where two machines share one chart: the band rules on
 # a comparison timeline and the roofs on a comparison roofline. Slots 4 and 5 of
@@ -121,6 +104,11 @@ class Workload:
     operation: Operation | None = None
     """The single matmul, when there is one, so the listing can quote the same
     tile count the schedule and the utilisation model both divide by."""
+    dataflow: DataflowPlan | None = None
+    """The effective A/B dataflow strategy for a lone matmul — already clamped by
+    ``analysis.dataflow.plan_dataflow``, the same plan that decided the bytes this
+    trace draws — so the deployment listing cannot render a strategy the schedule
+    above it did not actually run."""
 
 
 @dataclass(frozen=True)
@@ -231,6 +219,8 @@ def panel_rows(panels: list[Panel]) -> list[Row]:
     for index, panel in enumerate(panels):
         if banded:
             machine = machine_model(panel.chip, panel.dtype)
+            phase = panel.work.phase
+            assert phase is not None, "every workload this script builds carries its phase"
             rows.append(
                 Row(
                     panel.chip.name,
@@ -251,9 +241,17 @@ def panel_rows(panels: list[Panel]) -> list[Row]:
                         # Reported latency, not the drawn span: the bars run past
                         # it by the fill/drain the roofline omits, and a band
                         # header quoting the longer number would disagree with
-                        # the report (D35).
+                        # the report (D35). Achieved throughput is the other
+                        # number D35 requires the same discipline of: it comes
+                        # from this same reported latency, not the drawn span,
+                        # so it is the rate the chip *delivered* on this
+                        # workload — not the rate the array ran at while busy
+                        # (that number is in the COMPUTED box below, labelled
+                        # apart so the two are never read as the same claim).
                         f"{format_time(panel.work.trace.reported_latency_s)} · "
-                        f"{panel.work.bound.value.replace('_', ' ').lower()}"
+                        f"{panel.work.bound.value.replace('_', ' ').lower()}\n"
+                        f"{format_quantity(phase.achieved_flops_per_s, 'OP/s')} achieved · "
+                        f"{phase.utilization:.0%} of peak"
                     ),
                     colour=CHIP_COLOURS[index % len(CHIP_COLOURS)],
                 )
@@ -261,111 +259,6 @@ def panel_rows(panels: list[Panel]) -> list[Row]:
         for row in rows_for(panel.chip, panel.dtype):
             rows.append(replace(row, panel=index))
     return rows
-
-
-def _bars(
-    ax: plt.Axes, rows: list[Row], span_lists: list[list[Span]], window: tuple[float, float]
-) -> None:
-    """One rectangle per span, on its resource's row, x normalised to *window*.
-
-    On a comparison *window* is the same absolute interval for every panel — the
-    whole point being to see that one span is several times the other — and each
-    row draws only its own panel's spans.
-    """
-    start, end = window
-    width_s = (end - start) or 1.0
-    for index, row in enumerate(rows):
-        if row.header:
-            ax.add_patch(
-                Rectangle(
-                    (0, index + 0.90),
-                    1,
-                    0.045,
-                    facecolor=row.colour or INK_MUTED,
-                    edgecolor="none",
-                    zorder=2,
-                )
-            )
-            continue
-        if row.lane is None:
-            ax.add_patch(
-                Rectangle(
-                    (0, index + 0.34),
-                    1,
-                    0.32,
-                    facecolor=IDLE,
-                    edgecolor="none",
-                    zorder=1,
-                )
-            )
-            continue
-        for span in span_lists[row.panel]:
-            if span.lane is not row.lane:
-                continue
-            # Three looks on the DRAM row, so direction *and* operand are
-            # readable without a legend: operand B solid, operand A hatched,
-            # the result hollow. They never overlap — it is one port.
-            store = span.stage is Stage.STORE
-            streaming = span.stage is Stage.LOAD_A
-            dispatch = span.stage is Stage.DISPATCH
-            x0 = (span.start_s - start) / width_s
-            width = max(span.duration_s / width_s, 0.0015)
-            ax.add_patch(
-                Rectangle(
-                    (x0, index + 0.18),
-                    width,
-                    0.64,
-                    facecolor=SURFACE if store else COLOUR[row.lane],
-                    edgecolor=COLOUR[row.lane] if (store or dispatch) else SURFACE,
-                    linewidth=1.1 if (store or dispatch) else 0.7,
-                    hatch="///" if dispatch else ("\\\\\\" if streaming else None),
-                    alpha=0.5 if dispatch else 1.0,
-                    zorder=4 if store else 3,
-                )
-            )
-            # Name the bar when there is room for it. On a small graph this is
-            # the difference between "something happened" and "q_proj happened",
-            # and on a large one no bar is ever wide enough so nothing is drawn.
-            # The B load, the A load and the store of one step all carry the same
-            # label; naming it once per step is enough, and three times is a
-            # smear. The A bar is the one to drop — it sits against the B bar it
-            # would repeat, and its hatch already identifies it.
-            if width > 0.05 and not streaming:
-                ax.text(
-                    x0 + width / 2,
-                    index + 0.5,
-                    _short(span.label),
-                    ha="center",
-                    va="center",
-                    fontsize=6.4,
-                    color=INK if (store or dispatch) else SURFACE,
-                    zorder=6,
-                )
-
-
-def _short(label: str) -> str:
-    """Bar text: the operation, without the layer prefix that every bar shares."""
-    head = label.split("  ")[0]
-    return head.rsplit(".", 1)[-1] if "." in head else head
-
-
-def _row_axis(ax: plt.Axes, rows: list[Row]) -> None:
-    ax.set_ylim(len(rows), 0)
-    ax.set_xlim(0, 1)
-    ax.set_yticks([i + 0.5 for i in range(len(rows))])
-    ax.set_yticklabels([""] * len(rows))  # titles are drawn explicitly, with their detail
-    ax.set_facecolor(SURFACE)
-    ax.tick_params(colors=INK_SECONDARY, labelsize=8.5, length=0)
-    for spine in ax.spines.values():
-        spine.set_visible(False)
-    ax.grid(True, axis="x", color=GRID, lw=0.8, zorder=0)
-    ax.set_axisbelow(True)
-
-
-def _ticks(ax: plt.Axes, end: float, count: int) -> None:
-    fractions = [i / (count - 1) for i in range(count)]
-    ax.set_xticks(fractions)
-    ax.set_xticklabels([format_time(f * end) for f in fractions], fontsize=8.5)
 
 
 def _op_mix(trace: PipelineTrace, *, matrix: bool | None = None) -> str:
@@ -400,6 +293,8 @@ def _boxes(panels: list[Panel]) -> list[Box]:
     out: list[Box] = []
     for panel in panels:
         trace, chip, dtype = panel.work.trace, panel.chip, panel.dtype
+        phase = panel.work.phase
+        assert phase is not None, "every workload this script builds carries its phase"
         totals, busy, concurrency = trace.totals, trace.busy_s, trace.concurrency
         span = trace.total_s or 1.0
         machine = machine_model(chip, dtype)
@@ -444,8 +339,19 @@ def _boxes(panels: list[Panel]) -> list[Box]:
                 "core",
                 f"COMPUTED — {_op_mix(trace)}",
                 format_quantity(totals[Lane.CORE] + totals[Lane.VECTOR], "OP"),
+                # Achieved throughput first, and from phase.achieved_flops_per_s —
+                # derived from the REPORTED latency (D35), never the drawn span —
+                # because it is the number that makes two chips comparable
+                # independently of workload size: "the chip delivered N TOP/s on
+                # this workload". `core_rate` below is a different claim, `totals
+                # / busy` — the rate while the array specifically was busy, which
+                # can exceed the achieved figure whenever the array is not the
+                # whole critical path. Keeping both, labelled apart, is the point.
+                f"{format_quantity(phase.achieved_flops_per_s, 'OP/s')} achieved · "
+                f"{phase.utilization:.0%} of peak\n"
                 f"array {format_quantity(totals[Lane.CORE], 'OP')} @ "
-                f"{format_quantity(core_rate, 'OP/s')} of {format_quantity(peak, 'OP/s')}\n"
+                f"{format_quantity(core_rate, 'OP/s')} while busy, of "
+                f"{format_quantity(peak, 'OP/s')}\n"
                 f"vector {format_quantity(totals[Lane.VECTOR], 'OP')} @ "
                 f"{format_quantity(vector_rate, 'OP/s')}{of_vector}",
                 band=band,
@@ -569,6 +475,7 @@ def _deployments(panels: list[Panel]) -> list[dict[str, str]]:
         work = panel.work
         if work.phase is None:
             continue
+        dataflow = work.dataflow
         listing = deployment_of(
             panel.chip,
             machine_model(panel.chip, panel.dtype),
@@ -576,6 +483,11 @@ def _deployments(panels: list[Panel]) -> list[dict[str, str]]:
             work.trace,
             workload=f"{work.name} at {panel.dtype.value}",
             operation=work.operation,
+            **(
+                {"a_strategy": dataflow.a_strategy, "b_dataflow": dataflow.b_dataflow}
+                if dataflow is not None
+                else {}
+            ),
         )
         check_deployment(listing, work.trace)
         out.append({"title": listing.title, "code": listing.code})
@@ -671,16 +583,24 @@ def _tip(span: Span) -> str:
         kind = {
             Stage.STORE: "STORE — result C written back",
             Stage.LOAD: "LOAD — operand B, the tile the array holds",
-            Stage.LOAD_A: (
-                "STAGE — operand A: k-slice staging, read once in total (D33)"
-                if span.staged_once
-                else "LOAD — operand A, streaming through the array"
-            ),
+            Stage.LOAD_A: {
+                "stage": "STAGE — operand A: k-slice staging, read once in total (D33)",
+                "whole": "STAGE — operand A: whole-A ramp, every k-slice before wave 0 (D33)",
+                "stream": "STREAM — operand A, re-fetched per tile (D31)",
+            }.get(span.a_fetch_mode, "LOAD — operands in"),
         }.get(span.stage, "LOAD — operands in")
         note = (
-            "\nThis bar is one whole k-slice: every tile of the group reads this"
-            " staging, and A crosses DRAM exactly once"
-            if span.staged_once
+            {
+                "stage": (
+                    "\nThis bar is one whole k-slice: every tile of the group reads this"
+                    " staging, and A crosses DRAM exactly once"
+                ),
+                "whole": (
+                    "\nEvery k-slice of A lands before the first tile computes — the same"
+                    " total bytes as staging per k-slice, ramped upfront instead"
+                ),
+            }.get(span.a_fetch_mode, "")
+            if span.stage is Stage.LOAD_A
             else ""
         )
         return (
@@ -737,405 +657,12 @@ def _quantity(row: Row, trace: PipelineTrace) -> str:
     return "not used"
 
 
-BOX_H = 1.30
-BAND_LABEL_H = 0.34
-BAND_GAP = 0.22
-
-
-def _boxes_region_in(count: int, banded: bool) -> float:
-    """Inches the info-box block occupies for *count* chips."""
-    pitch = BAND_LABEL_H + BOX_H + BAND_GAP if banded else BOX_H
-    return count * pitch - (BAND_GAP if banded else 0.0)
-
-
-def _info_boxes(
-    fig: plt.Figure,
-    boxes: list[Box],
-    top_in: float,
-    fig_h: float,
-    band_colours: dict[str, str],
-) -> None:
-    """The three numbers a comparison turns on: what was copied, what was held,
-    what was computed — each with its rate and its share of the span.
-
-    Drawn from the very :class:`Box` objects the HTML page renders, so the PNG and
-    the page cannot quote different figures for the same run. On a comparison the
-    boxes come in one band per chip, each band introduced by the machine's name.
-    """
-    banded = any(box.band for box in boxes)
-    pitch = BAND_LABEL_H + BOX_H + BAND_GAP if banded else BOX_H
-    bands: list[str] = []
-    for box in boxes:
-        if box.band not in bands:
-            bands.append(box.band)
-
-    for box_index, box in enumerate(boxes):
-        band_index = bands.index(box.band)
-        column = box_index % 3
-        x = 0.038 + column * 0.312
-        base = top_in + band_index * pitch + (BAND_LABEL_H if banded else 0.0)
-        colour = COLOUR[Lane(box.lane)]
-
-        def at(offset_in: float, anchor: float = 0.0) -> float:
-            return 1.0 - (anchor + offset_in) / fig_h
-
-        if banded and column == 0:
-            fig.text(
-                0.038,
-                at(base - 0.12),
-                box.band,
-                fontsize=9.5,
-                color=band_colours.get(box.band, INK),
-                fontweight="bold",
-            )
-        fig.patches.append(
-            FancyBboxPatch(
-                (x, at(BOX_H, base)),
-                0.286,
-                BOX_H / fig_h,
-                boxstyle="round,pad=0.004,rounding_size=0.006",
-                transform=fig.transFigure,
-                facecolor=BOX,
-                edgecolor=colour,
-                linewidth=1.4,
-                zorder=1,
-            )
-        )
-        fig.text(
-            x + 0.014, at(0.26, base), box.heading, fontsize=8, color=colour, fontweight="bold"
-        )
-        fig.text(x + 0.014, at(0.62, base), box.headline, fontsize=17, color=INK, fontweight="bold")
-        fig.text(
-            x + 0.014,
-            at(0.74, base),
-            box.detail,
-            fontsize=8,
-            color=INK_SECONDARY,
-            linespacing=1.5,
-            va="top",
-        )
-
-
-def draw(panels: list[Panel], command: str, out: Path, zoom_steps: int) -> None:
-    """Lay the figure out in inches and convert once.
-
-    Row count varies with the chip — A100 declares five resources, Metis six,
-    ``chip_a`` three — so every vertical position is derived from it rather than
-    guessed as a fraction, which is what stops the second register from landing
-    on the footer. With more than one panel the row count is the sum plus a band
-    header each, and the x window becomes the **same absolute interval** for
-    every chip instead of each chip's own span.
-    """
-    panels = list(panels)
-    compare = len(panels) > 1
-    rows = panel_rows(panels)
-    span_lists = [list(p.work.trace.spans) for p in panels]
-    total = max(p.work.trace.total_s for p in panels)
-    boxes = _boxes(panels)
-    band_colours = {
-        box.band: CHIP_COLOURS[i % len(CHIP_COLOURS)]
-        for i, box in enumerate(boxes[::3])
-        if box.band
-    }
-
-    row_h, gap, footer = 0.48, 1.15, 1.05
-    header = 1.15 + _boxes_region_in(len(panels), compare) + 0.85
-    band = row_h * len(rows)
-    roof_h = 4.30 if compare else 0.0
-    fig_w, fig_h = 13.0, header + band + gap + band + roof_h + footer
-    fig = plt.figure(figsize=(fig_w, fig_h), dpi=160, facecolor=SURFACE)
-
-    def y(inches_from_top: float) -> float:
-        return 1.0 - inches_from_top / fig_h
-
-    left, width = 2.55 / fig_w, (fig_w - 2.55 - 2.85) / fig_w
-    top = fig.add_axes((left, y(header + band), width, band / fig_h))
-    bottom = fig.add_axes((left, y(header + 2 * band + gap), width, band / fig_h))
-
-    # "The first N steps" of each chip, on one window: the union, so the slower
-    # machine's steps are not cropped away to fit the faster one's.
-    zoom = min(zoom_steps, max(p.work.trace.steps for p in panels))
-    cutoff = max(
-        max((s.end_s for s in spans if s.step < zoom), default=trace.total_s)
-        for spans, trace in zip(span_lists, (p.work.trace for p in panels), strict=True)
-    )
-
-    _bars(top, rows, span_lists, (0.0, total))
-    _row_axis(top, rows)
-    _ticks(top, total, 5)
-    _bars(
-        bottom,
-        rows,
-        [[s for s in spans if s.start_s < cutoff] for spans in span_lists],
-        (0.0, cutoff),
-    )
-    _row_axis(bottom, rows)
-    _ticks(bottom, cutoff, 3)
-
-    for axes in (top, bottom):
-        for index, row in enumerate(rows):
-            centre = index + 0.5
-            axes.text(
-                -0.012,
-                centre - 0.03,
-                row.title,
-                transform=axes.get_yaxis_transform(),
-                ha="right",
-                va="bottom",
-                fontsize=11 if row.header else 9.5,
-                color=row.colour if row.header else INK,
-                fontweight="bold",
-            )
-            axes.text(
-                -0.012,
-                centre + 0.04,
-                f"{row.detail}\n{row.note}",
-                transform=axes.get_yaxis_transform(),
-                ha="right",
-                va="top",
-                fontsize=6.6,
-                color=INK_MUTED,
-                linespacing=1.3,
-            )
-    for index, row in enumerate(rows):
-        top.text(
-            1.015,
-            index + 0.5,
-            _quantity(row, panels[row.panel].work.trace),
-            transform=top.get_yaxis_transform(),
-            va="center",
-            fontsize=8.5,
-            color=INK if (row.lane is not None or row.header) else INK_MUTED,
-            fontweight="bold" if row.header else "normal",
-        )
-
-    fig.text(0.038, y(0.50), _title(panels), fontsize=16, fontweight="bold", color=INK)
-    fig.text(0.038, y(0.84), _subtitle(panels), fontsize=10, color=INK_SECONDARY)
-    _info_boxes(fig, boxes, 1.15, fig_h, band_colours)
-    fig.text(
-        0.038,
-        y(header - 0.52),
-        (
-            "Every resource both profiles declare — the whole run, one absolute axis"
-            if compare
-            else "Every resource the profile declares — the whole run"
-        ),
-        fontsize=11,
-        fontweight="bold",
-        color=INK,
-    )
-    fig.text(
-        0.038,
-        y(header - 0.28),
-        (
-            "Rows are banded by chip because two profiles declare different resources; the time "
-            "axis is shared, so bar lengths are directly comparable. Grey rows are declared and "
-            "unused by this model."
-            if compare
-            else "Grey rows are declared by the chip and unused by this model: that is where its "
-            "boundary lies."
-        ),
-        fontsize=8.5,
-        color=INK_MUTED,
-    )
-    fig.text(
-        0.038,
-        y(header + band + gap - 0.52),
-        f"First {zoom} steps — {format_time(cutoff)} of it",
-        fontsize=11,
-        fontweight="bold",
-        color=INK,
-    )
-    fig.text(
-        0.038,
-        y(header + band + gap - 0.28),
-        (
-            "One bar per operation: dispatch, then its loads, arithmetic and stores."
-            if panels[0].work.trace.kind == "operations"
-            else "A load and the previous tile's arithmetic overlap exactly as far as capacity "
-            "allowed a second buffer."
-        ),
-        fontsize=8.5,
-        color=INK_MUTED,
-    )
-    if compare:
-        _draw_roofline(fig, roofs_for(panels), header + 2 * band + gap, fig_w, fig_h)
-
-    for offset, line in enumerate(textwrap.wrap(f"$ {command}", width=132)):
-        fig.text(
-            0.038,
-            y(fig_h - 0.62 + 0.20 * offset),
-            line,
-            fontsize=8.5,
-            color=INK_SECONDARY,
-            family="monospace",
-        )
-    fig.text(
-        0.038,
-        y(fig_h - 0.22),
-        f"bwz {bwz.__version__}{_git()} — every bar is a slice of the reported latency: "
-        f"the DRAM row sums to t_dram and the compute row to t_compute.",
-        fontsize=8,
-        color=INK_MUTED,
-    )
-
-    out.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out, facecolor=SURFACE)
-    plt.close(fig)
-    print(f"wrote {out}")
-
-
 def _title(panels: list[Panel]) -> str:
     work = panels[0].work
     if len(panels) == 1:
         return f"{panels[0].chip.name} — {work.name} at {panels[0].dtype.value}"
     chips = " vs ".join(panel.chip.name for panel in panels)
     return f"{work.name} at {panels[0].dtype.value} — {chips}"
-
-
-def _past(value: float, limits: dict[str, float], fraction: float) -> bool:
-    """True when *value* sits past *fraction* of the way across the log x axis —
-    the test for flipping a label inward before it runs off the chart."""
-    lo, hi = math.log10(limits["x_lo"]), math.log10(limits["x_hi"])
-    return math.log10(value) > lo + fraction * (hi - lo)
-
-
-def _draw_roofline(
-    fig: plt.Figure, roofs: list[Roof], top_in: float, fig_w: float, fig_h: float
-) -> None:
-    """Both machines' ceilings on one log-log chart, with each one's point on it.
-
-    This is the panel that says *why* the timeline above looks the way it does:
-    two chips can move the same bytes and do the same arithmetic and still land
-    on opposite sides of their own ridge point.
-    """
-    limits = _roofline_limits(roofs)
-    heading = top_in + 0.30
-    ax = fig.add_axes(
-        (
-            2.55 / fig_w,
-            1.0 - (top_in + 0.75 + 3.05) / fig_h,
-            5.30 / fig_w,
-            3.05 / fig_h,
-        )
-    )
-    ax.set_xscale("log")
-    ax.set_yscale("log")
-    ax.set_xlim(limits["x_lo"], limits["x_hi"])
-    ax.set_ylim(limits["y_lo"], limits["y_hi"])
-    ax.set_facecolor(SURFACE)
-    ax.grid(True, which="major", color=GRID, lw=0.8)
-    ax.set_axisbelow(True)
-    ax.tick_params(colors=INK_SECONDARY, labelsize=8)
-    for spine in ax.spines.values():
-        spine.set_color(GRID)
-    ax.set_xlabel(
-        "arithmetic intensity — OP per byte of DRAM traffic", fontsize=8.5, color=INK_SECONDARY
-    )
-    ax.set_ylabel("achieved OP/s", fontsize=8.5, color=INK_SECONDARY)
-
-    for index, roof in enumerate(roofs):
-        for peak, bandwidth, style in (
-            (roof.peak, roof.bandwidth, "-"),
-            (roof.derated_peak, roof.derated_bandwidth, "--"),
-        ):
-            if style == "--" and (peak, bandwidth) == (roof.peak, roof.bandwidth):
-                continue  # the profile does not derate: one roof, and the docs say why
-            knee = peak / bandwidth
-            ax.plot(
-                [limits["x_lo"], knee, limits["x_hi"]],
-                [max(bandwidth * limits["x_lo"], limits["y_lo"]), peak, peak],
-                style,
-                color=roof.colour,
-                lw=1.9,
-                zorder=3,
-            )
-        # Labels flip to the inside near the right edge. Both chips run the same
-        # workload, so their points share an x and only the achieved rate
-        # separates them — hence the per-chip vertical stagger as well.
-        crowded = _past(roof.ridge, limits, 0.55)
-        ax.axvline(roof.ridge, color=roof.colour, ls=":", lw=1.0, zorder=2)
-        ax.text(
-            roof.ridge,
-            limits["y_hi"],
-            f"{roof.name} ridge {roof.ridge:,.0f} "
-            if crowded
-            else f" {roof.name} ridge {roof.ridge:,.0f}",
-            fontsize=7.4,
-            color=roof.colour,
-            va="top",
-            ha="right" if crowded else "left",
-        )
-        if roof.tail:
-            ax.axhline(roof.tail, color=roof.colour, ls=":", lw=0.9, alpha=0.7, zorder=2)
-            # Left edge: the right half is where both ridge lines and both point
-            # labels already are.
-            ax.text(
-                limits["x_lo"],
-                roof.tail,
-                f" M=1 ceiling {format_quantity(roof.tail, 'OP/s')}",
-                fontsize=7.4,
-                color=roof.colour,
-                va="bottom",
-                ha="left",
-            )
-        ax.plot(
-            [roof.intensity],
-            [roof.achieved],
-            "o",
-            color=roof.colour,
-            ms=8,
-            mec=SURFACE,
-            mew=1.5,
-            zorder=5,
-        )
-        inside = _past(roof.intensity, limits, 0.62)
-        ax.annotate(
-            f"{roof.name} — {roof.label}",
-            (roof.intensity, roof.achieved),
-            textcoords="offset points",
-            xytext=(-11 if inside else 11, -3 + index * 13),
-            ha="right" if inside else "left",
-            fontsize=8,
-            color=roof.colour,
-            fontweight="bold",
-            annotation_clip=False,
-        )
-
-    fig.text(
-        0.038,
-        1.0 - heading / fig_h,
-        "Why — both rooflines on one chart",
-        fontsize=11,
-        fontweight="bold",
-        color=INK,
-    )
-    fig.text(
-        0.038,
-        1.0 - (heading + 0.24) / fig_h,
-        "Colour is the chip here, not the resource. Solid roof = datasheet, dashed = after the "
-        "unfitted calibration constants.",
-        fontsize=8.5,
-        color=INK_MUTED,
-    )
-    notes = "\n\n".join(
-        f"{roof.name}\n"
-        f"  peak      {format_quantity(roof.peak, 'OP/s')}\n"
-        f"  bandwidth {format_bandwidth(roof.bandwidth)}\n"
-        f"  ridge     {roof.ridge:,.0f} OP/byte\n"
-        f"  this run  {roof.intensity:,.1f} OP/byte → {roof.label}"
-        for roof in roofs
-    )
-    fig.text(
-        (2.55 + 5.30 + 0.55) / fig_w,
-        1.0 - (top_in + 0.75) / fig_h,
-        notes,
-        fontsize=8,
-        color=INK_SECONDARY,
-        family="monospace",
-        va="top",
-        linespacing=1.45,
-    )
 
 
 def _subtitle(panels: list[Panel]) -> str:
@@ -1214,7 +741,20 @@ def _git() -> str:
     return f" @ {sha}"
 
 
-def build_matmul(chip: HardwareSpec, m: int, n: int, k: int, dtype: DType, steps: int) -> Workload:
+def build_matmul(
+    chip: HardwareSpec,
+    m: int,
+    n: int,
+    k: int,
+    dtype: DType,
+    steps: int,
+    *,
+    a_strategy: AStrategy = AStrategy.STAGE,
+    b_dataflow: BDataflow = BDataflow.WRITE_AHEAD,
+    a_residency_tiles: int | None = None,
+    a_prefetch_depth: int | None = None,
+    iterations: int = 1,
+) -> Workload:
     spec = MatmulSpec.model_validate(
         {
             "id": "p",
@@ -1227,17 +767,41 @@ def build_matmul(chip: HardwareSpec, m: int, n: int, k: int, dtype: DType, steps
             "b_dtype": dtype,
         }
     )
-    deployment = DeploymentSpec.model_validate({"batch": 1, "input_tokens": 1, "output_tokens": 1})
+    deployment = DeploymentSpec.model_validate(
+        {
+            "batch": 1,
+            "input_tokens": 1,
+            "output_tokens": 1,
+            "a_strategy": a_strategy,
+            "b_dataflow": b_dataflow,
+            "a_residency_tiles": a_residency_tiles,
+            "a_prefetch_depth": a_prefetch_depth,
+            "iterations": iterations,
+        }
+    )
     report = analyze(spec, chip, deployment)
     if not report.feasible:
         raise SystemExit(f"bwz: infeasible on {chip.id}: {report.infeasibility[0]}")
+    machine = machine_model(chip, spec.operand_dtype)
     graph = build_graph(spec, deployment, GraphPhase.STATIC)
+    # The same plan_dataflow call analyze() made internally to charge the bytes
+    # above: recomputed rather than threaded out, because it is pure — same
+    # inputs, same plan — so the trace this draws and the report's numbers
+    # cannot disagree on which strategy actually ran (whole/persistent clamp).
+    dataflow = plan_dataflow(
+        graph.ops[0],
+        machine,
+        chip,
+        deployment,
+        a_bytes=cost_of(graph.ops[0], graph.tensors).input_bytes,
+    )
     trace = build_trace(
         graph,
         report.phases[0],
-        machine_model(chip, spec.operand_dtype),
+        machine,
         double_buffered=report.memory.double_buffered,
         max_steps=steps,
+        dataflow=dataflow,
     )
     op = report.phases[0].ops[0]
     return Workload(
@@ -1250,6 +814,7 @@ def build_matmul(chip: HardwareSpec, m: int, n: int, k: int, dtype: DType, steps
         op.bound,
         phase=report.phases[0],
         operation=graph.ops[0],
+        dataflow=dataflow,
     )
 
 
@@ -1426,15 +991,45 @@ def main() -> None:
     parser.add_argument("--vocab", type=int, default=16, help="--encoder: vocabulary")
     parser.add_argument("--weights", default=None, help="Precision; defaults per chip")
     parser.add_argument("--ideal", action="store_true", help="Both de-ratings at 1.0")
-    parser.add_argument("--steps", type=int, default=32, help="Steps to draw")
-    parser.add_argument("--zoom", type=int, default=6, help="Steps in the zoomed register")
-    parser.add_argument("--html", action="store_true", help="Also write the zoomable HTML timeline")
     parser.add_argument(
-        "--html-steps",
+        "--steps",
         type=int,
         default=256,
-        help="Steps in the HTML trace (default 256). Higher than --steps on purpose: a static "
-        "figure has to stay legible at one scale and a zoomable one does not",
+        help="Steps in the trace (default 256). The only resolution knob — the page "
+        "zooms, so there is no separate static-figure register to keep legible",
+    )
+    parser.add_argument(
+        "--a-strategy",
+        choices=[s.value for s in AStrategy],
+        default=AStrategy.STAGE.value,
+        help="How A is loaded for a lone matmul: stage (once per k-slice, D33), stream "
+        "(per tile, D31) or whole (all of A before the first tile)",
+    )
+    parser.add_argument(
+        "--b-dataflow",
+        choices=[d.value for d in BDataflow],
+        default=BDataflow.WRITE_AHEAD.value,
+        help="When B's array write lands: write-ahead (a wave early, hidden behind "
+        "compute), on-demand (at compute, exposed) or persistent (once, never displaced)",
+    )
+    parser.add_argument(
+        "--a-residency-tiles",
+        type=int,
+        default=None,
+        help="Override tiles served per A staging event under stage/whole; must be a "
+        "power-of-2 divisor of NTILES_PER_KS (clamped otherwise)",
+    )
+    parser.add_argument(
+        "--a-prefetch-depth",
+        type=int,
+        default=None,
+        help="Override the double-buffered staging depth for A. Schedule-only",
+    )
+    parser.add_argument(
+        "--iterations",
+        type=int,
+        default=1,
+        help="Invocations this report represents; only b_dataflow=persistent reads it",
     )
     parser.add_argument("--out", type=Path, default=Path("../docs/plots"))
     args = parser.parse_args()
@@ -1467,7 +1062,21 @@ def main() -> None:
             )
         if args.model:
             return build_model(chip, args.model, args.tokens, dtype, steps)
-        return [build_matmul(chip, m, n, k, dtype, steps)]
+        return [
+            build_matmul(
+                chip,
+                m,
+                n,
+                k,
+                dtype,
+                steps,
+                a_strategy=AStrategy(args.a_strategy),
+                b_dataflow=BDataflow(args.b_dataflow),
+                a_residency_tiles=args.a_residency_tiles,
+                a_prefetch_depth=args.a_prefetch_depth,
+                iterations=args.iterations,
+            )
+        ]
 
     chips = [load_chip(chip_id) for chip_id in args.chip or ["a100_80gb", "chip_a"]]
     if args.ideal:
@@ -1492,39 +1101,21 @@ def main() -> None:
             ]
 
         for index, panels in enumerate(groups(args.steps)):
-            draw(
+            write_html(
                 panels,
                 command,
-                args.out / f"timeline-{slug(prefix, dtype, panels[0].work, index)}.png",
-                args.zoom,
+                args.out / f"timeline-{slug(prefix, dtype, panels[0].work, index)}.html",
             )
-        if args.html:
-            for index, panels in enumerate(groups(args.html_steps)):
-                write_html(
-                    panels,
-                    command,
-                    args.out / f"timeline-{slug(prefix, dtype, panels[0].work, index)}.html",
-                )
         return
 
     for chip in chips:
         dtype = DType(args.weights) if args.weights else _default_dtype(chip)
         for index, work in enumerate(workloads(chip, dtype, args.steps)):
-            draw(
+            write_html(
                 [Panel(chip, dtype, work)],
                 command,
-                args.out / f"timeline-{slug(chip.id, dtype, work, index)}.png",
-                args.zoom,
+                args.out / f"timeline-{slug(chip.id, dtype, work, index)}.html",
             )
-        if args.html:
-            # A separate, finer trace: the PNG stays readable at 32 steps while
-            # the page has something to zoom into.
-            for index, work in enumerate(workloads(chip, dtype, args.html_steps)):
-                write_html(
-                    [Panel(chip, dtype, work)],
-                    command,
-                    args.out / f"timeline-{slug(chip.id, dtype, work, index)}.html",
-                )
 
 
 if __name__ == "__main__":

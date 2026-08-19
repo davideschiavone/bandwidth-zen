@@ -119,8 +119,8 @@ array — and flips to DRAM-bound.
 **To see that same run instead of reading it** — one row per hardware resource, zoomable:
 
 ```bash
-uv run --group plots python scripts/plot_pipeline.py \
-  --chip a100_80gb --matmul 10000,10000,10000 --ideal --html --out ..
+uv run python scripts/plot_pipeline.py \
+  --chip a100_80gb --matmul 10000,10000,10000 --ideal --out ..
 xdg-open ../timeline-a100_80gb-fp16.html
 ```
 
@@ -242,8 +242,8 @@ fudge factor.
 uv run bwz matmul -M 10000 -N 10000 -K 10000 --chip a100_80gb --dtype fp16 --ideal
 
 # 2. the picture of that same run
-uv run --group plots python scripts/plot_pipeline.py \
-  --chip a100_80gb --matmul 10000,10000,10000 --ideal --html --out ..
+uv run python scripts/plot_pipeline.py \
+  --chip a100_80gb --matmul 10000,10000,10000 --ideal --out ..
 
 # 3. open it
 xdg-open ../timeline-a100_80gb-fp16.html
@@ -259,34 +259,38 @@ It draws one of three things, and the flags mirror the report commands above:
 
 ```bash
 # a matmul (the default)
-… plot_pipeline.py --chip a100_80gb --matmul 10000,10000,10000 --ideal --html --out ..
+… plot_pipeline.py --chip a100_80gb --matmul 10000,10000,10000 --ideal --out ..
 
-# a profile — one figure per phase
-… plot_pipeline.py --chip a100_80gb --model llama3_8b -S 512 --html --out ..
+# a profile — one page per phase
+… plot_pipeline.py --chip a100_80gb --model llama3_8b -S 512 --out ..
 
 # an ad-hoc single-layer encoder, sized like the command of the same name
 … plot_pipeline.py --chip a100_80gb --encoder --hidden 4096 --heads 64 --ffn 16384 -S 4096 \
-    --ideal --html --out ..
+    --ideal --out ..
 ```
 
-`--chip` (repeatable) · `--compare` · `--matmul M,N,K` · `--model ID` · `--encoder` with `--hidden
---heads --head-dim --ffn --vocab` · `-S/--tokens` · `--weights` · `--ideal` · `--steps` how many
-bars · `--zoom` how many in the second register · `--html` · `--html-steps` (256, finer than the
-PNG's 32) · `--out`.
+`--chip` (repeatable) · `--compare` · `--matmul M,N,K` (plus `--a-strategy`, `--b-dataflow`,
+`--a-residency-tiles`, `--a-prefetch-depth`, `--iterations` — a lone matmul's dataflow strategy,
+`docs/CLI.md` §2.5) · `--model ID` · `--encoder` with `--hidden --heads --head-dim --ffn --vocab` ·
+`-S/--tokens` · `--weights` · `--ideal` · `--steps` (default 256 — the only resolution knob; the
+page zooms, so there is no second, coarser register to keep legible) · `--out`.
 
 The shape flags belong to `--encoder`; a profile already carries its dimensions.
 
 ### `--compare` — two chips, one workload, one picture
 
 ```bash
-… plot_pipeline.py --chip a100_80gb --chip metis_aipu --compare --model gemma3_4b -S 512 --html
+… plot_pipeline.py --chip a100_80gb --chip metis_aipu --compare --model gemma3_4b -S 512
 ```
 
 The time axis is **shared and absolute**, so a bar three times as long took three times as long —
-here A100 9.06 ms against Metis 119 ms, stated as 13.15x rather than left to be measured off the
+here A100 9.1 ms against Metis 119 ms, stated as 13.04x rather than left to be measured off the
 ticks. Rows are **banded by chip** rather than aligned, because the two profiles declare different
 resources (A100: 3 memory levels, 2 engines; Metis: 4 and 2) and no correspondence between
-`cuda_core` and `dpu` exists to draw. Everything the per-chip figure does survives inside each band.
+`cuda_core` and `dpu` exists to draw. Each band header also states its chip's **achieved
+throughput** — `622 TOP/s achieved · 100% of peak` against `186 TOP/s achieved · 89% of peak` on an
+8192³ INT8 matmul, the same 3.34x the latency ratio is, inverted. Everything the per-chip figure
+does survives inside each band.
 
 Below the timeline, both rooflines on one chart. Both chips do the same 3.33 TOP over the same
 ~3.8 GB — ~870 OP/byte — and land on **opposite sides of their own ridge point**: A100's ridge is
@@ -323,13 +327,14 @@ produced it and the commit it came from:
 |---|---|
 | `roofline-<chip>-<dtype>.png` | the two ceilings, the ridge point, the M=1 tail, and workloads placed on them |
 | `machine-<chip>.png` | the three-element machine — which link carries a bandwidth number and which does not |
-| `timeline-<chip>-<dtype>.png` | where the time went, one row per hardware resource |
-| `timeline-<chip>-<dtype>.html` | the same, **zoomable**, with the roofline and the arithmetic below it |
-| `timeline-compare-<a>-vs-<b>-….{png,html}` | two chips, one workload, one shared absolute axis, both rooflines |
+| `timeline-<chip>-<dtype>.html` | where the time went, one row per hardware resource, **zoomable**, with the roofline and the arithmetic below it |
+| `timeline-compare-<a>-vs-<b>-….html` | two chips, one workload, one shared absolute axis, both rooflines |
 
 None of them is committed — they are outputs of the engine, regenerable in one command, and a
-750 kB PNG per run is churn nobody can review. `make plots` writes the set above into
-`docs/plots/`, which `.gitignore` covers.
+750 kB PNG per run is churn nobody can review (the timeline dropped its PNG form entirely for this
+reason — it could not zoom, so it needed a second "first N steps" figure just to stay legible, and
+the HTML page needs none of that, D37). `make plots` writes the set above into `docs/plots/`, which
+`.gitignore` covers.
 
 **Rows are hardware resources**, read off the chip profile — every memory level and every compute
 unit it declares, each with its own quantity: bytes moved and at what rate, operations retired and

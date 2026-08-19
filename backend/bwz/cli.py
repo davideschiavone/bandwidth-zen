@@ -21,10 +21,12 @@ from bwz.analysis import (
     suggestions,
 )
 from bwz.analysis.compare import head_to_head, prefill_crossover
+from bwz.analysis.dataflow import plan_dataflow
 from bwz.analysis.pipeline import Lane, PipelineTrace, build_trace
 from bwz.analysis.roofline import compute_dtype
 from bwz.graph import build_graph
 from bwz.graph.ops import GraphPhase
+from bwz.operators.base import cost_of
 from bwz.report import Bound, Report
 from bwz.spec import (
     CNNSpec,
@@ -42,7 +44,7 @@ from bwz.spec import (
     load_chip,
     load_model,
 )
-from bwz.spec.deployment import AttentionImpl, DeploymentSpec, Phase
+from bwz.spec.deployment import AStrategy, AttentionImpl, BDataflow, DeploymentSpec, Phase
 from bwz.spec.loaders import AnyModelSpec
 from bwz.units import format_bandwidth, format_bytes, format_quantity, format_time
 
@@ -234,6 +236,26 @@ def _memory_table(report: Report) -> Table:
     return table
 
 
+def _dataflow_options(
+    a_strategy: AStrategy,
+    b_dataflow: BDataflow,
+    a_residency_tiles: int | None,
+    a_prefetch_depth: int | None,
+    iterations: int,
+) -> dict[str, object]:
+    """The single-matmul dataflow fields, as a fragment to merge into a
+    ``DeploymentSpec`` dict. Shared by ``matmul`` and ``run`` so the two
+    commands cannot drift onto different field names.
+    """
+    return {
+        "a_strategy": a_strategy,
+        "b_dataflow": b_dataflow,
+        "a_residency_tiles": a_residency_tiles,
+        "a_prefetch_depth": a_prefetch_depth,
+        "iterations": iterations,
+    }
+
+
 @app.command()
 def run(
     model: str = typer.Option(..., "--model", "-m", help="Model profile id or path"),
@@ -245,6 +267,40 @@ def run(
     weights: DType = typer.Option(DType.FP16, "--weights", help="Weight precision"),
     phase: Phase = typer.Option(Phase.BOTH, "--phase"),
     attention: AttentionImpl = typer.Option(AttentionImpl.FLASH2, "--attention"),
+    a_strategy: AStrategy = typer.Option(
+        AStrategy.STAGE,
+        "--a-strategy",
+        help="How A is loaded for a lone matmul: stage (once per k-slice, D33), "
+        "stream (per tile, D31) or whole (all of A before the first tile). Inert on a "
+        "network, whose activations are governed by inter-operation residency instead.",
+    ),
+    b_dataflow: BDataflow = typer.Option(
+        BDataflow.WRITE_AHEAD,
+        "--b-dataflow",
+        help="When B's array write lands: write-ahead (a wave early, hidden behind "
+        "compute), on-demand (at compute, exposed) or persistent (once, never "
+        "displaced — needs tiles <= units * weight_sets).",
+    ),
+    a_residency_tiles: int | None = typer.Option(
+        None,
+        "--a-residency-tiles",
+        help="Override tiles served per A staging event under stage/whole; must be a "
+        "power-of-2 divisor of NTILES_PER_KS (clamped otherwise). Default: the whole "
+        "k-slice.",
+    ),
+    a_prefetch_depth: int | None = typer.Option(
+        None,
+        "--a-prefetch-depth",
+        help="Override the double-buffered staging depth for A. Schedule-only — "
+        "changes no byte count. Default: derived from double buffering, as today.",
+    ),
+    iterations: int = typer.Option(
+        1,
+        "--iterations",
+        help="Invocations this report represents. Only b_dataflow=persistent reads "
+        "it, amortising B's write over a resident weight set a repeat invocation "
+        "would not have to rewrite.",
+    ),
     show_ops: int = typer.Option(0, "--show-ops", help="Show the N most expensive operations"),
     ideal: bool = typer.Option(
         False,
@@ -265,6 +321,9 @@ def run(
                 "phase": phase,
                 "attention_impl": attention,
                 "precision": {"weights": weights, "activations": weights, "kv_cache": weights},
+                **_dataflow_options(
+                    a_strategy, b_dataflow, a_residency_tiles, a_prefetch_depth, iterations
+                ),
             }
         )
         report = _run_report(model, chip, deployment, ideal=ideal)
@@ -416,6 +475,39 @@ def matmul(
         help="Width of the M x N result. Defaults to the wider operand; set int32 or fp32 for a "
         "widening accumulator",
     ),
+    a_strategy: AStrategy = typer.Option(
+        AStrategy.STAGE,
+        "--a-strategy",
+        help="How A is loaded: stage (once per k-slice, D33), stream (per tile, D31) "
+        "or whole (all of A before the first tile).",
+    ),
+    b_dataflow: BDataflow = typer.Option(
+        BDataflow.WRITE_AHEAD,
+        "--b-dataflow",
+        help="When B's array write lands: write-ahead (a wave early, hidden behind "
+        "compute), on-demand (at compute, exposed) or persistent (once, never "
+        "displaced — needs tiles <= units * weight_sets).",
+    ),
+    a_residency_tiles: int | None = typer.Option(
+        None,
+        "--a-residency-tiles",
+        help="Override tiles served per A staging event under stage/whole; must be a "
+        "power-of-2 divisor of NTILES_PER_KS (clamped otherwise). Default: the whole "
+        "k-slice.",
+    ),
+    a_prefetch_depth: int | None = typer.Option(
+        None,
+        "--a-prefetch-depth",
+        help="Override the double-buffered staging depth for A. Schedule-only — "
+        "changes no byte count. Default: derived from double buffering, as today.",
+    ),
+    iterations: int = typer.Option(
+        1,
+        "--iterations",
+        help="Invocations this report represents. Only b_dataflow=persistent reads "
+        "it, amortising B's write over a resident weight set a repeat invocation "
+        "would not have to rewrite.",
+    ),
     ideal: bool = typer.Option(
         False,
         "--ideal",
@@ -454,10 +546,18 @@ def matmul(
             }
         )
         # DeploymentSpec is required by analyze() but a bare matmul reads nothing
-        # from it: the builder takes its widths from the spec (D18) and there is
-        # no batch, context or phase to describe.
+        # from it beyond the dataflow strategy flags: the builder takes its widths
+        # from the spec (D18) and there is no batch, context or phase to describe.
         deployment = DeploymentSpec.model_validate(
-            {"batch": 1, "input_tokens": 1, "output_tokens": 0, "phase": Phase.PREFILL}
+            {
+                "batch": 1,
+                "input_tokens": 1,
+                "output_tokens": 0,
+                "phase": Phase.PREFILL,
+                **_dataflow_options(
+                    a_strategy, b_dataflow, a_residency_tiles, a_prefetch_depth, iterations
+                ),
+            }
         )
         report = _report_for(spec, chip, deployment, ideal=ideal)
     except SpecLoadError as exc:
@@ -562,11 +662,19 @@ def matmul(
 
     if pipeline:
         graph = build_graph(spec, deployment, GraphPhase.STATIC)
+        dataflow = plan_dataflow(
+            graph.ops[0],
+            machine,
+            _chip_for(chip, ideal),
+            deployment,
+            a_bytes=cost_of(graph.ops[0], graph.tensors).input_bytes,
+        )
         trace = build_trace(
             graph,
             report.phases[0],
             machine,
             double_buffered=report.memory.double_buffered,
+            dataflow=dataflow,
         )
         console.print()
         console.print(_lane_table(trace))

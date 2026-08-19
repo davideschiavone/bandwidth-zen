@@ -47,13 +47,22 @@ overlaps.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
+from typing import TYPE_CHECKING
 
 from bwz.analysis.roofline import MATRIX_OP_TYPES, MachineModel
 from bwz.analysis.tiling import padded
 from bwz.graph.ops import ComputeGraph, GraphPhase, MatmulAttrs, Operation
 from bwz.report import OpResult, PhaseResult
+from bwz.spec.deployment import AStrategy
+
+if TYPE_CHECKING:
+    # analysis.dataflow imports tile_count/ntiles_per_kslice from this module,
+    # so importing DataflowPlan back at runtime would be circular. The type is
+    # only ever used in annotations, which `from __future__ import annotations`
+    # already defers, so a TYPE_CHECKING-only import is enough.
+    from bwz.analysis.dataflow import DataflowPlan
 
 MAX_DRAWN_STEPS = 64
 """Steps a trace draws before coalescing. A 10000-cubed matmul on a 16x16 array
@@ -122,9 +131,14 @@ class Span:
     """Core lane: operations retired in this span."""
     resident_bytes: float = 0.0
     """SRAM lane: bytes this buffer holds while occupied."""
-    staged_once: bool = False
-    """DRAM lane: whether this A load is a whole k-slice staging drawn once
-    (D33) rather than a per-step share of an operand that streams."""
+    a_fetch_mode: str = "stream"
+    """DRAM lane, ``Stage.LOAD_A`` only: which ``a_strategy`` produced this span
+    — ``"stage"`` (a k-slice staged once, D33), ``"stream"`` (a per-tile
+    re-fetch, D31) or ``"whole"`` (every k-slice ramped upfront, same bytes as
+    stage). Meaningless on any other stage. Defaults to ``"stream"``: a
+    network's inter-op activation traffic has no k-slice structure to stage —
+    it genuinely streams, the same physical picture ``a_strategy=stream``
+    deliberately reproduces for a lone matmul."""
 
     @property
     def duration_s(self) -> float:
@@ -256,6 +270,23 @@ def tile_count(op: Operation, machine: MachineModel) -> int:
     return (padded(op.attrs.k, rows) // rows) * (padded(op.attrs.n, cols) // cols)
 
 
+def ntiles_per_kslice(op: Operation, machine: MachineModel) -> int:
+    """``ceil(N/cols)`` — tiles served by one staged A k-slice under D33.
+
+    The same divisor :func:`_tile_trace` and :mod:`bwz.deploy` use, so the
+    dataflow strategies in ``analysis/schedule.py`` cannot compute a different
+    figure than the schedule and the listing draw. Returns 1 without declared
+    array geometry, where there is no k-slice structure to speak of.
+    """
+    if not isinstance(op.attrs, MatmulAttrs):
+        return 1
+    dims = machine.unit.systolic_dims
+    if dims is None:
+        return 1
+    _, cols = dims
+    return math.ceil(op.attrs.n / cols)
+
+
 def _engine_work(group: list[OpResult], *, matrix: bool) -> tuple[float, float, str]:
     """``(seconds, operations, dominant family)`` for one engine's share of *group*.
 
@@ -297,13 +328,19 @@ def build_trace(
     *,
     double_buffered: bool,
     max_steps: int = MAX_DRAWN_STEPS,
+    dataflow: DataflowPlan | None = None,
 ) -> PipelineTrace:
     """Decompose *phase* into resource spans.
 
     A single-matmul graph is decomposed into tile steps; anything else is
     decomposed into one step per operation, which is the granularity at which the
     engine actually models a network (no cross-operation overlap, D5a).
-    """
+
+    *dataflow* is the plan ``analysis.dataflow.plan_dataflow`` already resolved
+    for this op — the same one that decided the bytes ``phase`` carries — so the
+    schedule this draws cannot disagree with the traffic it charged. ``None``
+    (the default: no caller has to know about the dataflow strategies) draws
+    exactly what a matmul always drew, ``a_strategy=stage``."""
     if len(graph.ops) == 1 and isinstance(graph.ops[0].attrs, MatmulAttrs):
         return _tile_trace(
             graph.ops[0],
@@ -311,6 +348,7 @@ def build_trace(
             machine,
             double_buffered=double_buffered,
             max_steps=max_steps,
+            dataflow=dataflow,
         )
     return _operation_trace(graph, phase, double_buffered=double_buffered, max_steps=max_steps)
 
@@ -322,6 +360,7 @@ def _tile_trace(
     *,
     double_buffered: bool,
     max_steps: int,
+    dataflow: DataflowPlan | None = None,
 ) -> PipelineTrace:
     result = phase.ops[0]
     tiles = tile_count(op, machine)
@@ -347,13 +386,17 @@ def _tile_trace(
     assert isinstance(attrs, MatmulAttrs)
     dims = machine.unit.systolic_dims
     shape = f"{dims[0]}x{dims[1]}" if dims is not None else "untiled"
-    # D33: for a lone matmul, A is not a stream — each k-slice is staged once
+    a_strategy = dataflow.a_strategy if dataflow is not None else AStrategy.STAGE
+    # D33: under stage/whole, A is not a stream — each k-slice is staged once
     # and every tile of its group reads the staging. Concentrate A's DRAM time
     # into one event per k-slice, at the step that opens it, instead of a
     # per-wave trickle that reads as a re-read. Tiles are k-major, so tile t
-    # opens the k-slice CEIL(N/COLS) divides it. Without declared geometry the
-    # whole run is one slice and the uniform share carries the totals.
-    if dims is not None:
+    # opens the k-slice CEIL(N/COLS) divides it. Under stream (D31) or without
+    # declared geometry, the honest picture *is* the per-wave trickle: `result`
+    # already carries the inflated bytes a per-tile re-fetch costs (analysis/
+    # dataflow.py), and this function only has to schedule what it is given.
+    ramp_s = 0.0
+    if dims is not None and a_strategy is not AStrategy.STREAM:
         rows, cols = dims
         tiles_per_ks = max(1, math.ceil(attrs.n / cols))
         k_slices = max(1, math.ceil(attrs.k / rows))
@@ -366,12 +409,24 @@ def _tile_trace(
             openings = end_tile // tiles_per_ks - open_tile // tiles_per_ks
             a_bytes_step.append(result.dram_activation_read_bytes * openings / k_slices)
             ks_opened.append(open_tile // tiles_per_ks + 1 if openings else 0)
-        load_a = [b * scale * steps for b in a_bytes_step]
-        activation_bytes = a_bytes_step
+        if a_strategy is AStrategy.WHOLE:
+            # Same total bytes as stage (D33) — only the timing changes: every
+            # k-slice ramps in before wave 0 instead of landing at the wave that
+            # opens it. Zero the per-step shares here; the ramp itself is a
+            # single span prepended after `_pipelined_tiles` returns, and every
+            # other span shifts to start after it (below).
+            ramp_s = sum(a_bytes_step) * scale * steps
+            load_a = [0.0] * steps
+            activation_bytes = [0.0] * steps
+            ks_opened = [0] * steps
+        else:
+            load_a = [b * scale * steps for b in a_bytes_step]
+            activation_bytes = a_bytes_step
     else:
         load_a = [result.dram_activation_read_bytes * scale] * steps
         activation_bytes = [result.dram_activation_read_bytes / steps] * steps
         ks_opened = [0] * steps
+        k_slices = 1
     tiles_here = in_flight * per_step
     # Two spaces separate the bar text from the qualifier: `_short` in the plot
     # script splits there, so the bar stays legible and the hover keeps it all.
@@ -388,11 +443,16 @@ def _tile_trace(
         label, qualifier = f"{tiles_here:.0f} B tiles {shape}", ""
     tail = f"  {qualifier}" if qualifier else ""
     labels = [f"{label} [{i + 1}/{steps}]{tail}" for i in range(steps)]
-    # The k-slice openings' A bars carry their own names; the other steps have
-    # no A traffic at all under D33, so nothing else needs an activation label.
-    activation_labels = [
-        f"A k-slice {g}/{k_slices} — staged once, feeds its tiles" if g else "" for g in ks_opened
-    ]
+    # The k-slice openings' A bars carry their own names under stage; the other
+    # steps have no A traffic at all under D33, so nothing else needs one. Under
+    # stream or whole there is no per-step opening to name — stream falls back
+    # to the B labels (D31's per-tile share), whole's A traffic is a single ramp
+    # named separately below.
+    activation_labels = (
+        [f"A k-slice {g}/{k_slices} — staged once, feeds its tiles" if g else "" for g in ks_opened]
+        if a_strategy is AStrategy.STAGE
+        else None
+    )
 
     spans = _pipelined_tiles(
         [load_b] * steps,
@@ -412,8 +472,30 @@ def _tile_trace(
         activation_loads=load_a,
         activation_bytes_per_step=activation_bytes,
         activation_labels=activation_labels,
-        staged_once=True,
+        a_fetch_mode=a_strategy.value,
+        depth_override=(dataflow.a_prefetch_depth if dataflow is not None else None),
     )
+    if a_strategy is AStrategy.WHOLE and ramp_s > 0:
+        # Every k-slice staged before wave 0: one span for the whole ramp, and
+        # the rest of the schedule — which has no A load left to place — shifts
+        # to start after it. DRAM busy still sums to t_dram exactly: the ramp's
+        # bytes are the same A total the per-k-slice events would have moved.
+        ramp = Span(
+            Lane.DRAM,
+            Stage.LOAD_A,
+            f"A staged whole  {k_slices} k-slices before wave 0",
+            0.0,
+            ramp_s,
+            -1,
+            phase.phase,
+            op_type=op.op_type.value,
+            bytes_moved=result.dram_activation_read_bytes,
+            a_fetch_mode=AStrategy.WHOLE.value,
+        )
+        spans = [
+            ramp,
+            *(replace(s, start_s=s.start_s + ramp_s, end_s=s.end_s + ramp_s) for s in spans),
+        ]
     return PipelineTrace(
         spans=tuple(spans),
         total_s=max((s.end_s for s in spans), default=0.0),
@@ -543,7 +625,8 @@ def _pipelined_tiles(
     activation_loads: list[float] | None = None,
     activation_bytes_per_step: list[float] | None = None,
     activation_labels: list[str] | None = None,
-    staged_once: bool = False,
+    a_fetch_mode: str = "stream",
+    depth_override: int | None = None,
 ) -> list[Span]:
     """Software-pipeline the tiles of ONE operation, per the constraints above.
 
@@ -552,9 +635,15 @@ def _pipelined_tiles(
 
     ``loads`` is operand B's time and ``activation_loads`` operand A's. They
     queue on the same port, so the schedule uses their sum and the drawing keeps
-    them as two adjacent bars. ``staged_once`` marks the A bars as whole k-slice
-    stagings (D33) instead of portions of a stream, and ``activation_labels``
-    names them; both default to the per-step leg of the D31 stream.
+    them as two adjacent bars. ``a_fetch_mode`` names which ``a_strategy`` these
+    A bars are (D33/D31), and ``activation_labels`` names them; both default to
+    the per-step leg of a stream.
+
+    ``depth_override`` is ``--a-prefetch-depth``: how many steps back a buffer
+    must free before its slot can be reused, in place of the depth on-chip
+    capacity would derive (``2`` double buffered, ``1`` otherwise). Schedule-only
+    — the loop below is depth-agnostic beyond ``i >= depth``, so any depth >= 1
+    is valid, not just the two capacity ever produces.
     """
     steps = len(loads)
     a_loads = activation_loads if activation_loads is not None else [0.0] * steps
@@ -566,7 +655,7 @@ def _pipelined_tiles(
         # with the first tile's row.
         spans.append(Span(Lane.CORE, Stage.DISPATCH, "kernel dispatch", 0.0, dispatch_s, -1, phase))
 
-    depth = 2 if double_buffered else 1
+    depth = depth_override if depth_override is not None else (2 if double_buffered else 1)
     dram_free = dispatch_s
     exec_end = dispatch_s
     load_ends: list[float] = []
@@ -585,6 +674,13 @@ def _pipelined_tiles(
         store_ends.append(dram_free)
 
     for i in range(steps):
+        # With a single buffer (depth 1, no double buffering) there is no slack
+        # to reorder: tile i-1's store must be placed before tile i's load even
+        # asks whether the buffer is free, because that load needs its answer.
+        # Deferring it (the depth >= 2 branch below) would read store_ends one
+        # entry short of what has actually been placed.
+        if depth == 1 and i >= 1:
+            place_store(i - 1)
         # A buffer is free once its tile has been *written out*, not merely
         # computed — the hold below runs to the store, so the reuse test must too.
         freed = store_ends[i - depth] if i >= depth else dispatch_s
@@ -602,8 +698,10 @@ def _pipelined_tiles(
         # Issue order on the one port: the *next* tile's fetch outranks this
         # tile's write-back, which is what a memory controller does with a write
         # buffer. Draining stores first would stall the array behind them and
-        # quietly cancel the double buffer.
-        if i >= 1:
+        # quietly cancel the double buffer. Only meaningful with >= 2 buffers —
+        # depth 1 has no next-fetch to prioritise over, and already placed this
+        # store above.
+        if depth >= 2 and i >= 1:
             place_store(i - 1)
     if steps:
         place_store(steps - 1)
@@ -643,7 +741,7 @@ def _pipelined_tiles(
                     phase,
                     op_type=op_types[i],
                     bytes_moved=a_bytes[i],
-                    staged_once=staged_once,
+                    a_fetch_mode=a_fetch_mode,
                 )
             )
         # A buffer is occupied from the moment its fetch begins until its result

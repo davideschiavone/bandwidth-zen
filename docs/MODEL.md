@@ -463,6 +463,55 @@ again, so it is compulsory traffic read exactly once, `a = 0`. The report says s
 assumptions; `plan_memory` still computes the D15 fraction for multi-op graphs, and the two agree
 there.
 
+### 6.3a A's residency and B's write timing, as command-line strategies
+
+D33 fixed the single-matmul roofline to charge A as compulsory traffic — one crossing, always.
+`a_strategy` and `b_dataflow` (`bwz matmul --a-strategy`, `--b-dataflow`) generalise that fix into
+three named points each, one of which is D33's own default, so the defaults reproduce every
+existing number exactly. The two knobs are physically different and are kept apart rather than
+fused into one flag: A has reuse — every tile of a k-slice's group reads the same staged slice — so
+*how often* that slice is re-staged is a byte-amount question. B has none: within one pass every
+tile is fetched exactly once whatever the choice (D30), so the only thing left to choose is *when*
+the write lands relative to compute.
+
+```
+A_traffic = |A| · NTILES_PER_KS / residency_tiles
+
+stage   residency_tiles = NTILES_PER_KS        (default) -> A_traffic = |A|,   one crossing
+whole   residency_tiles = NTILES_PER_KS        (same bytes as stage; only the timing ramps upfront)
+stream  residency_tiles = 1                    -> A_traffic = |A| · NTILES_PER_KS
+```
+
+`residency_tiles` is how many of a k-slice's `NTILES_PER_KS` output tiles one staging event serves
+before the next one is fetched. `stage` and `whole` serve the whole k-slice per event — A crosses
+DRAM exactly once, the D33 result — and differ only in *when* those events are scheduled: `stage`
+at each k-slice boundary (today's behaviour), `whole` all of them ramped in before wave 0. `stream`
+serves one tile per event — the honest picture for a machine whose GEMMs genuinely re-read operands
+— and re-reads A `NTILES_PER_KS` times. `--a-residency-tiles` overrides the default with any
+power-of-2 divisor of `NTILES_PER_KS`; a value that is not one is clamped down to the largest that
+is (CLAUDE.md #8), because there is no honest way to serve a fractional tile.
+
+Measured on Metis 8192³ INT8 (`NTILES_PER_KS = 16`, `|A| = 67.1 MB`):
+
+| `a_strategy` | A bytes | A's DRAM time |
+|---|---|---|
+| `stage` (default) | 67.1 MB | 1.966 ms |
+| `whole` | 67.1 MB | 1.966 ms, all before the first tile |
+| `stream` | 1.07 GB | 31.46 ms |
+
+B's write timing charges **no bytes at all** in a single pass — `write-ahead` (default, D33's
+weight-set rotation), `on-demand` (exposed at compute) and `persistent` (loaded once) all write the
+same total, because v1 has no on-chip write-bandwidth term to charge one placement more than
+another (D5b, D30). The one place `b_dataflow` *does* move bytes is across **iterations**: a
+`persistent` B that fits the array's resident tile capacity (`tiles <= units · weight_sets`) need
+not be rewritten on a repeat invocation, so with `iterations = N > 1` the report charges the
+amortised share `1/N` of one full write — the first invocation pays it, the other `N-1` pay nothing.
+`analyze()` still returns one report, not `N`; `iterations` only ever reaches this one multiplier.
+
+Both `whole` (scratchpad `>= |A|`) and `persistent` (`tiles <= units · weight_sets`) clamp rather
+than raise when they do not fit, falling back to `stage`/`write-ahead` with the requested value, the
+value used and why named in `report.assumptions` — never silently.
+
 ### 6.4 Schedule
 
 A phase costs the sum of its operations. For a transformer the graph is a chain, so the sum *is*

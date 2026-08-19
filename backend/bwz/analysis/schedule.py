@@ -15,15 +15,20 @@ previous kernel's arithmetic in this model.
 
 from __future__ import annotations
 
+from bwz.analysis.dataflow import DataflowPlan, plan_dataflow
 from bwz.analysis.roofline import DISPATCHED_OP_TYPES, MachineModel, classify, op_roofline
 from bwz.graph.ops import ComputeGraph, MatmulAttrs
 from bwz.operators.base import cost_of
 from bwz.report import PhaseResult
+from bwz.spec.deployment import DeploymentSpec
+from bwz.spec.hardware_spec import HardwareSpec
 
 
 def run_phase(
     graph: ComputeGraph,
     machine: MachineModel,
+    chip: HardwareSpec,
+    deployment: DeploymentSpec,
     *,
     resident_fraction: float,
     activation_resident_fraction: float,
@@ -48,7 +53,18 @@ def run_phase(
     # capacity (docs/CORRECTIONS.md D33). Disable the discount here; the generic
     # `plan_memory` number applies to networks, whose activations it was written
     # for.
+    #
+    # The a_strategy/b_dataflow dataflow flags read the same way: they are
+    # single-matmul-only knobs, resolved once into a DataflowPlan and fed to
+    # every op_roofline call as traffic multipliers that default to 1.0 — a
+    # network's bytes are untouched (docs/CORRECTIONS.md D33/D36).
     single_matmul = len(graph.ops) == 1 and isinstance(graph.ops[0].attrs, MatmulAttrs)
+    dataflow: DataflowPlan | None = None
+    if single_matmul:
+        op0_cost = cost_of(graph.ops[0], graph.tensors)
+        dataflow = plan_dataflow(
+            graph.ops[0], machine, chip, deployment, a_bytes=op0_cost.input_bytes
+        )
     results = tuple(
         op_roofline(
             op,
@@ -60,6 +76,8 @@ def run_phase(
             terminal_output_bytes=sum(
                 graph.tensors[name].size_bytes for name in op.outputs if name not in consumed
             ),
+            activation_traffic_multiplier=(dataflow.a_bytes_multiplier if dataflow else 1.0),
+            weight_traffic_multiplier=(dataflow.b_write_multiplier if dataflow else 1.0),
         )
         for op in graph.ops
     )

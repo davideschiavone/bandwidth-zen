@@ -75,6 +75,11 @@ so a batch of 128 is `-M 128`.
 | `--out` | result width — the **accumulator**. Defaults to the wider operand |
 | `--ideal` | set both efficiency de-ratings to 1.0: a datasheet ceiling, not a prediction |
 | `--pipeline` / `--no-pipeline` | lane occupancy table (default on) |
+| `--a-strategy` | `stage` (default, D33) \| `stream` (D31) \| `whole` — how A is loaded, §2.5 |
+| `--b-dataflow` | `write-ahead` (default, D33) \| `on-demand` \| `persistent` — when B's write lands |
+| `--a-residency-tiles` | override tiles served per A staging event; power-of-2 divisor of `NTILES_PER_KS` |
+| `--a-prefetch-depth` | override A's double-buffered staging depth (schedule-only) |
+| `--iterations` | invocations this report represents; only `persistent` reads it |
 | `--json` | the raw `Report` as JSON |
 
 ### 2.1 The datasheet check
@@ -172,6 +177,107 @@ counts how many were occupied: `1.97 of 2` means both halves of the double buffe
 almost all the time. That is capacity, not bandwidth, which is the whole of what SRAM contributes
 in this model.
 
+### 2.5 Dataflow strategies — `--a-strategy`, `--b-dataflow`
+
+A is a byte-amount knob; B is a timing knob (`docs/MODEL.md` §6.3a, `docs/CORRECTIONS.md` D36).
+Defaults reproduce every number above exactly — `stage` and `write-ahead` are what §2.1–2.4 already
+ran.
+
+```bash
+uv run bwz matmul -M 8192 -N 8192 -K 8192 -c metis_aipu -d int8 --ideal \
+  --a-strategy stream --no-pipeline
+```
+
+```
+  operand A                   67.1 MB   8192 x 8192 x 1 B
+  operand B                   67.1 MB   8192 x 8192 x 1 B
+  DRAM reads                  1.14 GB   A and B, less whatever stays on chip
+  DRAM traffic                1.21 GB   reads + writes
+  t_dram                      35.4 ms   traffic / effective bandwidth
+  latency                     35.4 ms
+  verdict               DRAM_BW_BOUND
+```
+
+`stream` re-reads A once per tile instead of once per k-slice — `NTILES_PER_KS = 16` here, so A's
+share of DRAM reads is 16× `stage`'s: 1.07 GB against 67.1 MB, and the assumptions drawer says so:
+
+```
+A: streamed per tile (D31), 16x the staged total — 67.1 MB would cross DRAM
+once under stage/whole, 1.07 GB crosses it under stream
+```
+
+**`whole` and `persistent` clamp rather than raise when they do not fit** (CLAUDE.md #8), and this
+shape hits both fallbacks:
+
+```bash
+uv run bwz matmul -M 8192 -N 8192 -K 8192 -c metis_aipu -d int8 --ideal \
+  --a-strategy whole --no-pipeline
+```
+
+```
+a_strategy=whole requested but A (67.1 MB) does not fit the 54.5 MB
+scratchpad; fell back to stage — the same 67.1 MB total, staged per k-slice
+instead of ramped upfront.
+```
+
+```bash
+uv run bwz matmul -M 8192 -N 8192 -K 8192 -c metis_aipu -d int8 --ideal \
+  --b-dataflow persistent --no-pipeline
+```
+
+```
+b_dataflow=persistent requested but B is 256 tiles against 16 resident; fell
+back to write-ahead.
+```
+
+`whole` needs the scratchpad to hold all of A; `persistent` needs `tiles <= units * weight_sets`
+(16 here — Metis's 4 AI cores × 4 weight sets). Both fallbacks are named, with the requested value
+and the value used, never silent. `write-ahead`/`on-demand`/`persistent` never move a *byte* within
+one pass — B is fetched exactly once whichever is chosen (D30) — so the dataflow line always names
+the byte-carrying side plainly:
+
+```
+A: staged 4.19 MB per k-slice (16 k-slices) — crosses DRAM exactly once
+(D33) · B: write-ahead depth 4 (D33).
+```
+
+`--iterations` only changes anything when paired with a `persistent` B that fits: the first
+invocation writes B in full, every later one reuses it, and the report — which is still one
+invocation's numbers, not `N` of them — charges the amortised share `1/iterations` of that write.
+
+**The two escape hatches, each with a real effect.** `--a-residency-tiles` overrides how many of a
+k-slice's `NTILES_PER_KS` tiles one A staging serves, clamped down to the largest power-of-2 divisor
+when the requested value is not one:
+
+```bash
+uv run bwz matmul -M 8192 -N 8192 -K 8192 -c metis_aipu -d int8 --ideal \
+  --a-residency-tiles 5 --no-pipeline
+```
+
+```
+a_residency_tiles=5 is not a power-of-2 divisor of NTILES_PER_KS=16; clamped
+to 4, the largest one that is.
+```
+
+`--a-prefetch-depth` overrides the double-buffered staging depth the schedule uses — schedule-only,
+so it never moves a report number, only how much pipeline fill/drain the drawn trace shows:
+
+```bash
+uv run bwz matmul -M 4096 -N 4096 -K 4096 -c a100_80gb -d fp16 --a-prefetch-depth 1
+```
+
+```
+  sram      691 µs   1.00 of 1 buf   tile buffers held from fetch to use
+  64 steps drawn, coalesced from 152 tiles, double buffered. Span 694 µs against
+  a reported 636 µs: the extra 58.1 µs (8.4%) is pipeline fill/drain, which
+  max(load, compute) omits.
+```
+
+Depth 1 holds one buffer at a time instead of two and pays for it in fill/drain — 8.4% here against
+under 1% at the default depth on the same shape (`sram` reads `1.00 of 1 buf` against `1.97 of 2`
+buffers) — while `latency` itself is untouched: `636 µs` either way. The reported latency always
+comes from the roofline's formula, never from the drawn schedule (D19, D35).
+
 ---
 
 ## 3. `bwz run` — a network on a chip
@@ -187,6 +293,7 @@ in this model.
 | `--attention` | `vanilla` \| `flash2` \| `paged` \| `sliding_window` |
 | `--show-ops N` | the N most expensive operations |
 | `--ideal`, `--json` | as for `matmul` |
+| `--a-strategy`, `--b-dataflow`, `--a-residency-tiles`, `--a-prefetch-depth`, `--iterations` | accepted for parity with `matmul` (§2.5), but inert here — a network's graph is never one bare matmul, so `analysis/schedule.py` never reaches the single-matmul branch these read |
 
 ```bash
 uv run bwz run -m llama3_8b -c a100_80gb --input-tokens 2048 --output-tokens 128
@@ -253,15 +360,16 @@ make plots        # from the repo root — regenerates all of docs/plots/
 or individually, from `backend/`:
 
 ```bash
-# roofline + the three-element machine diagram (roofline-*.png, machine-*.png)
+# roofline + the three-element machine diagram (roofline-*.png, machine-*.png) — needs matplotlib
 uv run --group plots python scripts/plot_roofline.py --chip a100_80gb --model llama3_8b
 uv run --group plots python scripts/plot_roofline.py --chip chip_a --weights int8 \
   --model gemma3_4b --tokens 512 \
   --matmul 512,4096,4096 --matmul 128,4096,4096 --matmul 1,4096,4096
 
-# resource timeline, one figure per chip (timeline-*.png) plus a zoomable page
-uv run --group plots python scripts/plot_pipeline.py --html
-uv run --group plots python scripts/plot_pipeline.py --chip h100_sxm --matmul 8192,8192,8192 --html
+# resource timeline, one self-contained zoomable HTML page per chip — pure stdlib,
+# no --group plots needed: nothing here imports a plotting library at all
+uv run python scripts/plot_pipeline.py
+uv run python scripts/plot_pipeline.py --chip h100_sxm --matmul 8192,8192,8192
 ```
 
 `plot_roofline.py`: `--chip`, `--weights`, `--matmul M,N,K` (repeatable), `--model ID`
@@ -270,26 +378,25 @@ uv run --group plots python scripts/plot_pipeline.py --chip h100_sxm --matmul 81
 
 | what | flags |
 |---|---|
-| a matmul (default) | `--matmul M,N,K` |
-| a profile | `--model ID`, `--tokens/-S` — one figure per phase |
+| a matmul (default) | `--matmul M,N,K`, plus the dataflow strategy flags of §2.5 |
+| a profile | `--model ID`, `--tokens/-S` — one page per phase |
 | an ad-hoc single-layer encoder | `--encoder --hidden --heads --head-dim --ffn --vocab --tokens/-S` |
 
-plus `--chip` (repeatable), `--compare`, `--weights`, `--ideal`, `--steps`, `--zoom`, `--html`,
-`--html-steps`, `--out`.
+plus `--chip` (repeatable), `--compare`, `--weights`, `--ideal`, `--steps` (default 256 — the only
+resolution knob; the page zooms, so there is no separate static-figure register to keep legible),
+`--out`.
 
-### 5.1 `--compare` — two chips, one workload, one figure
+### 5.1 `--compare` — two chips, one workload, one page
 
-Without it, `--chip A --chip B` writes one figure per chip, each with x normalised to that chip's
-own span. With it, they land in **one** figure on a **shared, absolute** axis:
+Without it, `--chip A --chip B` writes one page per chip, each with x normalised to that chip's own
+span. With it, they land in **one** page on a **shared, absolute** axis:
 
 ```bash
-uv run --group plots python scripts/plot_pipeline.py \
-  --chip a100_80gb --chip metis_aipu --compare --model gemma3_4b -S 512 --html
+uv run python scripts/plot_pipeline.py \
+  --chip a100_80gb --chip metis_aipu --compare --model gemma3_4b -S 512
 ```
 
 ```
-wrote ../docs/plots/timeline-compare-a100_80gb-vs-metis_aipu-gemma3_4b-prefill-int8.png
-wrote ../docs/plots/timeline-compare-a100_80gb-vs-metis_aipu-gemma3_4b-decode-int8.png
 wrote ../docs/plots/timeline-compare-a100_80gb-vs-metis_aipu-gemma3_4b-prefill-int8.html
 wrote ../docs/plots/timeline-compare-a100_80gb-vs-metis_aipu-gemma3_4b-decode-int8.html
 ```
@@ -314,7 +421,7 @@ two different amounts of traffic. `--compare` picks one dtype every chip support
 refuses:
 
 ```bash
-uv run --group plots python scripts/plot_pipeline.py \
+uv run python scripts/plot_pipeline.py \
   --chip metis_aipu --chip a100_80gb --compare --weights fp16
 ```
 
@@ -324,7 +431,7 @@ Supported by all: int8
 ```
 
 ```bash
-uv run --group plots python scripts/plot_pipeline.py --chip a100_80gb --compare
+uv run python scripts/plot_pipeline.py --chip a100_80gb --compare
 ```
 
 ```
@@ -335,60 +442,64 @@ bwz: --compare puts two or more chips in one figure and got 1; pass --chip twice
 Rows are **banded by chip**, not aligned across them: A100 declares 3 memory levels and 2 compute
 units, Metis 4 and 2, `chip_a` 2 and 1, and no correspondence between `cuda_core` and `dpu` exists
 to draw. Each band opens with a header row carrying that machine's peak, DRAM bandwidth, on-chip
-capacity, its row counts and its total span. Everything the single-chip figure does survives inside
-the band — grey rows for declared-and-unused resources, matrix and vector lanes on separate rows,
-filled loads against hollow stores, named bars, and the three info boxes, now one set per chip.
+capacity, its row counts, its total span **and its achieved throughput** — `622 TOP/s achieved ·
+100% of peak` on A100 against `186 TOP/s achieved · 89% of peak` on Metis for an 8192³ INT8 matmul,
+the same 3.34x the latency ratio is, inverted, because both come from the one reported latency
+(D35). Everything the single-chip page does survives inside the band — grey rows for
+declared-and-unused resources, matrix and vector lanes on separate rows, filled loads against
+hollow stores, named bars, and the three info boxes, now one set per chip.
 
 Below the two registers the comparison adds a **roofline register**: both chips' ceilings, ridge
 points and M=1 lines on one chart, with each chip's workload point on it. Inside that panel colour
-means *chip* rather than *resource*, which the panel says on itself. The same chart is on the HTML
-page, and the arithmetic section there is rendered **once** — it is a property of the workload, and
-the workload is the same on both machines.
+means *chip* rather than *resource*, which the panel says on itself. The arithmetic section is
+rendered **once** — it is a property of the workload, and the workload is the same on both
+machines — but the **deployment listing is rendered once per chip**, because how the work reaches
+the silicon is exactly what differs between them (D32).
 
 The shape flags belong to `--encoder`; passing them with `--model` is an error, because a profile
 already carries its dimensions:
 
 ```bash
-uv run --group plots python scripts/plot_pipeline.py --chip a100_80gb \
-  --encoder --hidden 4096 --heads 64 --ffn 16384 -S 4096 --ideal --html --out ..
+uv run python scripts/plot_pipeline.py --chip a100_80gb \
+  --encoder --hidden 4096 --heads 64 --ffn 16384 -S 4096 --ideal --out ..
 ```
 
-`--model` draws a network instead of a matmul, one figure per phase — which is where the
+`--model` draws a network instead of a matmul, one page per phase — which is where the
 `COMPUTED — matmul 98% · attention 2%` breakdown earns itself:
 
 ```bash
-uv run --group plots python scripts/plot_pipeline.py \
-  --chip a100_80gb --model llama3_8b --tokens 512 --html --out ..
-# timeline-a100_80gb-llama3_8b-{prefill,decode}-fp16.{png,html}
+uv run python scripts/plot_pipeline.py \
+  --chip a100_80gb --model llama3_8b --tokens 512 --out ..
+# timeline-a100_80gb-llama3_8b-{prefill,decode}-fp16.html
 ```
 
 `--out` is relative to where you run the script, so from `backend/` a bare `--out ..` lands in the
-repo root and from the repo root it lands *outside* the repo — with a `wrote ../timeline-….png`
+repo root and from the repo root it lands *outside* the repo — with a `wrote ../timeline-….html`
 line that looks right either way. Pass an absolute path when it matters.
 
 ### The zoomable page
 
 ```bash
 cd backend
-uv run --group plots python scripts/plot_pipeline.py \
-  --chip a100_80gb --matmul 10000,10000,10000 --ideal --html \
+uv run python scripts/plot_pipeline.py \
+  --chip a100_80gb --matmul 10000,10000,10000 --ideal \
   --out /absolute/path/you/want
 
 xdg-open /absolute/path/you/want/timeline-a100_80gb-fp16.html
 ```
 
-Rows are the same hardware resources as the PNG, but the time axis **zooms** (wheel, about the
-cursor), **pans** (drag) and **resets** (double-click), and every bar names its transaction on
-hover — `LOAD — operands in`, `STORE — result written back`, `EXEC — matmul` — with its bytes or
-operations and the rate. Below the timeline the page carries the **roofline** for the same run:
-both ceilings, the ridge point, the M=1 tail, and the workload as a labelled point. One self-contained file: no server, no port, no download, no CDN — `file://`
-is enough.
+The time axis **zooms** (wheel, about the cursor), **pans** (drag) and **resets** (double-click),
+and every bar names its transaction on hover — `LOAD — operands in`, `STORE — result written
+back`, `EXEC — matmul` — with its bytes or operations and the rate. Below the timeline the page
+carries the **roofline** for the same run: both ceilings, the ridge point, the M=1 tail, and the
+workload as a labelled point. One self-contained file: no server, no port, no download, no CDN —
+`file://` is enough.
 
 `xdg-open` prints nothing and hands the file to a browser that may already be running, so look for
 a new **tab in an existing window**. `google-chrome <file>` or `firefox <file>` work too.
 
-`--html-steps` (default 256) sets the page's resolution independently of `--steps` (default 32),
-which governs the PNG: a static figure has to stay legible at one scale and a zoomable one does not.
+`--steps` (default 256) is the trace's only resolution knob — there is no separate register to keep
+legible at a fixed scale, because the page zooms instead.
 
 The timeline gives every declared memory level and compute unit its own row, with the bytes moved,
 the achieved bandwidth and the operations retired written beside it — and draws grey the resources
@@ -429,3 +540,6 @@ cd backend && uv run pytest tests/unit/test_pipeline.py::test_double_buffering_h
 | no Konata, no Kanata | — | `docs/CORRECTIONS.md` D21 |
 | 1.40% residency on chip_a | §3 | `docs/CORRECTIONS.md` D8, D15 |
 | traffic is a lower bound when the working set does not fit | every report's assumptions | `docs/MODEL.md` §6.2 |
+| stream is 16x the staged total | §2.5 | `docs/MODEL.md` §6.3a, `docs/CORRECTIONS.md` D36 |
+| whole/persistent clamp rather than raise | §2.5 | `docs/CORRECTIONS.md` D36, CLAUDE.md #8 |
+| 622/186 TOP/s achieved, 3.34x inverted | §5.1 | `docs/CORRECTIONS.md` D35, D37 |

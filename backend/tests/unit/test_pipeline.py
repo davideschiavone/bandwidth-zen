@@ -291,7 +291,7 @@ def test_a_is_staged_once_per_k_slice_in_the_trace() -> None:
     a_spans = [s for s in trace.spans if s.stage is Stage.LOAD_A]
 
     assert len(a_spans) == 16, "one staging event per k-slice, ceil(8192/512)"
-    assert all(s.staged_once for s in a_spans)
+    assert all(s.a_fetch_mode == "stage" for s in a_spans)
     expected = op.dram_activation_read_bytes / 16
     assert all(s.bytes_moved == pytest.approx(expected, rel=1e-9) for s in a_spans)
     assert sum(s.bytes_moved for s in a_spans) == pytest.approx(
@@ -315,7 +315,7 @@ def test_a_is_staged_once_per_k_slice_in_the_trace() -> None:
         machine_model(chip, DType.FP16),
         double_buffered=report.memory.double_buffered,
     )
-    assert not any(s.staged_once for s in trace_net.spans)
+    assert not any(s.a_fetch_mode == "stage" for s in trace_net.spans)
 
 
 def test_a_tile_step_is_a_wave_not_a_single_tile() -> None:

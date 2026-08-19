@@ -180,6 +180,8 @@ def op_roofline(
     activation_resident_fraction: float,
     double_buffered: bool,
     terminal_output_bytes: float = 0.0,
+    activation_traffic_multiplier: float = 1.0,
+    weight_traffic_multiplier: float = 1.0,
 ) -> OpResult:
     """Predict one operation's latency and name what limits it.
 
@@ -187,6 +189,16 @@ def op_roofline(
     have to change to make this faster" rather than "which is biggest on
     average". A ``LATENCY_BOUND`` operation is one where the dispatch costs more
     than the work.
+
+    ``activation_traffic_multiplier`` and ``weight_traffic_multiplier`` scale the
+    *compulsory* share of each operand's traffic and default to 1.0, which is
+    every caller but the single-matmul dataflow strategies
+    (``docs/CORRECTIONS.md`` D33/D36): ``stream`` re-reads A ``NTILES_PER_KS``
+    times instead of staging it once, and a ``persistent`` B amortised over
+    several iterations writes less than once. Unlike ``resident_fraction``,
+    which only ever discounts traffic toward zero, a multiplier can exceed 1.0 —
+    that is the only way to express re-reading an operand that already crosses
+    DRAM in full.
     """
     # Reads and writes are charged separately because they are not
     # interchangeable. `terminal_output_bytes` is the share of this operation's
@@ -198,9 +210,11 @@ def op_roofline(
     # different residency fractions and spill at different times — capacity goes
     # to activations before weights (D15), so B streams first — and "LOAD 107 MB"
     # does not say which of them crossed the bus.
-    weight_read_bytes = (1.0 - resident_fraction) * cost.weight_bytes
-    activation_read_bytes = (1.0 - activation_resident_fraction) * (
-        cost.input_bytes + cost.scratch_bytes
+    weight_read_bytes = weight_traffic_multiplier * (1.0 - resident_fraction) * cost.weight_bytes
+    activation_read_bytes = (
+        activation_traffic_multiplier
+        * (1.0 - activation_resident_fraction)
+        * (cost.input_bytes + cost.scratch_bytes)
     )
     read_bytes = weight_read_bytes + activation_read_bytes
     write_bytes = terminal_output_bytes + (1.0 - activation_resident_fraction) * resident_output

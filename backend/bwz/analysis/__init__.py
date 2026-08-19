@@ -10,12 +10,14 @@ from __future__ import annotations
 
 import bwz
 from bwz.analysis.bottleneck import flip_margin, rank_operations, suggestions
+from bwz.analysis.dataflow import DataflowPlan, plan_dataflow
 from bwz.analysis.memory import infeasibility_reasons, plan_memory, usable_memory_fraction
 from bwz.analysis.pipeline import PipelineTrace, build_trace
 from bwz.analysis.roofline import MachineModel, compute_dtype, idealised, machine_model
 from bwz.analysis.schedule import run_phase
 from bwz.graph.builder import build_graphs, phases_for
 from bwz.graph.ops import GraphPhase
+from bwz.operators.base import cost_of
 from bwz.report import (
     Bound,
     Confidence,
@@ -27,7 +29,7 @@ from bwz.report import (
     Summary,
     config_hash,
 )
-from bwz.spec.deployment import DeploymentSpec
+from bwz.spec.deployment import AStrategy, BDataflow, DeploymentSpec
 from bwz.spec.hardware_spec import HardwareSpec
 from bwz.spec.loaders import AnyModelSpec
 from bwz.spec.model_spec import MatmulSpec, ModelFamily, TransformerSpec
@@ -91,6 +93,8 @@ def analyze(model: AnyModelSpec, hardware: HardwareSpec, deployment: DeploymentS
         run_phase(
             graphs[phase],
             machine,
+            hardware,
+            deployment,
             resident_fraction=plan.resident_fraction,
             activation_resident_fraction=plan.activation_resident_fraction,
             double_buffered=plan.double_buffered,
@@ -100,13 +104,25 @@ def analyze(model: AnyModelSpec, hardware: HardwareSpec, deployment: DeploymentS
 
     summary = _summarise(phases, machine, deployment)
     margins = tuple(flip_margin(phase, machine) for phase in phases)
+    dataflow: DataflowPlan | None = None
+    if isinstance(model, MatmulSpec):
+        # Recomputed rather than threaded out of run_phase: plan_dataflow is pure,
+        # so the same (op, machine, hardware, deployment) always gives the same
+        # plan, and the assumptions drawer cannot disagree with the bytes charged.
+        static_graph = graphs[GraphPhase.STATIC]
+        op0_cost = cost_of(static_graph.ops[0], static_graph.tensors)
+        dataflow = plan_dataflow(
+            static_graph.ops[0], machine, hardware, deployment, a_bytes=op0_cost.input_bytes
+        )
     return Report(
         meta=meta,
         feasible=True,
         memory=plan,
         summary=summary,
         phases=phases,
-        assumptions=_assumptions(model, hardware, deployment, plan, phases, machine, margins),
+        assumptions=_assumptions(
+            model, hardware, deployment, plan, phases, machine, margins, dataflow
+        ),
         flip_margins=margins,
         confidence=_confidence(hardware, margins),
     )
@@ -131,6 +147,13 @@ def trace_phases(
     )
     machine = machine_model(hardware, dtype)
     graphs = build_graphs(model, deployment)
+    dataflow: DataflowPlan | None = None
+    if isinstance(model, MatmulSpec):
+        static_graph = graphs[GraphPhase.STATIC]
+        op0_cost = cost_of(static_graph.ops[0], static_graph.tensors)
+        dataflow = plan_dataflow(
+            static_graph.ops[0], machine, hardware, deployment, a_bytes=op0_cost.input_bytes
+        )
     return tuple(
         (
             result.phase,
@@ -139,6 +162,7 @@ def trace_phases(
                 result,
                 machine,
                 double_buffered=report.memory.double_buffered,
+                dataflow=dataflow,
             ),
         )
         for result in report.phases
@@ -233,6 +257,7 @@ def _assumptions(
     phases: tuple[PhaseResult, ...],
     machine: MachineModel,
     margins: tuple[FlipMargin, ...],
+    dataflow: DataflowPlan | None = None,
 ) -> tuple[str, ...]:
     """Every shortcut taken and every estimate touched, in one drawer.
 
@@ -347,11 +372,45 @@ def _assumptions(
             f"only, never operations. 2*M*N*K is the same at every result width."
         )
         out.append(
-            "A crosses DRAM exactly once: the weight-stationary schedule stages each k-slice "
-            "once on chip and every output tile of its group reads the staging, so the "
-            "activation-residency discount (D15) — inter-operation reuse, which a one-op graph "
-            "cannot have — does not apply (docs/CORRECTIONS.md D33)."
+            "The activation-residency discount (D15) — inter-operation reuse, which a one-op "
+            "graph cannot have — does not apply to a lone matmul's A; a_strategy governs it "
+            "instead (docs/CORRECTIONS.md D33)."
         )
+        if dataflow is not None:
+            if dataflow.a_strategy is AStrategy.STREAM:
+                a_line = (
+                    f"A: streamed per tile (D31), {dataflow.ntiles_per_ks}x the staged total — "
+                    f"{format_bytes(dataflow.a_bytes)} would cross DRAM once under stage/whole, "
+                    f"{format_bytes(dataflow.a_bytes * dataflow.a_bytes_multiplier)} crosses it "
+                    f"under stream"
+                )
+            elif dataflow.a_strategy is AStrategy.WHOLE:
+                a_line = (
+                    f"A: staged whole, {format_bytes(dataflow.a_bytes)} before the first tile — "
+                    f"crosses DRAM exactly once (D33), same bytes as stage"
+                )
+            else:
+                a_line = (
+                    f"A: staged {format_bytes(dataflow.a_bytes_per_event)} per k-slice "
+                    f"({dataflow.k_slices} k-slices) — crosses DRAM exactly once (D33)"
+                )
+            if dataflow.b_dataflow is BDataflow.PERSISTENT:
+                b_line = (
+                    f"B: persistent over {dataflow.iterations} iterations — the first writes "
+                    f"all {dataflow.tiles} tiles, the rest reuse them; this report charges the "
+                    f"amortised share, 1/{dataflow.iterations} of a full write"
+                    if dataflow.iterations > 1
+                    else "B: persistent — resident for this one-invocation report; a repeat "
+                    "invocation (iterations > 1) would write 0 B for the rest"
+                )
+            elif dataflow.b_dataflow is BDataflow.ON_DEMAND:
+                b_line = "B: on-demand, exposed on the critical path"
+            elif machine.unit.weight_sets > 1:
+                b_line = f"B: write-ahead depth {machine.unit.weight_sets} (D33)"
+            else:
+                b_line = "B: write-ahead is moot — the array stores no weights (D30)"
+            out.append(f"{a_line} · {b_line}.")
+            out.extend(dataflow.notes)
 
     if isinstance(model, TransformerSpec) and model.family is ModelFamily.TRANSFORMER_ENCODER:
         # The deployment can ask for generation; an encoder has none to give, and

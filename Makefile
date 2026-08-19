@@ -33,15 +33,17 @@ validate:
 	$(BACKEND) pytest -q -m validation -s
 
 # Regenerates docs/plots/. Every figure is computed by calling analyze(), so
-# these are outputs of the engine, not illustrations of it.
+# these are outputs of the engine, not illustrations of it. plot_roofline.py
+# still needs --group plots (matplotlib, PNG output); plot_pipeline.py does
+# not — its HTML timeline is pure stdlib, with no plotting library at all.
 plots:
 	$(BACKEND) --group plots python scripts/plot_roofline.py --chip a100_80gb --model llama3_8b
 	$(BACKEND) --group plots python scripts/plot_roofline.py --chip chip_a --weights int8 \
 		--model gemma3_4b --tokens 512 \
 		--matmul 512,4096,4096 --matmul 128,4096,4096 --matmul 1,4096,4096
-	$(BACKEND) --group plots python scripts/plot_pipeline.py --html
-	$(BACKEND) --group plots python scripts/plot_pipeline.py \
-		--chip a100_80gb --chip metis_aipu --compare --model gemma3_4b -S 512 --html
+	$(BACKEND) python scripts/plot_pipeline.py
+	$(BACKEND) python scripts/plot_pipeline.py \
+		--chip a100_80gb --chip metis_aipu --compare --model gemma3_4b -S 512
 
 docker:
 	@echo "no-op until M4: docker compose lands with the API + frontend"
