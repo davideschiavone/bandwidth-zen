@@ -1085,7 +1085,7 @@ the module never learns what an NVIDIA or an Axelera part is:
 
 | declared | emitted |
 |---|---|
-| `weight_sets > 1` | `WEIGHT_SETS`, a set rotation, and an `imc_write` that "must land before the array can use it" |
+| `weight_sets > 1` | `WEIGHT_SETS`, a set rotation, and an `imc_write` write-ahead — the next wave's tile lands in a set freed by the wave before it |
 | `weight_sets == 1` | no write at all, and "the array stores no weights: both operands are re-read per instruction" |
 | dtype multiplier < 1 | `SUB_CYCLES` and an inner loop — 8 for Metis's INT8 0.125, absent at fp16 |
 | `systolic_dims` | `ROWS`/`COLS` and the tile nest; a profile without one falls through to the sequence listing |
@@ -1101,3 +1101,75 @@ for the tiled form.
 
 The pseudo-C carries no nested `/* */`, and a test enforces it on every shipped chip, on the same
 grounds as D26: it is meant to survive being pasted.
+
+
+## D33 — A crosses DRAM exactly once, and reloads land ahead of the arithmetic (2026-08-19)
+
+The original roofline gave the activation operand a residency discount: whatever did not fit on
+chip was re-read, scaled by the SRAM capacity (D15). For a **single-matmul graph** that discount
+was nonsense, and a user staring at the Metis deploy listing caught it: with M as the innermost
+loop, no tile is ever revisited in the same pass — so nothing is re-read, and "how much of A fits"
+answers nothing. A is *compulsory traffic, period*, the same way B is.
+
+**The rule is structural, not arithmetic.** The k-slice staging makes it literal: each k-slice of A
+is consumed by every output tile of its group (`ceil(N/COLS)` n-tiles) while it sits on chip, so A
+crosses DRAM exactly once. `run_phase()` therefore passes `activation_resident_fraction = 0.0` —
+no residency benefit — for graphs where no other operation reads the tensor (a lone matmul, which
+is also every matmul-benchmark the figures show). The memory *planner* still computes its D15
+fraction for multi-op graphs; the two agree there, and only there. An assumption line is appended
+in the same breath, so the report never carries the rule silently.
+
+**The same user question exposed a second fiction in the deploy listing.** The old comment said a
+reload "must land before the array can use it", which serialised the write in front of the
+arithmetic. It is a weight-set *rotation*: the next wave's tile lands in the set freed three waves
+ago, hiding behind that wave's MACs. The listing now prints that write-ahead (`(w + 1) % WEIGHT_SETS`)
+with the staging prologue in the same loop, and `check()`'s byte labels still reconcile to the
+report because the listing sums the same per-wave shares it always did.
+
+**And a third fiction, in the figures.** A user running `--ideal` on 8192-cubed INT8 still saw A
+"read multiple times": the timeline hovered every DRAM bar as "operand A, streaming through the
+array", and the listing printed a `load_A` on every wave — the D31 per-step share, which is only a
+decomposition of the charged traffic. For a lone matmul the physical event is the k-slice
+**staging**: one read per k-slice, feeding all `ceil(N/COLS)` tiles of the group. Both renderings
+now show the event, not the share. The timeline carries exactly one `LOAD_A` span per k-slice
+(16 for Metis at 8192-cubed, each 4.19 MB — the `Span.staged_once` flag keeps the "read once"
+wording off network traces, whose activations genuinely stream); the listing stages at k-slice
+boundaries (`tile(w, u) % NTILES_PER_KS == 0`). A100's K-tiles are a k-slice per tensor-core step
+almost continuously, so its trace barely changes — which is correct, because on A100 the staging
+really does interleave with the fetches.
+
+Numbers that moved on 8192-cubed INT8:
+
+- Metis: DRAM traffic 40.4 MB → **67.1 MB** of A, so `t_dram` 5.12 ms → **5.90 ms**, and the
+  verdict flips **compute-bound → DRAM-bound** at 5.98 ms total (~87% of peak TOPS achieved, not
+  ~93%). The 80 µs the figure called "imc_write" was never a write: it was the pipeline fill/drain
+  term `min(t_dram, t_compute) / tiles`.
+- A100: the same A-once rule applies (the benchmark has no consumer of A either) — 36.7 → 67.1 MB
+  of reads, but 2.04 TB/s of bandwidth makes it a 32 µs change against 1.77 ms of compute. The
+  verdict (compute-bound) and the headline latency barely move.
+
+## D34 — The M-tail is a pipeline property, not a shape constant (2026-08-19)
+
+The tail-effect model was `M/(M+rows)` for every array, and the "rows-deep pipeline" reading of it
+is only true of a systolic pump. A bit-serial array like the Metis D-IMC is a *combinational
+crossbar*: the 512 M-channels enter one bit at a time, but in parallel — there is no M-serial
+pipeline to fill. Modelling it with `M/(M+512)` invented a 512-cycle fill that costs 5.9% of a
+large-M stream that physically loses nothing; modelling it with `M/(M+8)` (one INT8 row's
+sub-cycles) fixed the large-M case but broke the small-M one, where the M=1 GEMM must still run at
+~1/513 of peak (CLAUDE.md: a batch-1 GEMM on a 512x512 array at 1/513 is the sanity check that
+decides whether the array is modelled at all). The 1/513 is *area* — one active row of 512 — not a
+pipeline drain, and conflating the two is the bug.
+
+**The dtype multiplier now selects the physical model**, and the two branches are hand-verifiable:
+
+- systolic pump (`fill_cycles=None`): `M/(M+rows)` — unchanged, all existing goldens hold;
+- bit-serial crossbar (`fill_cycles = 1/multiplier`): `M/padded(M,rows)` area only, and the
+  sub-cycle stream rides K with one sub-cycle row of fill:
+  `K·s / (K_pad·s + s) = K/(K_pad + 1)`.
+
+At M=8192 the crossbar branch is 8192/8193 = 99.99%, where the old model claimed 94.1%. At M=1
+it is 1/512 × K/(K+1) ≈ 1/513 — the same 1/513 the systolic branch produces, which is why the
+batch-1 sanity checks and `chip_b`'s compute-bound-at-batch-1 golden (D8) still pass: a bit-serial
+array is *slower*, not more pipeline-bound. The branch is keyed on `0 < multiplier < 1` only: A100
+at INT8 has multiplier 2.0 (wider, not serial — D18) and must not take the crossbar branch, even
+though a dtype is present.

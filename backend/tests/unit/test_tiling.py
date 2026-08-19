@@ -12,7 +12,7 @@ from bwz.analysis.tiling import (
     wave_occupancy,
 )
 from bwz.graph.ops import MatmulAttrs, Operation, OpType
-from bwz.spec import load_chip
+from bwz.spec import DType, load_chip
 
 
 def test_padded_rounds_up_the_dimension_not_the_tile_count() -> None:
@@ -90,6 +90,36 @@ def test_chip_a_decode_projection_utilisation() -> None:
         id="q", op_type=OpType.MATMUL, attrs=MatmulAttrs(m=1, n=2048, k=2560), outputs=()
     )
     assert operation_utilisation(op, unit) == pytest.approx(1 / 513, rel=1e-6)
+
+
+def test_a_bit_serial_crossbar_has_no_m_serial_pipeline() -> None:
+    """D34: the tail effect depends on what the array physically is.
+
+    The Metis D-IMC is a combinational crossbar: M enters in whole 512-row
+    chunks (area-only loss), and the bit-serial stream rides K — 8 sub-cycles
+    per row plus one sub-cycle row of fill::
+
+        util = M/padded(M, 512) * K/(padded(K, 512) + 1) * N/padded(N, 512)
+
+    An 8192-row stream therefore loses one row's fill, not 512: 8192/8193.
+    Without a dtype the conservative systolic tail (rows-deep M pipeline)
+    applies: 8192/8704.
+    """
+    unit = load_chip("metis_aipu").compute_units[0]
+    op = Operation(
+        id="mm", op_type=OpType.MATMUL, attrs=MatmulAttrs(m=8192, n=8192, k=8192), outputs=()
+    )
+    assert operation_utilisation(op, unit, DType.INT8) == pytest.approx(8192 / 8193, rel=1e-12)
+    assert operation_utilisation(op, unit) == pytest.approx(8192 / 8704, rel=1e-12)
+
+    # The same chip at batch 1: the crossbar wastes area, not pipeline — the
+    # M=1 GEMM still runs at ~1/513 of peak (the 1/512 area loss times the
+    # sub-cycle fill), not at 1/9 as an M-side sub-cycle tail would claim.
+    decode = Operation(
+        id="q", op_type=OpType.MATMUL, attrs=MatmulAttrs(m=1, n=2048, k=2560), outputs=()
+    )
+    expected = 1 / 512 * 2560 / (padded(2560, 512) + 1) * 2048 / padded(2048, 512)
+    assert operation_utilisation(decode, unit, DType.INT8) == pytest.approx(expected, rel=1e-12)
 
 
 def test_double_buffering_needs_room_for_two_tiles() -> None:

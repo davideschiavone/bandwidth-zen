@@ -95,8 +95,13 @@ def deployment_of(
     # Per-wave, per-array shares of the traffic the report charged.
     per = max(waves, 1) * units
     b_bytes = format_bytes(result.dram_weight_read_bytes / per)
-    a_bytes = format_bytes(result.dram_activation_read_bytes / per)
     c_bytes = format_bytes(result.dram_write_bytes / per)
+    # The k-slice structure behind the listing: tiles are counted k-major, each
+    # k-slice holds ceil(N/COLS) of them, and A is staged once per k-slice.
+    n_tiles_per_ks = math.ceil(operation.attrs.n / cols)
+    k_slices = math.ceil(operation.attrs.k / rows)
+    k_slice_bytes = result.dram_activation_read_bytes / k_slices
+    a_stage = format_bytes(k_slice_bytes)
 
     header = [
         f"/* {chip.name} — how this model deploys the run",
@@ -111,6 +116,16 @@ def deployment_of(
             f" * {unit.weight_sets} weight sets per array, {resident} chip-wide: a tile must be"
         )
         header.append(" * written INTO the array before it can compute.")
+        header.append(" * Sets rotate: the next wave's tile lands in the set that finished")
+        header.append(" * computing three waves ago, so each write hides behind this wave's")
+        header.append(" * arithmetic — the independent-address overlap weight sets exist for")
+        header.append(" * (D33). The first wave's sets fill during the first A staging.")
+        header.append(" *")
+        header.append(
+            f" * A is staged once per k-slice ({_int(k_slice_bytes)} B of scratchpad); every"
+        )
+        header.append(" * tile of that k-slice reads the staging. A crosses DRAM exactly once")
+        header.append(" * (D33).")
         header.append(" *")
         # Within ONE pass every tile is written once whether or not it fits: M is
         # the innermost loop, so a tile is used once and never revisited. What
@@ -127,6 +142,8 @@ def deployment_of(
     else:
         header.append(" * The array stores no weights: both operands are re-read per instruction,")
         header.append(" * so there is no residency limit on the array itself.")
+        header.append(" * A k-slices are staged as they stream and each is consumed by the tiles")
+        header.append(" * of its k-slice: A crosses DRAM exactly once (D33).")
     header.append(" */")
 
     defines = [
@@ -142,6 +159,9 @@ def deployment_of(
             else "no room for a second tile"
         )
         + " */",
+        f"#define NTILES_PER_KS {n_tiles_per_ks:<7} /* n-tiles per k-slice: ceil(N / COLS) */",
+        "#define KSLICE(w, u)  (((w) * UNITS + (u)) / NTILES_PER_KS * ROWS)"
+        " /* this tile's k */",
     ]
     if unit.weight_sets > 1:
         defines.insert(
@@ -153,42 +173,49 @@ def deployment_of(
             f" {multiplier:g} -> {sub_cycles} cycles per operand */"
         )
 
-    # An in-memory array must be *written* before it can compute; an array that
-    # reads its operands per instruction has nothing to write, and saying
-    # otherwise would invent a residency it does not have (D30).
-    write = (
-        "        imc_write(u, set, B_tile);    /* must land before the array can use it */\n"
+    # An in-memory array must be *written* before it can compute, but the sets
+    # are independently addressed, so the write lands a full wave early and
+    # hides behind that wave's arithmetic (D33); an array that reads its
+    # operands per instruction has nothing to write, and saying otherwise would
+    # invent a residency it does not have (D30).
+    write_ahead = (
+        "        if (w + 1 < WAVES) /* write-ahead (D33): the next wave's tile lands */\n"
+        "            imc_write(u, (w + 1) % WEIGHT_SETS, tile(w + 1, u));"
+        "   /* in the set freed 3 waves ago — hidden behind this wave */\n"
         if unit.weight_sets > 1
         else ""
     )
-    set_line = (
-        "        int set = w % WEIGHT_SETS;    /* rotate the resident sets */\n"
+    prologue = (
+        "/* prologue: wave 0's B tiles land in sets 0..UNITS-1 while the first A\n"
+        " * k-slice stages; afterwards the write-ahead keeps every set a full wave\n"
+        " * ahead of its compute. */\n"
         if unit.weight_sets > 1
         else ""
     )
     inner = (
         "            for (int c = 0; c < SUB_CYCLES; ++c)\n"
-        "                feed(u, set, &A[m][w * ROWS]);   /* one sub-cycle of the operand */\n"
+        "                feed(u, w % WEIGHT_SETS, &A[m][KSLICE(w, u)]);"
+        "   /* one sub-cycle of the operand */\n"
         if sub_cycles > 1
-        else "            mac(u, &A[m][w * ROWS]);\n"
+        else "            mac(u, &A[m][KSLICE(w, u)]);\n"
     )
     if sub_cycles > 1 and unit.weight_sets == 1:
-        inner = inner.replace(", set,", ",")
+        inner = inner.replace("w % WEIGHT_SETS, ", "")
 
     body = f"""
-for (int w = 0; w < WAVES; ++w) {{
+{prologue}for (int w = 0; w < WAVES; ++w) {{
 
     /* ---- DRAM, one port, in issue order (D22) ------------------------- */
     for (int u = 0; u < UNITS; ++u) {{
-{set_line}        load_B(u, tile(w, u));        /* {b_bytes} — solid bar; each tile fetched once */
-        load_A(u, kslice(w));         /* {a_bytes} — hatched bar; this wave's share of A */
-{write}    }}
+        load_B(u, tile(w, u));        /* {b_bytes} — solid bar; each tile fetched once */
+        if (tile(w, u) % NTILES_PER_KS == 0)  /* this tile opens a k-slice */
+            stage_A(u, KSLICE(w, u)); /* {a_stage} — hatched bar; staged once (D33) */
+{write_ahead}    }}
 
     /* ---- the arrays, all UNITS of them at once ------------------------ */
     parallel_for (int u = 0; u < UNITS; ++u)
         for (int m = 0; m < {stream_rows}; ++m)   /* M streams; it never tiles */
-{inner}
-    /* ---- DRAM again: the result drains behind the next fetch ---------- */
+{inner}    /* ---- DRAM again: the result drains behind the next fetch ---------- */
     for (int u = 0; u < UNITS; ++u)
         store_C(u, tile(w, u));       /* {c_bytes} — hollow bar */
 }}

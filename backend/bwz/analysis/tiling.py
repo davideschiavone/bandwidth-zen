@@ -16,6 +16,7 @@ from bwz.graph.ops import (
     MatmulAttrs,
     Operation,
 )
+from bwz.spec.dtypes import DType
 from bwz.spec.hardware_spec import ComputeUnit
 
 
@@ -67,24 +68,40 @@ def systolic_utilisation(
     *,
     units: int = 1,
     independent: int = 1,
+    fill_cycles: int | None = None,
 ) -> float:
     """Fraction of a ``rows x cols`` array a ``[M,K]x[K,N]`` GEMM keeps busy.
 
     A weight-stationary array holds a ``rows x cols`` slice of the weight matrix
-    and streams ``M`` activation rows through it. Each tile costs ``M + rows``
-    cycles: ``M`` to push the data and ``rows`` to fill and drain the pipeline.
+    and streams ``M`` activation rows through it. Each tile costs ``M + fill``
+    cycles: ``M`` to push the data and ``fill`` to fill and drain the pipeline.
     Over ``ceil(K/rows) * ceil(N/cols)`` tiles::
 
-        actual_cycles = ceil(K/rows) * ceil(N/cols) * (M + rows)
+        actual_cycles = ceil(K/rows) * ceil(N/cols) * (M + fill)
         ideal_cycles  = M * K * N / (rows * cols)
         utilisation   = ideal / actual
-                      = [K / padded(K, rows)] * [N / padded(N, cols)] * [M / (M + rows)]
+                      = [K / padded(K, rows)] * [N / padded(N, cols)] * [M / (M + fill)]
 
     Three independent losses, all bounded by 1:
 
     - **K and N padding** — a 100-wide output on a 512-wide array wastes 80% of it.
     - **The M tail** — with M=1 the pipeline is filled and drained for a single
       row of work. On a 512x512 array that is a factor of 513.
+
+    **What ``fill`` is depends on what the array physically is** (D34). For a
+    conventional systolic pump the M dimension streams serially through a
+    ``rows``-deep pipeline: M rows cost ``M + rows`` cycles, so the tail is the
+    row count. A bit-serial crossbar is combinational: M enters in whole
+    ``rows``-sized chunks with no serial pipeline at all, so the M side loses
+    only area on ragged chunks, and the serial cost moves to K — each row takes
+    ``1 / multiplier`` sub-cycles, plus one sub-cycle row of fill per chunk::
+
+        m_efficiency = M / padded(M, rows)          # area only
+        k_efficiency = K / (padded(K, rows) + 1)    # K * s / (padded(K,s) * s + s)
+
+    ``fill_cycles`` selects the crossbar branch (it is derived from the
+    profile's dtype multiplier); ``None`` keeps the conservative systolic
+    depth ``rows``.
 
     Worked example (CLAUDE.md sanity check): M=1 on a 128x128 array with K and N
     both multiples of 128 gives ``1 * 1 * 1/129 = 0.0078``, i.e. 1/128 to within
@@ -104,14 +121,24 @@ def systolic_utilisation(
     """
     if rows <= 0 or cols <= 0:
         return 1.0
-    k_efficiency = k / padded(k, rows)
     n_efficiency = n / padded(n, cols)
-    m_efficiency = m / (m + rows)
+    if fill_cycles is not None:
+        # Bit-serial crossbar (D34): M enters in whole row-chunks in parallel,
+        # so the M side is area-only; the serial sub-cycle stream rides K with
+        # one sub-cycle row of fill: K*s / ((padded K)*s + s) = K / (Kpad + 1).
+        m_efficiency = m / padded(m, rows)
+        k_efficiency = k / (padded(k, rows) + 1)
+    else:
+        # Conventional systolic pump: M streams through a rows-deep pipeline.
+        m_efficiency = m / (m + rows)
+        k_efficiency = k / padded(k, rows)
     tiles = (padded(k, rows) // rows) * (padded(n, cols) // cols) * max(independent, 1)
     return k_efficiency * n_efficiency * m_efficiency * wave_occupancy(tiles, units)
 
 
-def operation_utilisation(op: Operation, unit: ComputeUnit) -> float:
+def operation_utilisation(
+    op: Operation, unit: ComputeUnit, dtype: DType | None = None
+) -> float:
     """Shape-induced utilisation for *op* on *unit*.
 
     Returns 1.0 when the profile declares no array geometry — there is then no
@@ -119,14 +146,33 @@ def operation_utilisation(op: Operation, unit: ComputeUnit) -> float:
     omitting it. Non-GEMM operations also return 1.0: they are memory-bound by
     two orders of magnitude, so their compute term never binds and refining it
     would be effort spent where it cannot matter.
+
+    *dtype* selects the pipeline model (D34): a dtype the unit bit-serialises
+    (multiplier < 1) marks the array as a combinational crossbar — no M-serial
+    pipeline, sub-cycle stream on K — while ``None`` (or a full-rate dtype)
+    keeps the conservative ``rows``-deep systolic tail. Both models reproduce
+    the batch-1 1/513-of-peak golden; they differ on large-M streams, where the
+    crossbar loses only its sub-cycle fill.
     """
     if unit.systolic_dims is None:
         return 1.0
     rows, cols = unit.systolic_dims
+    multiplier = unit.dtype_multipliers.get(dtype, 1.0) if dtype is not None else 1.0
+    # Only a bit-serial (multiplier < 1) array is a crossbar: it gets the D34
+    # branch. A full-rate unit passes fill_cycles=None and keeps the systolic
+    # tail, even when dtype would over-ride the multiplier (int8 on A100 is
+    # 2x, not serial — both operands still enter per instruction).
+    fill = round(1 / multiplier) if 0 < multiplier < 1 else None
 
     if isinstance(op.attrs, MatmulAttrs):
         return systolic_utilisation(
-            op.attrs.m, op.attrs.k, op.attrs.n, rows, cols, units=unit.count
+            op.attrs.m,
+            op.attrs.k,
+            op.attrs.n,
+            rows,
+            cols,
+            units=unit.count,
+            fill_cycles=fill,
         )
 
     if isinstance(op.attrs, ConvAttrs):
@@ -135,7 +181,9 @@ def operation_utilisation(op: Operation, unit: ComputeUnit) -> float:
         conv = op.attrs
         m = conv.batch * conv.out_height * conv.out_width
         k = (conv.in_channels // conv.groups) * conv.kernel_h * conv.kernel_w
-        return systolic_utilisation(m, k, conv.out_channels, rows, cols, units=unit.count)
+        return systolic_utilisation(
+            m, k, conv.out_channels, rows, cols, units=unit.count, fill_cycles=fill
+        )
 
     if isinstance(op.attrs, AttentionAttrs):
         # Two GEMMs per head: [q_len, head_dim] x [head_dim, kv_len] and back.
@@ -151,6 +199,7 @@ def operation_utilisation(op: Operation, unit: ComputeUnit) -> float:
             cols,
             units=unit.count,
             independent=attention.batch * attention.heads,
+            fill_cycles=fill,
         )
 
     return 1.0

@@ -324,7 +324,8 @@ the right and a fully resident workload leaves the chart entirely — which is w
 ### 6.1 Shape utilisation — the systolic tail effect
 
 ```
-utilisation = [K / padded(K, rows)] · [N / padded(N, cols)] · [M / (M + rows)]
+systolic:  utilisation = [K / padded(K, rows)] · [N / padded(N, cols)] · [M / (M + rows)]
+crossbar:  utilisation = [K / (padded(K, rows) + 1)] · [N / padded(N, cols)] · [M / padded(M, rows)]
 ```
 
 A weight-stationary array holds a `rows × cols` weight tile and streams `M` activation rows
@@ -333,12 +334,20 @@ pipeline — over `ceil(K/rows) · ceil(N/cols)` tiles. Dividing ideal cycles by
 product above. `padded()` rounds the **dimension**, never the tile count, so the result is bounded
 by 1 (CLAUDE.md gotchas).
 
-| case | utilisation |
-|---|---|
-| M=1 on 128×128 (CLAUDE.md's check) | 1/129 ≈ **1/128** |
-| M=1 on 512×512 (chip_a, chip_b) | **1/513** |
-| M=512 on 512×512 | 0.50 |
-| M=2048 on 512×512 | 0.80 |
+**Which branch an array takes is physical (D34).** A conventional systolic pump streams M serially
+through a rows-deep pipeline, hence `M/(M+rows)`. A bit-serial crossbar — any unit whose declared
+dtype multiplier is below 1, such as the Metis D-IMC at INT8 (0.125) — is combinational: M enters
+in whole row-chunks in parallel, so the M side loses only area on ragged chunks, and the sub-cycle
+stream rides K with one sub-cycle row of fill: `K·s / (K_pad·s + s) = K/(K_pad + 1)`. The two
+branches agree at batch 1 (both give ≈1/513 on a 512×512) and differ on large-M streams, where the
+crossbar loses its sub-cycle fill only.
+
+| case | systolic | bit-serial crossbar |
+|---|---|---|
+| M=1 on 128×128 (CLAUDE.md's check) | 1/129 ≈ **1/128** | ≈ 1/128 |
+| M=1 on 512×512 (chip_a, chip_b, Metis) | **1/513** | ≈ **1/513** |
+| M=512 on 512×512 | 0.50 | ≈ 1.0 |
+| M=2048 on 512×512 | 0.80 | ≈ 0.998 |
 
 This is the largest single correction the engine applies, and it is separate from — and
 multiplicative with — the achieved-throughput derating in `calibration.py`. See D14 for what it
@@ -382,6 +391,12 @@ needing more must re-write the arrays as it runs — a 4096³ INT8 matmul is 64 
 The **capacity** is modelled and reported; the **time** for those reloads is not, because charging
 it needs a bandwidth on the L1→IMC path and v1 has no on-chip bandwidth term (D5a, D5b, D30). The
 assumptions drawer says so on every report.
+
+**The reloads still have a schedule (D33).** The sets are independently addressed, so the deploy
+listing writes each reload a full wave ahead of its compute — `(w + 1) % WEIGHT_SETS`, into the set
+freed three waves earlier — and the first wave's sets fill during the first A k-slice staging. The
+write therefore hides behind arithmetic rather than serialising in front of it; what the model
+cannot yet charge is the bus time of that write itself.
 
 ### 6.2 Capacity planning and residency
 
@@ -439,6 +454,14 @@ bound      = argmax of the three
 `bound` is an argmax rather than a majority vote, so it answers "what do I change to make this
 faster". Norms and elementwise ops are assumed fused and pay no dispatch: charging all 451 graph
 nodes would triple a decode step's fixed cost.
+
+**`a` is an inter-operation property, not an SRAM budget (D33).** A tensor some *other* operation
+reads can stay on chip between the two, and `a` measures that. A tensor no operation reads — the
+activation of a lone matmul, which is every matmul benchmark the figures show — cannot: the
+k-slice staging feeds it to all `ceil(N/COLS)` output tiles of its group and it is never touched
+again, so it is compulsory traffic read exactly once, `a = 0`. The report says so in its
+assumptions; `plan_memory` still computes the D15 fraction for multi-op graphs, and the two agree
+there.
 
 ### 6.4 Schedule
 

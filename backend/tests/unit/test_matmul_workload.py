@@ -185,15 +185,18 @@ def test_the_result_is_always_written_back() -> None:
     10000^3 fp16 on A100: A and C are 400 MB of activations against 60.7 MB of
     on-chip capacity, so activation residency is 15.2% — and applying that
     discount to the *result* would keep 30.4 MB of the answer on a chip nobody
-    reads it from. Reads take the discount; the write does not.
+    reads it from. The write never takes the discount. The A operand no longer
+    does either: a single-matmul graph has no inter-operation reuse to grant
+    residency for, so A is compulsory traffic read exactly once (D33) and the
+    reads sit at the full 400 MB figure.
     """
     chip = idealised(load_chip("a100_80gb"))
     op = _only_op(analyze(_spec(10_000, 10_000, 10_000), chip, _deployment()))
 
     assert op.dram_write_bytes == pytest.approx(200e6, rel=1e-6)
     assert op.dram_read_bytes + op.dram_write_bytes == pytest.approx(op.dram_bytes)
-    # Reads are discounted, so they are below the 400 MB compulsory figure.
-    assert op.dram_read_bytes < 400e6
+    # A is read exactly once and B once: no residency discount applies (D33).
+    assert op.dram_read_bytes == pytest.approx(400e6, rel=1e-6)
 
 
 def test_a_consumed_output_may_stay_on_chip() -> None:

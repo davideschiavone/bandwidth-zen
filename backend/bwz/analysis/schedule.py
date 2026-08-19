@@ -16,7 +16,7 @@ previous kernel's arithmetic in this model.
 from __future__ import annotations
 
 from bwz.analysis.roofline import DISPATCHED_OP_TYPES, MachineModel, classify, op_roofline
-from bwz.graph.ops import ComputeGraph
+from bwz.graph.ops import ComputeGraph, MatmulAttrs
 from bwz.operators.base import cost_of
 from bwz.report import PhaseResult
 
@@ -40,13 +40,24 @@ def run_phase(
     # is why a standalone matmul writes all of C while a transformer's
     # intermediate activation may write none of it (D22).
     consumed = {name for op in graph.ops for name in op.inputs}
+    # The activation-residency discount (D15) is *inter-operation* reuse: a
+    # tensor produced by one op and consumed by the next never crosses DRAM. A
+    # one-op graph has no producer — A starts in DRAM — and the weight-stationary
+    # schedule stages each k-slice exactly once and serves every output tile of
+    # its group from the staging, so A crosses DRAM exactly once whatever the
+    # capacity (docs/CORRECTIONS.md D33). Disable the discount here; the generic
+    # `plan_memory` number applies to networks, whose activations it was written
+    # for.
+    single_matmul = len(graph.ops) == 1 and isinstance(graph.ops[0].attrs, MatmulAttrs)
     results = tuple(
         op_roofline(
             op,
             cost_of(op, graph.tensors),
             machine,
             resident_fraction=resident_fraction,
-            activation_resident_fraction=activation_resident_fraction,
+            activation_resident_fraction=(
+                0.0 if single_matmul else activation_resident_fraction
+            ),
             double_buffered=double_buffered,
             terminal_output_bytes=sum(
                 graph.tensors[name].size_bytes for name in op.outputs if name not in consumed

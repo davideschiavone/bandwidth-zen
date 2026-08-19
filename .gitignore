@@ -25,6 +25,14 @@ node_modules/
 /timeline-*.png
 /timeline-*.html
 
+# Figures. Every picture in docs/plots/ is an output of `make plots` —
+# regenerable by running the engine, so it does not belong in history. The
+# README that documents the set stays tracked.
+docs/plots/*.png
+docs/plots/*.html
+backend/timeline-*.png
+backend/timeline-*.html
+
 # Source papers for chip profiles. Cited by DOI in the profile's source_url and
 # read to build it; not redistributed here, because they are not ours to relicense.
 backend/*.pdf

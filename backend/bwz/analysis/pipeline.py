@@ -85,7 +85,9 @@ class Stage(StrEnum):
     """Operand A, the one that streams through the array. A separate stage
     because the two obey different residency fractions and spill at different
     times — capacity is granted to activations before weights (D15) — so one
-    combined LOAD figure cannot say which operand crossed the bus."""
+    combined LOAD figure cannot say which operand crossed the bus. For a lone
+    matmul this stage is instead the k-slice staging: the operand enters per
+    k-slice, once each, and every tile of the group reads the staging (D33)."""
     HOLD = "Hold"
     EXEC = "Ex"
     STORE = "St"
@@ -120,6 +122,9 @@ class Span:
     """Core lane: operations retired in this span."""
     resident_bytes: float = 0.0
     """SRAM lane: bytes this buffer holds while occupied."""
+    staged_once: bool = False
+    """DRAM lane: whether this A load is a whole k-slice staging drawn once
+    (D33) rather than a per-step share of an operand that streams."""
 
     @property
     def duration_s(self) -> float:
@@ -336,13 +341,37 @@ def _tile_trace(
     traffic = result.dram_bytes or 1.0
     scale = result.t_dram_s / traffic / steps
     load_b = result.dram_weight_read_bytes * scale
-    load_a = result.dram_activation_read_bytes * scale
     store = result.dram_write_bytes * scale
     execute = result.t_compute_s / steps
     attrs = op.attrs
     assert isinstance(attrs, MatmulAttrs)
     dims = machine.unit.systolic_dims
     shape = f"{dims[0]}x{dims[1]}" if dims is not None else "untiled"
+    # D33: for a lone matmul, A is not a stream — each k-slice is staged once
+    # and every tile of its group reads the staging. Concentrate A's DRAM time
+    # into one event per k-slice, at the step that opens it, instead of a
+    # per-wave trickle that reads as a re-read. Tiles are k-major, so tile t
+    # opens the k-slice CEIL(N/COLS) divides it. Without declared geometry the
+    # whole run is one slice and the uniform share carries the totals.
+    if dims is not None:
+        rows, cols = dims
+        tiles_per_ks = max(1, math.ceil(attrs.n / cols))
+        k_slices = max(1, math.ceil(attrs.k / rows))
+        total_tiles = waves * units
+        a_bytes_step: list[float] = []
+        ks_opened: list[int] = []
+        for i in range(steps):
+            end_tile = min(total_tiles, math.floor((i + 1) * per_step * units))
+            open_tile = math.floor(i * per_step * units)
+            openings = end_tile // tiles_per_ks - open_tile // tiles_per_ks
+            a_bytes_step.append(result.dram_activation_read_bytes * openings / k_slices)
+            ks_opened.append(open_tile // tiles_per_ks + 1 if openings else 0)
+        load_a = [b * scale * steps for b in a_bytes_step]
+        activation_bytes = a_bytes_step
+    else:
+        load_a = [result.dram_activation_read_bytes * scale] * steps
+        activation_bytes = [result.dram_activation_read_bytes / steps] * steps
+        ks_opened = [0] * steps
     tiles_here = in_flight * per_step
     # Two spaces separate the bar text from the qualifier: `_short` in the plot
     # script splits there, so the bar stays legible and the hover keeps it all.
@@ -358,12 +387,19 @@ def _tile_trace(
     else:
         label, qualifier = f"{tiles_here:.0f} B tiles {shape}", ""
     tail = f"  {qualifier}" if qualifier else ""
+    labels = [f"{label} [{i + 1}/{steps}]{tail}" for i in range(steps)]
+    # The k-slice openings' A bars carry their own names; the other steps have
+    # no A traffic at all under D33, so nothing else needs an activation label.
+    activation_labels = [
+        f"A k-slice {g}/{k_slices} — staged once, feeds its tiles" if g else ""
+        for g in ks_opened
+    ]
 
     spans = _pipelined_tiles(
         [load_b] * steps,
         [execute] * steps,
         [store] * steps,
-        labels=[f"{label} [{i + 1}/{steps}]{tail}" for i in range(steps)],
+        labels=labels,
         op_types=[op.op_type.value] * steps,
         phase=phase.phase,
         dispatch_s=result.t_fixed_s,
@@ -374,8 +410,10 @@ def _tile_trace(
         # What one buffer holds: the B tiles the arrays are stationary on for
         # this wave. Sized from the schedule, not asserted.
         resident_per_step=[result.weight_bytes / max(tiles, 1) * tiles_here] * steps,
-        activation_loads=[load_a] * steps,
-        activation_bytes_per_step=[result.dram_activation_read_bytes / steps] * steps,
+        activation_loads=load_a,
+        activation_bytes_per_step=activation_bytes,
+        activation_labels=activation_labels,
+        staged_once=True,
     )
     return PipelineTrace(
         spans=tuple(spans),
@@ -505,6 +543,8 @@ def _pipelined_tiles(
     resident_per_step: list[float],
     activation_loads: list[float] | None = None,
     activation_bytes_per_step: list[float] | None = None,
+    activation_labels: list[str] | None = None,
+    staged_once: bool = False,
 ) -> list[Span]:
     """Software-pipeline the tiles of ONE operation, per the constraints above.
 
@@ -513,11 +553,14 @@ def _pipelined_tiles(
 
     ``loads`` is operand B's time and ``activation_loads`` operand A's. They
     queue on the same port, so the schedule uses their sum and the drawing keeps
-    them as two adjacent bars.
+    them as two adjacent bars. ``staged_once`` marks the A bars as whole k-slice
+    stagings (D33) instead of portions of a stream, and ``activation_labels``
+    names them; both default to the per-step leg of the D31 stream.
     """
     steps = len(loads)
     a_loads = activation_loads if activation_loads is not None else [0.0] * steps
     a_bytes = activation_bytes_per_step if activation_bytes_per_step is not None else [0.0] * steps
+    a_labels = activation_labels if activation_labels is not None else labels
     spans: list[Span] = []
     if dispatch_s > 0:
         # Step -1: the dispatch is not a tile, and giving it step 0 would merge it
@@ -594,13 +637,14 @@ def _pipelined_tiles(
                 Span(
                     Lane.DRAM,
                     Stage.LOAD_A,
-                    labels[i],
+                    a_labels[i],
                     load_start + loads[i],
                     load_end,
                     i,
                     phase,
                     op_type=op_types[i],
                     bytes_moved=a_bytes[i],
+                    staged_once=staged_once,
                 )
             )
         # A buffer is occupied from the moment its fetch begins until its result

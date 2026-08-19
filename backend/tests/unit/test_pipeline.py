@@ -252,11 +252,11 @@ def test_coalescing_preserves_the_span() -> None:
 def test_loads_are_split_by_operand_and_reconcile_with_the_report() -> None:
     """B and A cross the bus separately, and the two bars sum to the one number.
 
-    They obey different residency fractions and spill at different times —
-    capacity is granted to activations before weights (D15) — so a single LOAD
-    figure cannot say which operand moved. At 8192-cubed INT8 on Metis, B is
-    100% non-resident and A only 60%, which is exactly the asymmetry a combined
-    figure hides (D31).
+    They obey different residency fractions and spill at different times, so a
+    single LOAD figure cannot say which operand moved. At 8192-cubed INT8 on
+    Metis both are now 100% non-resident: B does not fit the 16 resident tiles,
+    and A is compulsory traffic read exactly once (D33) — the asymmetry D31
+    documented is gone, but the reconciliation it exists to test remains.
     """
     chip = idealised(load_chip("metis_aipu"))
     trace, report = _trace(_spec(8192, 8192, 8192, "int8"), "metis_aipu", max_steps=256)
@@ -270,9 +270,52 @@ def test_loads_are_split_by_operand_and_reconcile_with_the_report() -> None:
     assert weights + activations == pytest.approx(op.dram_read_bytes, rel=1e-9)
     assert reads == pytest.approx(op.dram_read_bytes, rel=1e-9)
     assert writes == pytest.approx(op.dram_write_bytes, rel=1e-9)
-    # B spills entirely, A only partly: the asymmetry the split exists to show.
-    assert weights > activations > 0
+    # B does not fit the array and A is read exactly once: both operands are
+    # full compulsory traffic now (D33), where A used to get a residency
+    # discount — the 2x gap in D31's numbers is gone.
+    assert weights == pytest.approx(activations, rel=1e-9)
+    assert weights > 0
     assert chip.on_chip_capacity_bytes > 0
+
+
+def test_a_is_staged_once_per_k_slice_in_the_trace() -> None:
+    """D33: the single-matmul trace does not show A streaming every wave.
+
+    8192-cubed INT8 on Metis tiles to ceil(K/512) = 16 k-slices, and the DRAM
+    lane carries exactly one LOAD_A event per k-slice — the whole staging, fed
+    once to every tile of the group — instead of a per-wave share that reads as
+    a re-read.
+    """
+    trace, report = _trace(_spec(8192, 8192, 8192, "int8"), "metis_aipu", max_steps=64)
+    op = report.phases[0].ops[0]
+    a_spans = [s for s in trace.spans if s.stage is Stage.LOAD_A]
+
+    assert len(a_spans) == 16, "one staging event per k-slice, ceil(8192/512)"
+    assert all(s.staged_once for s in a_spans)
+    expected = op.dram_activation_read_bytes / 16
+    assert all(s.bytes_moved == pytest.approx(expected, rel=1e-9) for s in a_spans)
+    assert sum(s.bytes_moved for s in a_spans) == pytest.approx(
+        op.dram_activation_read_bytes, rel=1e-9
+    )
+    assert all("A k-slice" in s.label for s in a_spans)
+
+    # The non-matmul path is untouched: a network's activations still stream
+    # (inter-op reuse, no k-slice staging to draw).
+    chip = load_chip("a100_80gb")
+    model = load_model("llama3_8b")
+    deployment = DeploymentSpec.model_validate(
+        {"batch": 1, "input_tokens": 512, "output_tokens": 1}
+    )
+    report = analyze(model, chip, deployment)
+    decode = report.phase(GraphPhase.DECODE)
+    assert decode is not None
+    trace_net = build_trace(
+        build_graph(model, deployment, GraphPhase.DECODE),
+        decode,
+        machine_model(chip, DType.FP16),
+        double_buffered=report.memory.double_buffered,
+    )
+    assert not any(s.staged_once for s in trace_net.spans)
 
 
 def test_a_tile_step_is_a_wave_not_a_single_tile() -> None:

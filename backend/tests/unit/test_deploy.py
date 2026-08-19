@@ -111,6 +111,28 @@ def test_the_bit_serial_tax_appears_only_where_the_profile_declares_it() -> None
     assert "SUB_CYCLES" not in a100.code, "fp16 multiplier is 1.0, so there is no sub-cycle loop"
 
 
+def test_the_listing_stages_a_once_and_rotates_weight_sets() -> None:
+    """D33: A k-slices are staged on chip and consumed by every tile of their
+    group (A crosses DRAM exactly once), and reloads land in a set freed by
+    the previous wave, so the write hides behind arithmetic instead of
+    serialising in front of it.
+    """
+    _c, _m, _g, _t, metis = _run("metis_aipu", 8192, 8192, 8192)
+    _c2, _m2, _g2, _t2, a100 = _run("a100_80gb", 8192, 8192, 8192)
+
+    assert "#define NTILES_PER_KS 16" in metis.code, "16 n-tiles per k-slice at N=8192"
+    assert "KSLICE" in metis.code
+    assert "A crosses DRAM exactly once" in metis.code
+    assert "staged once per k-slice" in metis.code
+    assert "(w + 1) % WEIGHT_SETS" in metis.code, "write-ahead: next wave's tile, previous set"
+    assert "write-ahead" in metis.code
+    assert "must land before the array can use it" not in metis.code
+
+    assert "NTILES_PER_KS" in a100.code and "KSLICE" in a100.code
+    assert "A crosses DRAM exactly once" in a100.code
+    assert "write-ahead" not in a100.code, "a tensor core stores no weights (D30)"
+
+
 @pytest.mark.parametrize("chip_id", ["a100_80gb", "metis_aipu"])
 def test_the_pseudo_c_has_no_nested_comments(chip_id: str) -> None:
     """C forbids them, and the listing is meant to survive being pasted (D26)."""

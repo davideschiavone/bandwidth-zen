@@ -207,7 +207,7 @@ def op_roofline(
     dram_bytes = read_bytes + write_bytes
     t_dram = dram_bytes / machine.effective_bandwidth_bytes_per_s
 
-    utilisation = operation_utilisation(op, machine.unit)
+    utilisation = operation_utilisation(op, machine.unit, machine.dtype)
     rate = machine.rate_for(op.op_type)
     t_compute = cost.flops / (rate * utilisation) if cost.flops > 0 and utilisation > 0 else 0.0
 

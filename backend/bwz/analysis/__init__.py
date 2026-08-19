@@ -346,6 +346,12 @@ def _assumptions(
             f"The {model.result_dtype.value} result is an accumulator width: it changes bytes "
             f"only, never operations. 2*M*N*K is the same at every result width."
         )
+        out.append(
+            "A crosses DRAM exactly once: the weight-stationary schedule stages each k-slice "
+            "once on chip and every output tile of its group reads the staging, so the "
+            "activation-residency discount (D15) — inter-operation reuse, which a one-op graph "
+            "cannot have — does not apply (docs/CORRECTIONS.md D33)."
+        )
 
     if isinstance(model, TransformerSpec) and model.family is ModelFamily.TRANSFORMER_ENCODER:
         # The deployment can ask for generation; an encoder has none to give, and

@@ -667,11 +667,22 @@ def _tip(span: Span) -> str:
         kind = {
             Stage.STORE: "STORE — result C written back",
             Stage.LOAD: "LOAD — operand B, the tile the array holds",
-            Stage.LOAD_A: "LOAD — operand A, streaming through the array",
+            Stage.LOAD_A: (
+                "STAGE — operand A: k-slice staging, read once in total (D33)"
+                if span.staged_once
+                else "LOAD — operand A, streaming through the array"
+            ),
         }.get(span.stage, "LOAD — operands in")
+        note = (
+            "\nThis bar is one whole k-slice: every tile of the group reads this"
+            " staging, and A crosses DRAM exactly once"
+            if span.staged_once
+            else ""
+        )
         return (
             f"{kind}\n{span.label}\n{when}\n"
             f"{format_bytes(span.bytes_moved)} @ {format_bandwidth(span.rate_bytes_per_s)}"
+            f"{note}"
         )
     if span.lane in (Lane.CORE, Lane.VECTOR):
         engine = "array" if span.lane is Lane.CORE else "vector unit"
