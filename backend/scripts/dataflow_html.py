@@ -58,8 +58,28 @@ TEMPLATE = """<!doctype html>
             border: 1.5px solid var(--grid); background: var(--box); color: var(--ink); }}
   input[type=range] {{ flex: 1 1 260px; min-width: 160px; }}
   #clockLabel {{ font-size: 12px; color: var(--ink-2); min-width: 150px; text-align: right; }}
-  #wrap {{ position: relative; border-top: 1px solid var(--grid); padding-top: 12px; }}
+  #debugrow {{ display: flex; gap: 16px; flex-wrap: wrap; align-items: flex-start; }}
+  #wrap {{
+    flex: 3 1 440px; position: relative; border-top: 1px solid var(--grid); padding-top: 12px;
+  }}
   svg {{ display: block; width: 100%; }}
+  #codepane {{
+    flex: 2 1 340px; margin: 0; padding: 10px 0; max-height: 440px; overflow-y: auto;
+    background: var(--box); border: 1.5px solid var(--grid); border-radius: 7px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px;
+    line-height: 1.55;
+  }}
+  .codeline {{
+    white-space: pre; padding: 0 12px; border-left: 3px solid transparent; color: var(--ink-2);
+  }}
+  .codeline.hot-dram {{
+    background: rgba(42, 120, 214, 0.14); border-left-color: var(--dram); color: var(--ink);
+    font-weight: 600;
+  }}
+  .codeline.hot-core {{
+    background: rgba(235, 104, 52, 0.14); border-left-color: var(--core); color: var(--ink);
+    font-weight: 600;
+  }}
   .station {{ fill: var(--box); stroke: var(--grid); stroke-width: 1.5; }}
   .station-label {{ font-size: 13px; font-weight: 700; fill: var(--ink); }}
   .station-detail {{ font-size: 10.5px; fill: var(--ink-3); }}
@@ -91,7 +111,9 @@ TEMPLATE = """<!doctype html>
 largest both stay visible — not to scale against each other or against the stations. Solid blocks
 are operand B, hatched blocks are operand A streaming (D31), hollow blocks are the result written
 back. The Accelerator station glows while it is executing; nothing "enters" it, since the byte/flop
-model does not distinguish that moment from the rest of a wave's arithmetic.</p>
+model does not distinguish that moment from the rest of a wave's arithmetic. The pseudo-C on the
+right lights up the line(s) executing right now — more than one at once when double buffering means
+more than one statement is truly concurrent (D41).</p>
 
 <div id="controls">
   <button id="playBtn">Play</button>
@@ -106,7 +128,10 @@ model does not distinguish that moment from the rest of a wave's arithmetic.</p>
   <span id="clockLabel"></span>
 </div>
 
-<div id="wrap"><svg id="chart"></svg><div id="tip"></div></div>
+<div id="debugrow">
+  <div id="wrap"><svg id="chart"></svg><div id="tip"></div></div>
+  <pre id="codepane">{code}</pre>
+</div>
 <div id="annotation"></div>
 
 <footer>{footer}</footer>
@@ -173,6 +198,45 @@ const PATH = {{
 
 function activeAt(t) {{
   return DATA.flow.filter(f => f.start <= t && t < Math.max(f.end, f.start + 1e-15));
+}}
+
+// ---- the debugger-style code pane -------------------------------------------
+const codepane = document.getElementById("codepane");
+const codeLineEls = Array.from(codepane.querySelectorAll(".codeline"));
+const STAGE_LANE = {{load_b: "dram", load_a: "dram", store: "dram", exec: "core"}};
+let lastHotLines = new Set();
+
+function updateCodeHighlight(events) {{
+  const hotStages = new Set(events.map(f => f.stage));
+  const hotLines = new Set();
+  hotStages.forEach(stage => (DATA.stage_lines[stage] || []).forEach(l => hotLines.add(l)));
+
+  codeLineEls.forEach((lineEl, i) => {{
+    lineEl.classList.remove("hot-dram", "hot-core");
+    if (!hotLines.has(i)) return;
+    for (const stage of hotStages) {{
+      if ((DATA.stage_lines[stage] || []).includes(i)) {{
+        lineEl.classList.add("hot-" + (STAGE_LANE[stage] || "dram"));
+        break;
+      }}
+    }}
+  }});
+
+  // Only scroll when the hot set actually changed — every frame would fight a
+  // reader who scrolled up to read the header/#defines.
+  const changed =
+    hotLines.size !== lastHotLines.size || [...hotLines].some(l => !lastHotLines.has(l));
+  if (changed && hotLines.size) {{
+    const firstEl = codeLineEls[Math.min(...hotLines)];
+    if (firstEl) {{
+      const paneBox = codepane.getBoundingClientRect();
+      const lineBox = firstEl.getBoundingClientRect();
+      if (lineBox.top < paneBox.top || lineBox.bottom > paneBox.bottom) {{
+        firstEl.scrollIntoView({{block: "center", behavior: "smooth"}});
+      }}
+    }}
+  }}
+  lastHotLines = hotLines;
 }}
 
 function draw(t) {{
@@ -251,6 +315,7 @@ function draw(t) {{
   }});
 
   renderAnnotation(t, events);
+  updateCodeHighlight(events);
 }}
 
 function renderAnnotation(t, events) {{
@@ -346,8 +411,17 @@ def render(
     a_strategy: str,
     b_dataflow: str,
     notes: list[str],
+    code_lines: list[str],
+    stage_lines: dict[str, list[int]],
 ) -> str:
-    """Build the page. Pure: returns text, writes nothing."""
+    """Build the page. Pure: returns text, writes nothing.
+
+    ``code_lines``/``stage_lines`` are ``Deployment.code``, split, and
+    ``Deployment.stage_lines`` — the same pseudo-C the timeline page's "How it
+    is deployed on the chip" section shows, here with each line addressable so
+    the debug-session-style highlight (D41) can light up the ones live at the
+    animation's current time.
+    """
     data = json.dumps(
         {
             "flow": flow,
@@ -355,10 +429,15 @@ def render(
             "reported_latency_s": reported_latency_s,
             "fill_drain_s": fill_drain_s,
             "stations": stations,
+            "stage_lines": stage_lines,
         }
     )
     notes_html = (
         "<ul>" + "".join(f"<li>{_escape(n)}</li>" for n in notes) + "</ul>" if notes else ""
+    )
+    code_html = "".join(
+        f'<div class="codeline" data-line="{i}">{_escape(line) or " "}</div>'
+        for i, line in enumerate(code_lines)
     )
     return TEMPLATE.format(
         title=title,
@@ -368,6 +447,7 @@ def render(
         a_strategy=_escape(a_strategy),
         b_dataflow=_escape(b_dataflow),
         notes=notes_html,
+        code=code_html,
     )
 
 

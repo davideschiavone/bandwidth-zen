@@ -53,6 +53,16 @@ class Deployment:
     """``"tiles"`` for a tiled matmul, ``"operations"`` for a graph. The wave
     relation ``waves = ceil(tiles / units)`` only holds for the first: a network
     is a sequence of operations with no wave structure to check (D5a)."""
+    stage_lines: tuple[tuple[str, tuple[int, ...]], ...] = ()
+    """0-indexed line numbers within ``code`` for each animated stage
+    (``"load_b"``, ``"load_a"``, ``"exec"``, ``"store"`` — the vocabulary
+    ``plot_pipeline.py``'s ``_ANIMATION_STAGE`` already uses). A tuple of pairs
+    rather than a ``dict``, matching ``PipelineTrace.work_by_op``'s own reason:
+    keep a frozen dataclass hashable-in-substance. Empty for the network-sequence
+    listing (:func:`_network_deployment`), which has no per-wave stages to point
+    at. Lets a debug view highlight the line(s) live at the animation's current
+    time — more than one at once when double buffering means more than one
+    statement is truly concurrent (D41)."""
 
 
 def _int(value: float) -> str:
@@ -208,90 +218,217 @@ def deployment_of(
     # invent a residency it does not have (D30). on-demand and persistent are
     # the other two placements the same fact admits: exposed at compute, or
     # paid once and never again.
-    write_ahead = (
-        "        if (w + 1 < WAVES) /* write-ahead (D33): the next wave's tile lands */\n"
-        "            imc_write(u, (w + 1) % WEIGHT_SETS, tile(w + 1, u));"
-        "   /* in the set freed 3 waves ago — hidden behind this wave */\n"
-        if unit.weight_sets > 1 and b_dataflow is BDataflow.WRITE_AHEAD
-        else ""
-    )
-    persistent_write = (
-        "        if (w == 0)  /* persistent (D33): loaded once, never displaced */\n"
-        "            imc_write(u, u, tile(0, u));\n"
-        if unit.weight_sets > 1 and b_dataflow is BDataflow.PERSISTENT
-        else ""
-    )
-    on_demand_write = (
-        "        imc_write(u, w % WEIGHT_SETS, tile(w, u));"
-        "  /* on-demand (D33): exposed on the critical path */\n"
-        if unit.weight_sets > 1 and b_dataflow is BDataflow.ON_DEMAND
-        else ""
-    )
-    prologue = (
-        "/* prologue: wave 0's B tiles land in sets 0..UNITS-1 while the first A\n"
-        " * k-slice stages; afterwards the write-ahead keeps every set a full wave\n"
-        " * ahead of its compute. */\n"
-        if unit.weight_sets > 1 and b_dataflow is BDataflow.WRITE_AHEAD
-        else "/* prologue: wave 0's B tiles land in sets 0..UNITS-1 and are never\n"
-        " * displaced — TILES <= UNITS * WEIGHT_SETS holds, or this fell back to\n"
-        " * write-ahead (checked upstream). */\n"
-        if unit.weight_sets > 1 and b_dataflow is BDataflow.PERSISTENT
-        else ""
-    )
-    a_prologue = (
-        f"stage_all_of_A();  /* {format_bytes(result.dram_activation_read_bytes)} — hatched "
-        f"bar; every k-slice ramped in before wave 0, same total as staging per k-slice (D33) "
-        f"*/\n"
+    def b_load_line(wave_expr: str, indent: str) -> tuple[str, str]:
+        return (
+            f"{indent}load_B(u, tile({wave_expr}, u));  "
+            f"/* {b_bytes} — solid bar; each tile fetched once */",
+            "load_b",
+        )
+
+    def a_staging_lines(wave_expr: str, indent: str) -> list[tuple[str, str]]:
+        # WHOLE has no per-wave staging line at all — it is a prologue-only ramp
+        # (a_prologue_line below), same total bytes as staging per k-slice (D33).
+        if a_strategy is AStrategy.WHOLE:
+            return []
+        if a_strategy is AStrategy.STREAM:
+            return [
+                (
+                    f"{indent}load_A(u, tile({wave_expr}, u));"
+                    f" /* {a_stage} — hatched bar; re-read every tile (D31) */",
+                    "load_a",
+                )
+            ]
+        return [
+            (
+                f"{indent}if (tile({wave_expr}, u) % NTILES_PER_KS == 0)  "
+                f"/* this tile opens a k-slice */",
+                "load_a",
+            ),
+            (
+                f"{indent}    stage_A(u, KSLICE({wave_expr}, u)); "
+                f"/* {a_stage} — hatched bar; staged once (D33) */",
+                "load_a",
+            ),
+        ]
+
+    a_prologue_line: tuple[str, str] | None = (
+        (
+            f"stage_all_of_A();  /* {format_bytes(result.dram_activation_read_bytes)} — hatched "
+            f"bar; every k-slice ramped in before wave 0, same total as staging per k-slice (D33) "
+            f"*/",
+            "load_a",
+        )
         if a_strategy is AStrategy.WHOLE
-        else ""
+        else None
     )
-    if a_strategy is AStrategy.STREAM:
-        a_dram_line = (
-            "        load_A(u, tile(w, u));"
-            f" /* {a_stage} — hatched bar; re-read every tile (D31) */\n"
-        )
-    elif a_strategy is AStrategy.WHOLE:
-        a_dram_line = ""  # staged once, up front, in the prologue above.
-    else:
-        a_dram_line = (
-            "        if (tile(w, u) % NTILES_PER_KS == 0)  /* this tile opens a k-slice */\n"
-            f"            stage_A(u, KSLICE(w, u)); /* {a_stage} — hatched bar; staged once "
-            f"(D33) */\n"
-        )
-    inner = (
-        "            for (int c = 0; c < SUB_CYCLES; ++c)\n"
-        "                feed(u, w % WEIGHT_SETS, &A[m][KSLICE(w, u)]);"
-        "   /* one sub-cycle of the operand */\n"
+
+    inner: list[str] = (
+        [
+            "            for (int c = 0; c < SUB_CYCLES; ++c)",
+            "                feed(u, w % WEIGHT_SETS, &A[m][KSLICE(w, u)]);"
+            "   /* one sub-cycle of the operand */",
+        ]
         if sub_cycles > 1
-        else "            mac(u, &A[m][KSLICE(w, u)]);\n"
+        else ["            mac(u, &A[m][KSLICE(w, u)]);"]
     )
     if sub_cycles > 1 and unit.weight_sets == 1:
-        inner = inner.replace("w % WEIGHT_SETS, ", "")
+        inner = [line.replace("w % WEIGHT_SETS, ", "") for line in inner]
+    # The exec line is always the last physical line of `inner` — a sub-cycle
+    # loop's header carries no arithmetic of its own to tag.
+    inner_lines: list[tuple[str, str | None]] = [(line, None) for line in inner[:-1]]
+    inner_lines.append((inner[-1], "exec"))
 
-    if on_demand_write:
-        compute_block = f"""    parallel_for (int u = 0; u < UNITS; ++u) {{
-{on_demand_write}        for (int m = 0; m < {stream_rows}; ++m)   /* M streams; it never tiles */
-{inner}    }}
-"""
+    on_demand_line: tuple[str, str | None] | None = (
+        (
+            "        imc_write(u, w % WEIGHT_SETS, tile(w, u));"
+            "  /* on-demand (D33): exposed on the critical path */",
+            None,
+        )
+        if unit.weight_sets > 1 and b_dataflow is BDataflow.ON_DEMAND
+        else None
+    )
+
+    def compute_lines() -> list[tuple[str, str | None]]:
+        m_line = (
+            f"        for (int m = 0; m < {stream_rows}; ++m)   /* M streams; it never tiles */",
+            None,
+        )
+        if on_demand_line is None:
+            return [
+                ("    parallel_for (int u = 0; u < UNITS; ++u)", None),
+                m_line,
+                *inner_lines,
+            ]
+        return [
+            ("    parallel_for (int u = 0; u < UNITS; ++u) {", None),
+            on_demand_line,
+            m_line,
+            *inner_lines,
+            ("    }", None),
+        ]
+
+    store_line: tuple[str, str] = (
+        f"        store_C(u, tile(w, u));       /* {c_bytes} — hollow bar */",
+        "store",
+    )
+
+    body: list[tuple[str, str | None]] = []
+    if a_prologue_line is not None:
+        body.append(a_prologue_line)
+    if depth == 2:
+        # Double buffered: a real prologue primes wave 0, and every steady-state
+        # iteration prefetches wave w+1 alongside wave w's own compute — the
+        # schedule this decomposes (`_pipelined_tiles`) genuinely overlaps them
+        # (`load_start(i) = max(dram_free, store_ends[i-2])`, never gated on the
+        # previous wave's compute), so the listing reads that way too (D41).
+        body.append(("/* prologue: prime the pipeline — wave 0's tile loads before the", None))
+        body.append((" * loop starts, so wave 0's compute below already has an operand", None))
+        body.append((" * when the loop's first prefetch (wave 1) begins beside it,", None))
+        body.append((" * DEPTH=2 apart. */", None))
+        body.append(("for (int u = 0; u < UNITS; ++u) {", None))
+        body.append(b_load_line("0", "    "))
+        body.extend(a_staging_lines("0", "    "))
+        if unit.weight_sets > 1:
+            if b_dataflow is BDataflow.WRITE_AHEAD:
+                body.append(
+                    (
+                        "    imc_write(u, 0, tile(0, u));  "
+                        "/* write-ahead (D33): priming set 0 — nothing to hide behind yet */",
+                        None,
+                    )
+                )
+            elif b_dataflow is BDataflow.PERSISTENT:
+                body.append(
+                    (
+                        "    imc_write(u, u, tile(0, u));  "
+                        "/* persistent (D33): loaded once, never displaced */",
+                        None,
+                    )
+                )
+        body.append(("}", None))
+        body.append(("", None))
+        body.append(("for (int w = 0; w < WAVES; ++w) {", None))
+        body.append(("", None))
+        body.append(
+            (
+                "    /* ---- prefetch wave w+1 while wave w computes below "
+                "(double buffered) ---- */",
+                None,
+            )
+        )
+        body.append(("    if (w + 1 < WAVES) {", None))
+        body.append(("        for (int u = 0; u < UNITS; ++u) {", None))
+        body.append(b_load_line("w + 1", "            "))
+        body.extend(a_staging_lines("w + 1", "            "))
+        if unit.weight_sets > 1 and b_dataflow is BDataflow.WRITE_AHEAD:
+            body.append(
+                (
+                    "            imc_write(u, (w + 1) % WEIGHT_SETS, tile(w + 1, u));"
+                    "  /* hidden behind this wave's arithmetic */",
+                    None,
+                )
+            )
+        body.append(("        }", None))
+        body.append(("    }", None))
+        body.append(("", None))
+        body.append(("    /* ---- the arrays, all UNITS of them at once ---- */", None))
+        body.extend(compute_lines())
+        body.append(("", None))
+        body.append(
+            (
+                "    /* ---- DRAM again: wave w's result drains, behind the "
+                "prefetch issued above ---- */",
+                None,
+            )
+        )
+        body.append(("    for (int u = 0; u < UNITS; ++u)", None))
+        body.append(store_line)
+        body.append(("}", None))
     else:
-        compute_block = f"""    parallel_for (int u = 0; u < UNITS; ++u)
-        for (int m = 0; m < {stream_rows}; ++m)   /* M streams; it never tiles */
-{inner}"""
-
-    body = f"""
-{a_prologue}{prologue}for (int w = 0; w < WAVES; ++w) {{
-
-    /* ---- DRAM, one port, in issue order (D22) ------------------------- */
-    for (int u = 0; u < UNITS; ++u) {{
-        load_B(u, tile(w, u));        /* {b_bytes} — solid bar; each tile fetched once */
-{a_dram_line}{write_ahead}{persistent_write}    }}
-
-    /* ---- the arrays, all UNITS of them at once ------------------------ */
-{compute_block}    /* ---- DRAM again: the result drains behind the next fetch ---------- */
-    for (int u = 0; u < UNITS; ++u)
-        store_C(u, tile(w, u));       /* {c_bytes} — hollow bar */
-}}
-""".rstrip()
+        # Not double buffered: load, compute and store for wave w genuinely
+        # serialise before wave w+1 can begin — `_pipelined_tiles` places wave
+        # w's store before it ever computes wave w+1's load_start — so nothing
+        # here should read as overlapping.
+        body.append(("for (int w = 0; w < WAVES; ++w) {", None))
+        body.append(("", None))
+        body.append(("    /* ---- DRAM, one port, in issue order (D22) ---- */", None))
+        body.append(("    for (int u = 0; u < UNITS; ++u) {", None))
+        body.append(b_load_line("w", "        "))
+        body.extend(a_staging_lines("w", "        "))
+        if unit.weight_sets > 1 and b_dataflow is BDataflow.WRITE_AHEAD:
+            body.append(
+                (
+                    "        if (w + 1 < WAVES)  "
+                    "/* write-ahead (D33): the next wave's tile lands */",
+                    None,
+                )
+            )
+            body.append(
+                (
+                    "            imc_write(u, (w + 1) % WEIGHT_SETS, tile(w + 1, u));"
+                    "   /* in the set freed 3 waves ago — hidden behind this wave */",
+                    None,
+                )
+            )
+        elif unit.weight_sets > 1 and b_dataflow is BDataflow.PERSISTENT:
+            body.append(
+                (
+                    "        if (w == 0)  /* persistent (D33): loaded once, never displaced */",
+                    None,
+                )
+            )
+            body.append(("            imc_write(u, u, tile(0, u));", None))
+        body.append(("    }", None))
+        body.append(("", None))
+        body.append(("    /* ---- the arrays, all UNITS of them at once ---- */", None))
+        body.extend(compute_lines())
+        body.append(("", None))
+        body.append(
+            ("    /* ---- DRAM again: the result drains behind the next fetch ---- */", None)
+        )
+        body.append(("    for (int u = 0; u < UNITS; ++u)", None))
+        body.append(store_line)
+        body.append(("}", None))
 
     # Both numbers, always: the REPORTED latency is what the engine predicts and
     # what every table quotes, and the drawn span is that plus the fill/drain the
@@ -311,7 +448,19 @@ def deployment_of(
         )
     footer += " */"
 
-    code = "\n".join(header) + "\n\n" + "\n".join(defines) + "\n" + body + footer
+    combined: list[tuple[str, str | None]] = [(h, None) for h in header]
+    combined.append(("", None))
+    combined.extend((d, None) for d in defines)
+    combined.append(("", None))
+    combined.extend(body)
+    combined.extend((f, None) for f in footer.split("\n"))
+
+    code = "\n".join(text for text, _tag in combined)
+    stage_line_map: dict[str, list[int]] = {}
+    for index, (_text, tag) in enumerate(combined):
+        if tag is not None:
+            stage_line_map.setdefault(tag, []).append(index)
+
     return Deployment(
         chip_id=chip.id,
         title=f"{chip.name} — {unit.name}",
@@ -321,6 +470,7 @@ def deployment_of(
         units=units,
         resident_tiles=resident,
         reloads=reloads,
+        stage_lines=tuple((tag, tuple(indices)) for tag, indices in stage_line_map.items()),
     )
 
 

@@ -102,6 +102,16 @@ never the other way around.
   `--iterations` repeats back to back is the only way `persistent`'s real advantage (its 2nd+ pass B
   load genuinely vanishing) would show up in motion
 
+**A pseudo-C pane plays alongside the diagram, debugger-style (D41).** The same loop nest the
+timeline page's "how it is deployed on the chip" section shows — now honestly double-buffered, with
+a real wave-0 prologue and a steady-state loop that prefetches wave *w+1* beside wave *w*'s own
+compute, instead of reading as one serial block — lights up the line(s) executing at the current
+playback time. More than one line highlights at once exactly when double buffering means more than
+one statement is truly concurrent: watch for the `load_B` line and the `mac`/`feed` line lighting up
+together while a block is mid-flight toward the Accelerator station and another is sliding in from
+DRAM at the same time. `imc_write` lines are never highlighted — no event in this model currently
+times that statement (D40), so lighting it up would be decoration, not data.
+
 ## Reading the roofline
 
 Solid roof = datasheet, which is what `--ideal` reports. Dashed roof = the same machine after the

@@ -1438,3 +1438,72 @@ established for A. Five golden tests in `test_pipeline.py` cover: `write-ahead` 
 path (regression guard — every other test in the file assumes it), `on-demand`'s exact derived
 delay, `persistent` matching `write-ahead` span for span, the byte/latency invariant across all
 three, and the `weight_sets <= 1` gate plus the `--iterations` bug fix.
+
+## D41 — The pseudo-C now shows double buffering instead of just claiming it, and `--animate` highlights it live (2026-08-20)
+
+A user watching the new `--animate` page asked a sharp question: does the pseudo-C loop nest
+`bwz/deploy.py` generates actually *show* double buffering, or does it just say so? It didn't.
+`#define DEPTH 2 /* double buffered: capacity fits two tiles */` sat above a loop that read as
+fully serial — load wave *w*, compute wave *w*, store wave *w*, then move to *w+1* — for every chip
+except the Metis-style weight-set case, where only a comment hinted at overlap. The real schedule
+(`_pipelined_tiles`) genuinely overlaps wave *i*'s load with wave *i-1*'s compute whenever
+`depth==2` (`load_start(i) = max(dram_free, store_ends[i-2])`, never gated on the previous wave's
+compute) — the listing should read that way too, since its own docstring's whole point is showing
+"how that arithmetic reaches this particular silicon."
+
+**Fix.** `deployment_of()` now builds a genuine prologue (wave 0's tile loads before the loop
+starts) plus a steady-state loop that prefetches wave *w+1* alongside wave *w*'s own compute —
+but only when `trace.double_buffered` is `True`. When it is `False` (`depth==1`), the listing keeps
+the exact serial shape it always had, because that *is* the faithful rendering of a genuinely
+serialized schedule (`_pipelined_tiles`'s depth==1 branch really does place a wave's store before
+computing the next wave's load start). No shipped profile at any shape actually produces
+`depth==1` — verified across every chip from 600³ to 32768³ — so the fallback path is exercised in
+`test_deploy.py` by forcing it directly (shrinking every non-DRAM `MemoryLevel.capacity_bytes`
+below twice one tile's bytes, which flips `report.memory.double_buffered` end to end; a bare
+`on_chip_capacity_bytes` override alone silently no-ops, since it is a computed property, not a
+stored field).
+
+**A real, pre-existing bug fell out of writing the prologue honestly.** Under `write-ahead`, no
+statement anywhere wrote wave 0's own B tile into a weight set — the per-wave line only ever wrote
+`tile(w+1, u)`, so at `w=0` that's tile 1, never tile 0 — even though the old prologue *comment*
+already claimed wave 0's tiles landed somewhere. The new prologue adds the actual statement,
+`imc_write(u, 0, tile(0, u))`.
+
+Every existing `test_deploy.py` assertion (19 tests, all substring-based, none checking line order)
+passes unmodified against the restructured text — checked line by line before writing the change,
+not discovered by running the suite afterward. Two new tests: one pins the double-buffered shape
+(the prologue exists, the steady-state loop references `tile(w + 1, u)`, the wave-0 fix is present,
+every pre-existing substring still survives), one pins the forced depth==1 fallback staying exactly
+serial (no prologue, no `w + 1` anywhere).
+
+**`Deployment` gains `stage_lines`** — a `tuple[tuple[str, tuple[int, ...]], ...]` (matching
+`PipelineTrace.work_by_op`'s own reason for avoiding a plain `dict` on a frozen dataclass) mapping
+each animated stage (`load_b`, `load_a`, `exec`, `store` — the same vocabulary
+`plot_pipeline._ANIMATION_STAGE` already uses) to the line number(s) in `Deployment.code` where
+that stage's statement appears. Built by constructing the *entire* listing — header, `#define`s,
+body, footer — as one flat list of `(line_text, stage_tag | None)` pairs and enumerating it once,
+rather than computing an offset from separate lists' lengths, which breaks the moment a header
+branch grows or shrinks by a line. `imc_write` and buffer-hold ("the tile sits resident") are
+deliberately left untagged: neither has a `Stage`/`Span` that ever marks it "live" — `imc_write`
+has no cost/timing model at all (D40), and residency is implicit in a C variable's lifetime, not an
+explicit statement — so pointing a line at either would be decoration, not data.
+
+**`plot_pipeline.py --animate` shows the listing live, debugger-style.** `write_animation_html` now
+calls `deployment_of()` the same way the timeline page's `_deployments()` always has, and passes the
+split lines plus `stage_lines` into `dataflow_html.render()`. A new scrollable code pane sits beside
+the station diagram; every animation frame reads the same `activeAt(t)` events the moving blocks
+already use, unions the line numbers for whichever stages are currently live, and highlights exactly
+those lines — lane-coloured (DRAM blue for loads/stores, core orange for the arithmetic line) so a
+highlighted `load_B` line and the block sliding toward SRAM read as the same event. When double
+buffering means a `load_B` line for wave *w+1* and the `mac`/`feed` line for wave *w* are both live
+at once, **both light up together** — verified by sampling the generated trace directly (not just
+by eye): at a real moment in an 8192³ INT8 Metis trace, `load_b` and `exec` are simultaneously
+active and the union correctly resolves to both the prologue/steady-state load line and the exec
+line. Auto-scroll only fires when the *set* of hot lines changes frame to frame, not every frame, so
+it doesn't fight a reader who scrolled up to read the header.
+
+Out of scope, deliberately: highlighting `imc_write` (no event models its timing — a physics
+extension, not a rendering one, and a separate decision if ever wanted); highlighting buffer
+occupancy (no statement to point at); bringing the same hover-to-highlight treatment to the
+timeline page's own static `<pre class="deploy">` block (a cheap, obvious follow-on, not what was
+asked, not built now).

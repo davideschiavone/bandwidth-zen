@@ -156,6 +156,112 @@ def test_the_pseudo_c_has_no_nested_comments(chip_id: str) -> None:
     assert depth == 0, f"{chip_id}: unterminated comment"
 
 
+def test_double_buffered_listing_prefetches_wave_w_plus_1_beside_waves_compute() -> None:
+    """D41: ``#define DEPTH 2 /* double buffered */`` used to sit above a loop
+    that read as fully serial. The real schedule (``_pipelined_tiles``) lets
+    wave i's load start once the buffer two waves back has been freed, with no
+    dependency on wave i-1's compute at all — genuine overlap — so the listing
+    should show a wave-0 prologue and a steady-state loop that prefetches wave
+    w+1 alongside wave w's own arithmetic, not one big serial block.
+
+    This also pins a real bug the restructuring fixes: under write-ahead, no
+    statement used to write wave 0's own tile into a weight set at all (the
+    per-wave line only ever wrote tile(w+1, u), so at w=0 that's tile 1) even
+    though the prologue *comment* already claimed it landed somewhere.
+    """
+    _c, _m, _g, trace, metis = _run("metis_aipu", 8192, 8192, 8192)
+    assert trace.double_buffered
+
+    assert "for (int u = 0; u < UNITS; ++u) {" in metis.code
+    assert "load_B(u, tile(0, u));" in metis.code, "prologue primes wave 0 before the loop"
+    assert "imc_write(u, 0, tile(0, u));" in metis.code, "the wave-0-never-written fix"
+    assert "load_B(u, tile(w + 1, u));" in metis.code, "steady state prefetches wave w+1"
+    assert "if (w + 1 < WAVES) {" in metis.code
+    assert "imc_write(u, (w + 1) % WEIGHT_SETS, tile(w + 1, u));" in metis.code
+
+    # Every stage still points at real, correct lines: not just present text,
+    # but the exact statement a debug view would highlight.
+    lines = metis.code.split("\n")
+    by_stage = dict(metis.stage_lines)
+    assert len(by_stage["load_b"]) == 2, "one prologue occurrence, one steady-state occurrence"
+    assert all("load_B(u, tile(" in lines[i] for i in by_stage["load_b"])
+    assert all("mac(" in lines[i] or "feed(" in lines[i] for i in by_stage["exec"])
+    assert all("store_C(" in lines[i] for i in by_stage["store"])
+
+    # Every substring the pre-existing test suite already pins still survives —
+    # the restructuring must not be a stealth rewrite of tested behaviour.
+    for assertion in (
+        "#define NTILES_PER_KS 16",
+        "KSLICE",
+        "A crosses DRAM exactly once",
+        "staged once per k-slice",
+        "(w + 1) % WEIGHT_SETS",
+        "write-ahead",
+    ):
+        assert assertion in metis.code
+
+
+def test_non_double_buffered_listing_stays_serial() -> None:
+    """The depth==1 fallback: no shipped profile at any shape actually produces
+    ``double_buffered=False`` (SRAM capacity fits two tiles everywhere), so this
+    forces it directly — shrink every non-DRAM level below twice one tile's
+    bytes, which flips ``report.memory.double_buffered`` end to end (an
+    ``on_chip_capacity_bytes`` override alone would silently no-op: it is a
+    computed property, not a stored field). Uses a ``weight_sets == 1`` chip
+    (A100) deliberately: the weight-set write-ahead/persistent commentary is
+    gated only on ``weight_sets > 1``, independent of ``depth``, so testing on
+    an IMC chip would trip an unrelated, pre-existing gap this change is not
+    trying to close.
+
+    ``_pipelined_tiles`` genuinely serialises at depth==1 (a store is placed
+    before the next load's start is even computed), so the listing must show
+    no prologue and no reference to a next wave at all — the exact text this
+    module always printed, not the new double-buffered shape.
+    """
+    chip = idealised(load_chip("a100_80gb"))
+    shrunk_memory = [
+        level.model_copy(update={"capacity_bytes": 300}) if level.name != chip.dram.name else level
+        for level in chip.memory
+    ]
+    chip = chip.model_copy(update={"memory": shrunk_memory})
+    spec = MatmulSpec.model_validate(
+        {
+            "id": "t",
+            "name": "t",
+            "family": "matmul",
+            "m": 600,
+            "n": 600,
+            "k": 600,
+            "a_dtype": "int8",
+            "b_dtype": "int8",
+        }
+    )
+    deployment = DeploymentSpec.model_validate({"batch": 1, "input_tokens": 1, "output_tokens": 1})
+    report = analyze(spec, chip, deployment)
+    assert report.feasible, report.infeasibility
+    assert report.memory.double_buffered is False, "the shrink above must actually flip this"
+    graph = build_graph(spec, deployment, GraphPhase.STATIC)
+    machine = machine_model(chip, DType.INT8)
+    trace = build_trace(
+        graph,
+        report.phases[0],
+        machine,
+        double_buffered=report.memory.double_buffered,
+        max_steps=32,
+    )
+    listing = deployment_of(
+        chip, machine, report.phases[0], trace, workload="t", operation=graph.ops[0]
+    )
+    check(listing, trace)
+
+    assert "w + 1" not in listing.code, "depth==1: nothing prefetches a wave ahead"
+    assert "prologue" not in listing.code
+    lines = listing.code.split("\n")
+    by_stage = dict(listing.stage_lines)
+    assert len(by_stage["load_b"]) == 1, "one load_B statement, referencing wave w"
+    assert "tile(w, u)" in lines[by_stage["load_b"][0]]
+
+
 def test_a_network_gets_a_sequence_listing_rather_than_a_tile_nest() -> None:
     """A graph of operations has no tile nest; the model runs it as a sequence
     with no cross-operation overlap (D5a), and the listing says exactly that."""

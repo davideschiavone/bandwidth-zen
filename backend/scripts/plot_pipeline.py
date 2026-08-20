@@ -698,6 +698,18 @@ def write_animation_html(panel: Panel, command: str, out: Path) -> None:
     work = panel.work
     dataflow = work.dataflow
     assert dataflow is not None, "--animate only ever draws the default matmul workload"
+    assert work.phase is not None, "--animate only ever draws the default matmul workload"
+    listing = deployment_of(
+        panel.chip,
+        machine_model(panel.chip, panel.dtype),
+        work.phase,
+        work.trace,
+        workload=f"{work.name} at {panel.dtype.value}",
+        operation=work.operation,
+        a_strategy=dataflow.a_strategy,
+        b_dataflow=dataflow.b_dataflow,
+    )
+    check_deployment(listing, work.trace)
     page = render_animation(
         title=_title([panel]),
         subtitle=_subtitle([panel]),
@@ -714,6 +726,8 @@ def write_animation_html(panel: Panel, command: str, out: Path) -> None:
         a_strategy=dataflow.a_strategy.value,
         b_dataflow=dataflow.b_dataflow.value,
         notes=list(dataflow.notes),
+        code_lines=listing.code.split("\n"),
+        stage_lines={tag: list(indices) for tag, indices in listing.stage_lines},
     )
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(page, encoding="utf-8")
