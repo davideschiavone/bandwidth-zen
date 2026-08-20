@@ -104,7 +104,7 @@ TEMPLATE = """<!doctype html>
 <h1>{title}</h1>
 <p class="sub">{subtitle}</p>
 <div class="banner">
-  <b>a-strategy</b> {a_strategy} &nbsp; · &nbsp; <b>b-dataflow</b> {b_dataflow}
+  {banner}
   {notes}
 </div>
 <p class="hint">Blocks are sized from each event's own bytes, log-compressed so the smallest and
@@ -408,8 +408,8 @@ def render(
     reported_latency_s: float,
     fill_drain_s: float,
     stations: dict[str, dict[str, str]],
-    a_strategy: str,
-    b_dataflow: str,
+    a_strategy: str | None,
+    b_dataflow: str | None,
     notes: list[str],
     code_lines: list[str],
     stage_lines: dict[str, list[int]],
@@ -421,6 +421,10 @@ def render(
     is deployed on the chip" section shows, here with each line addressable so
     the debug-session-style highlight (D41) can light up the ones live at the
     animation's current time.
+
+    ``a_strategy``/``b_dataflow`` are ``None`` for a workload with no single
+    A/B dataflow strategy to name — a network's operations run in sequence
+    (D5a), not as one matmul (D42) — and the banner says so instead.
     """
     data = json.dumps(
         {
@@ -431,6 +435,13 @@ def render(
             "stations": stations,
             "stage_lines": stage_lines,
         }
+    )
+    banner = (
+        f"<b>a-strategy</b> {_escape(a_strategy)} &nbsp; · &nbsp; <b>b-dataflow</b> "
+        f"{_escape(b_dataflow)}"
+        if a_strategy is not None and b_dataflow is not None
+        else "<b>workload</b> a network graph — operations run in sequence (D5a), "
+        "no single A/B dataflow strategy to name"
     )
     notes_html = (
         "<ul>" + "".join(f"<li>{_escape(n)}</li>" for n in notes) + "</ul>" if notes else ""
@@ -444,8 +455,7 @@ def render(
         subtitle=subtitle,
         footer=footer,
         data=data,
-        a_strategy=_escape(a_strategy),
-        b_dataflow=_escape(b_dataflow),
+        banner=banner,
         notes=notes_html,
         code=code_html,
     )

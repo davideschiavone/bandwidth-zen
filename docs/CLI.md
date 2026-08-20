@@ -485,9 +485,9 @@ uv run python scripts/plot_pipeline.py --chip h100_sxm --matmul 8192,8192,8192
 
 plus `--chip` (repeatable), `--compare`, `--weights`, `--ideal`, `--steps` (default 256 — the only
 resolution knob; the page zooms, so there is no separate static-figure register to keep legible),
-`--out`, and `--animate` — matmul only, opt-in, rejected alongside `--model`/`--encoder`/`--compare`;
+`--out`, and `--animate` — matmul or `--encoder`, opt-in, `--model`/`--compare` still rejected;
 writes a second self-contained page playing the same schedule back as DRAM -> SRAM -> Accelerator
-motion instead of a static strip (`docs/plots/README.md` "Playing the flow animation", D40).
+motion instead of a static strip (`docs/plots/README.md` "Playing the flow animation", D40, D42).
 
 ### 6.1 `--compare` — two chips, one workload, one page
 

@@ -26,7 +26,7 @@ matplotlib, so it runs without `--group plots`.
 | `timeline-<chip>-<dtype>.html` | `plot_pipeline.py` | Where the time went, per hardware resource, **zoomable**, with the roofline for that run below it |
 | `timeline-<chip>-<model>-<phase>-<dtype>.html` | `plot_pipeline.py --model` | A network instead of a matmul, one page per phase |
 | `timeline-compare-<a>-vs-<b>-….html` | `plot_pipeline.py --compare` | Two chips, one workload, **one shared absolute time axis**, plus both rooflines |
-| `animate-<chip>-<dtype>.html` | `plot_pipeline.py --animate` | A lone matmul's tile schedule, **played back** as DRAM -> SRAM -> Accelerator motion. Matmul only, opt-in — not part of `make plots` |
+| `animate-<chip>-<dtype>.html` | `plot_pipeline.py --animate` | A matmul's or the ad-hoc encoder's schedule, **played back** as DRAM -> SRAM -> Accelerator motion. `--model`/`--compare` not supported, opt-in — not part of `make plots` |
 
 **Figures are not the report.** These show where the time went; the numbers, their derivations and
 the assumptions drawer come from `bwz matmul` / `bwz run`, and the plot scripts print only
@@ -78,9 +78,9 @@ uv run python scripts/plot_pipeline.py --chip metis_aipu --matmul 2048,2048,2048
 xdg-open /tmp/anim/animate-metis_aipu-int8.html
 ```
 
-Matmul only, and opt-in — it never runs as part of `make plots`, and `--animate` is rejected
-alongside `--model`/`--encoder`/`--compare` (a whole network's per-operation trace has no single
-tile-shaped stream of events to animate this way).
+Matmul or `--encoder`, and opt-in — it never runs as part of `make plots`. `--model`/`--compare`
+are still rejected: a full model's per-operation trace can coalesce hundreds of operations, well
+past what a three-station diagram or a debug pane can usefully show (D42).
 
 **Not to scale, deliberately.** Block size is a log-compressed function of each event's own bytes,
 so the smallest and largest tiles in one trace both stay visible — reading a size off the page as a
@@ -111,6 +111,17 @@ one statement is truly concurrent: watch for the `load_B` line and the `mac`/`fe
 together while a block is mid-flight toward the Accelerator station and another is sliding in from
 DRAM at the same time. `imc_write` lines are never highlighted — no event in this model currently
 times that statement (D40), so lighting it up would be decoration, not data.
+
+**`--encoder`'s code pane is honest about a real limit, not a smaller version of the matmul one
+(D42).** A network's loop is generic — `for (i = 0; i < OPS; ++i) { load_B(op[i]); ...;
+store_C(op[i]); }` — never unrolled per named operation, so the pane can show "a load is happening"
+but not "q_proj's load is happening"; the blocks and the hover text *do* carry the real operation
+name (`Span.label`), the pseudo-C just doesn't. Cross-operation overlap is zero in this model (D5a:
+operations run in strict sequence) — the highlight only ever lights up two lines together within
+one operation's own load/compute, e.g. a norm's `load_A`/`exec` overlapping because that operation's
+own schedule was double buffered, never two different operations' lines at once. Both compute
+branches (matrix array vs. vector unit, D27) tag the same `exec` line, since which one runs for a
+given operation is exactly what this generic loop never names either.
 
 ## Reading the roofline
 

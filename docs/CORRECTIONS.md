@@ -1507,3 +1507,51 @@ extension, not a rendering one, and a separate decision if ever wanted); highlig
 occupancy (no statement to point at); bringing the same hover-to-highlight treatment to the
 timeline page's own static `<pre class="deploy">` block (a cheap, obvious follow-on, not what was
 asked, not built now).
+
+## D42 — `--animate` learns the encoder, and the debug pane's real limit for a network (2026-08-20)
+
+D40/D41 built `--animate` and its code-highlight against the tiled matmul path only. `bwz/kernels.py`
+names exactly two kernel probes — `matmul_kernel` and `encoder_layer_kernel` — and the original
+request for this feature was explicit that both should eventually animate ("the matmul (now) and the
+other kernels (later)"). Extending to `--encoder` meant going through a genuinely different code
+path first: a multi-operation graph builds its trace via `_operation_trace`/`_serial_steps`, not
+`_tile_trace`, and its pseudo-C via `_network_deployment`, not the tiled `deployment_of` body — both
+already existed, neither had ever been asked to feed an animation before.
+
+**What the research found, before any code changed.** Cross-operation overlap is exactly zero —
+`_operation_trace`'s own comment: "Operations do not pipeline against each other in this model...
+the trace reproduces the reported latency exactly" — operations run in strict sequence (D5a).
+*Within* one operation, load and compute genuinely can overlap when double buffered
+(`_serial_steps`'s `exec_start` formula), so the debug highlight still sometimes shows two lines lit
+together — just never two different named operations at once. Every `Span` a network trace produces
+already carries the real operation's name (`Span.label = OpResult.op_id`, e.g. `"q_proj"`,
+`"ffn_up"`) — the animation's blocks and hover text were already correct per-operation with zero
+changes needed. What is *not* per-operation is `_network_deployment`'s listing text: one generic
+`for (i = 0; i < OPS; ++i) { load_B(op[i]); ...; store_C(op[i]); }` loop, never unrolled per named
+op, so the pane can say "a load is happening" but never "*q_proj's* load is happening" — a real,
+structural limit of a generic loop nest, not a bug to chase here. EXEC can also land on
+`Lane.VECTOR` as well as `Lane.CORE` (D27's matrix/vector split) — genuinely new territory, since a
+lone matmul only ever produces `Lane.CORE` EXEC spans.
+
+**Fix, scoped to match what was actually found.** `_network_deployment` gained the same
+`stage_lines` tagging the tiled path got in D41 (`load_B`→`load_b`, `load_A`→`load_a`, `store_C`→
+`store`) — mechanical, since the loop body was already a fixed shape, just never tracked line
+numbers. Both compute branches (`if (is_matrix(op[i])) ... else ...`) tag the same plain `"exec"`,
+deliberately, rather than adding a `exec_core`/`exec_vector` split: which branch runs for a given
+`op[i]` is exactly what this generic text never names either, so lighting both whenever *either*
+engine is active is an honest answer, not an imprecise one — the annotation panel and hover tooltip
+already disambiguate engine and operation. `plot_pipeline.py`'s `--animate` gate now only rejects
+`--model` (hundreds of operations, well past what a three-station diagram or a debug pane usefully
+shows) and `--compare`; `write_animation_html` no longer asserts a matmul-only `dataflow` plan —
+when there isn't one (every `--encoder` workload), `deployment_of` is called without
+`a_strategy`/`b_dataflow` (the same conditional-kwarg pattern the timeline page's `_deployments()`
+already used), and the animation banner names the workload as "a network graph — operations run in
+sequence (D5a)" instead of quoting a strategy that does not apply.
+
+No JS changed at all — `updateCodeHighlight`/`draw` were already stage-generic, and a `Lane.VECTOR`
+EXEC event still just carries `stage: "exec"`. Verified against a real encoder-layer trace: EXEC
+spans land on both `core` and `vector` lanes as predicted, and a real playback moment shows `exec`
+(vector) and `store` concurrently active — the within-operation-overlap claim above, confirmed, not
+assumed. One new golden test (`test_network_listing_tags_stage_lines_for_the_debug_view`,
+`tests/unit/test_deploy.py`) pins the tagging on the encoder-layer kernel fixture; the pre-existing
+`test_a_network_gets_a_sequence_listing_rather_than_a_tile_nest` passes unmodified.

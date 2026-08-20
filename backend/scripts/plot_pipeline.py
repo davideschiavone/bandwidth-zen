@@ -688,17 +688,19 @@ def _flow_spans(trace: PipelineTrace) -> list[dict[str, object]]:
 
 
 def write_animation_html(panel: Panel, command: str, out: Path) -> None:
-    """One chip's tile schedule as a self-contained DRAM -> SRAM -> Accelerator
-    flow animation (docs/CLI.md §3, docs/CORRECTIONS.md D40).
+    """One chip's schedule as a self-contained DRAM -> SRAM -> Accelerator flow
+    animation (docs/CLI.md §3, docs/CORRECTIONS.md D40/D42).
 
-    Matmul only: three fixed stations assume one tile-shaped stream of events,
-    which is what a lone matmul's trace is and a whole network's per-operation
-    trace is not — the caller only ever reaches this with a matmul workload.
+    Matmul or the ad-hoc encoder — the caller never reaches this with a
+    `--model` workload (`_reject_flags_for_the_wrong_workload` refuses that
+    combination). A lone matmul carries a real ``dataflow`` plan (D33/D36); the
+    encoder's per-operation trace has none — it is a sequence of named
+    operations, not one A/B dataflow strategy to name (D5a) — so every
+    dataflow-specific argument below is threaded through only when there is one.
     """
     work = panel.work
     dataflow = work.dataflow
-    assert dataflow is not None, "--animate only ever draws the default matmul workload"
-    assert work.phase is not None, "--animate only ever draws the default matmul workload"
+    assert work.phase is not None, "every --animate workload carries its phase"
     listing = deployment_of(
         panel.chip,
         machine_model(panel.chip, panel.dtype),
@@ -706,8 +708,11 @@ def write_animation_html(panel: Panel, command: str, out: Path) -> None:
         work.trace,
         workload=f"{work.name} at {panel.dtype.value}",
         operation=work.operation,
-        a_strategy=dataflow.a_strategy,
-        b_dataflow=dataflow.b_dataflow,
+        **(
+            {"a_strategy": dataflow.a_strategy, "b_dataflow": dataflow.b_dataflow}
+            if dataflow is not None
+            else {}
+        ),
     )
     check_deployment(listing, work.trace)
     page = render_animation(
@@ -723,9 +728,9 @@ def write_animation_html(panel: Panel, command: str, out: Path) -> None:
         reported_latency_s=work.trace.reported_latency_s,
         fill_drain_s=work.trace.fill_drain_s,
         stations=_stations_for(panel.chip, panel.dtype),
-        a_strategy=dataflow.a_strategy.value,
-        b_dataflow=dataflow.b_dataflow.value,
-        notes=list(dataflow.notes),
+        a_strategy=dataflow.a_strategy.value if dataflow is not None else None,
+        b_dataflow=dataflow.b_dataflow.value if dataflow is not None else None,
+        notes=list(dataflow.notes) if dataflow is not None else [],
         code_lines=listing.code.split("\n"),
         stage_lines={tag: list(indices) for tag, indices in listing.stage_lines},
     )
@@ -1245,10 +1250,10 @@ def _reject_flags_for_the_wrong_workload(
         args.b_dataflow = args.b_dataflow or BDataflow.WRITE_AHEAD.value
         args.iterations = 1 if args.iterations is None else args.iterations
 
-    if args.animate and (args.model or args.encoder):
+    if args.animate and args.model:
         parser.error(
-            "--animate only draws the default matmul workload; drop --model/--encoder "
-            "or drop --animate (docs/CLI.md §3)"
+            "--animate does not support --model yet (only the default matmul and --encoder "
+            "workloads); drop --model or drop --animate (docs/CLI.md §3)"
         )
     if args.animate and args.compare:
         parser.error("--animate draws one chip's schedule; drop --compare or drop --animate")

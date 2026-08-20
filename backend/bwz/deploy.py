@@ -495,46 +495,76 @@ def _network_deployment(
     """
     unit = machine.unit
     steps = max(trace.steps, 1)
-    header = f"""/* {chip.name} — how this model deploys the run
- * {workload}
- *
- * A network is a SEQUENCE here: no overlap is modelled between one operation's
- * prefetch and the previous operation's arithmetic (D5a). Within an operation,
- * load and compute overlap when capacity granted a second buffer.
- *
- * {trace.tiles} operations, drawn as {steps} step{"s" if steps != 1 else ""}.
- */
+    header_lines = [
+        f"/* {chip.name} — how this model deploys the run",
+        f" * {workload}",
+        " *",
+        " * A network is a SEQUENCE here: no overlap is modelled between one operation's",
+        " * prefetch and the previous operation's arithmetic (D5a). Within an operation,",
+        " * load and compute overlap when capacity granted a second buffer.",
+        " *",
+        f" * {trace.tiles} operations, drawn as {steps} step{'s' if steps != 1 else ''}.",
+        " */",
+    ]
+    defines = [
+        f"#define OPS   {trace.tiles:<10} /* graph nodes in this phase */",
+        f"#define UNITS {unit.count:<10} /* {unit.name} */",
+    ]
+    # A generic, un-unrolled loop: real operation names (Span.label, e.g.
+    # "q_proj") live in the trace and the animation's blocks/hover text, not
+    # here — one static "load_B(op[i])" line stands for every operation's load,
+    # so tagging it "load_b" highlights it whenever *any* op is loading, not a
+    # specific one. Both compute branches tag "exec" for the same reason: which
+    # one runs depends on op[i], which this text never names (D42).
+    body: list[tuple[str, str | None]] = [
+        ("for (int i = 0; i < OPS; ++i) {", None),
+        ("    dispatch(op[i]);                  /* hatched bar, if the op costs one */", None),
+        ("", None),
+        ("    load_B(op[i]);                    /* weights   — solid bar   */", "load_b"),
+        ("    load_A(op[i]);                    /* activations — hatched bar */", "load_a"),
+        ("", None),
+        ("    if (is_matrix(op[i]))", None),
+        ("        parallel_for (int u = 0; u < UNITS; ++u)", None),
+        (f"            {unit.name}(u, op[i]);", "exec"),
+        ("    else", None),
+        (f"        {machine.vector_unit.name}(op[i]);   /* norms, activations (D27) */", "exec"),
+        ("", None),
+        (
+            "    store_C(op[i]);                   /* whatever no later op reads — hollow bar */",
+            "store",
+        ),
+        ("}", None),
+    ]
+    footer_line = (
+        f"/* span {format_time(trace.total_s)}; DRAM {format_bytes(trace.totals[Lane.DRAM])}, "
+        f"arithmetic {_int(trace.totals[Lane.CORE] + trace.totals[Lane.VECTOR])} OP */"
+    )
 
-#define OPS   {trace.tiles:<10} /* graph nodes in this phase */
-#define UNITS {unit.count:<10} /* {unit.name} */
+    combined: list[tuple[str, str | None]] = [(h, None) for h in header_lines]
+    combined.append(("", None))
+    combined.extend((d, None) for d in defines)
+    combined.append(("", None))
+    combined.extend(body)
+    combined.append(("", None))
+    combined.append((footer_line, None))
 
-for (int i = 0; i < OPS; ++i) {{
-    dispatch(op[i]);                  /* hatched bar, if the op costs one */
+    code = "\n".join(text for text, _tag in combined)
+    stage_line_map: dict[str, list[int]] = {}
+    for index, (_text, tag) in enumerate(combined):
+        if tag is not None:
+            stage_line_map.setdefault(tag, []).append(index)
 
-    load_B(op[i]);                    /* weights   — solid bar   */
-    load_A(op[i]);                    /* activations — hatched bar */
-
-    if (is_matrix(op[i]))
-        parallel_for (int u = 0; u < UNITS; ++u)
-            {unit.name}(u, op[i]);
-    else
-        {machine.vector_unit.name}(op[i]);   /* norms, activations (D27) */
-
-    store_C(op[i]);                   /* whatever no later op reads — hollow bar */
-}}
-
-/* span {format_time(trace.total_s)}; DRAM {format_bytes(trace.totals[Lane.DRAM])},"""
-    footer = f" arithmetic {_int(trace.totals[Lane.CORE] + trace.totals[Lane.VECTOR])} OP */"
     return Deployment(
         chip_id=chip.id,
         title=f"{chip.name} — {unit.name}",
-        code=header + footer,
+        code=code,
         tiles=trace.tiles,
         waves=trace.tiles,
         units=max(unit.count, 1),
         resident_tiles=unit.resident_tile_capacity(),
         reloads=0,
         kind="operations",
+        stage_lines=tuple((tag, tuple(indices)) for tag, indices in stage_line_map.items()),
     )
 
 

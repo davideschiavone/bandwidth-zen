@@ -292,3 +292,48 @@ def test_a_network_gets_a_sequence_listing_rather_than_a_tile_nest() -> None:
     assert "#define OPS" in listing.code
     assert "SEQUENCE" in listing.code
     assert "TILES" not in listing.code
+
+
+def test_network_listing_tags_stage_lines_for_the_debug_view() -> None:
+    """D42: `--animate`'s code pane needs to know which line is which stage for
+    a network graph too, not just a lone matmul (D41). The loop is generic —
+    `for (i = 0; i < OPS; ++i) { load_B(op[i]); ...; store_C(op[i]); }` — never
+    unrolled per named operation (real names like "q_proj" live in the trace's
+    spans, not this text), so a tag can only ever mean "a load/store/compute is
+    happening right now", not "*this* operation's".
+
+    Both compute branches (`if (is_matrix(op[i])) ... else ...`, D27's
+    matrix/vector split) tag the same `"exec"` stage — deliberately coarse,
+    since which branch runs for a given `op[i]` is exactly what this generic
+    loop never names either.
+    """
+    from bwz.kernels import encoder_layer_kernel
+
+    spec = encoder_layer_kernel(hidden=8, heads=2, ffn=16, vocab=16, tokens=4)
+    chip = idealised(load_chip("a100_80gb"))
+    deployment = DeploymentSpec.model_validate(
+        {"batch": 1, "input_tokens": 4, "output_tokens": 0, "phase": "prefill"}
+    )
+    report = analyze(spec, chip, deployment)
+    assert report.feasible, report.infeasibility
+    phase = report.phases[0]
+    machine = machine_model(chip, DType.FP16)
+    trace = build_trace(
+        build_graph(spec, deployment, phase.phase),
+        phase,
+        machine,
+        double_buffered=report.memory.double_buffered,
+    )
+    listing = deployment_of(chip, machine, phase, trace, workload="encoder")
+    check(listing, trace)
+
+    assert listing.kind == "operations"
+    lines = listing.code.split("\n")
+    by_stage = dict(listing.stage_lines)
+    assert set(by_stage) == {"load_b", "load_a", "exec", "store"}
+    assert len(by_stage["load_b"]) == len(by_stage["load_a"]) == len(by_stage["store"]) == 1
+    assert "load_B(op[i]);" in lines[by_stage["load_b"][0]]
+    assert "load_A(op[i]);" in lines[by_stage["load_a"][0]]
+    assert "store_C(op[i]);" in lines[by_stage["store"][0]]
+    assert len(by_stage["exec"]) == 2, "both the matrix and vector compute branches tag exec"
+    assert all("op[i]);" in lines[i] for i in by_stage["exec"])
