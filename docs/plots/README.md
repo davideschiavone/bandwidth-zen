@@ -8,7 +8,7 @@ change with it — that is the point of generating them rather than illustrating
 make plots        # regenerates everything below
 ```
 
-Individual invocations and every script flag are in [`../CLI.md`](../CLI.md) §5.
+Individual invocations and every script flag are in [`../CLI.md`](../CLI.md) §6.
 
 Nothing in `bwz/` imports a plotting library (CLAUDE.md #3). The scripts live in
 `backend/scripts/` and import the engine; the dependency never points the other way. `plot_roofline.py`
@@ -26,10 +26,11 @@ matplotlib, so it runs without `--group plots`.
 | `timeline-<chip>-<dtype>.html` | `plot_pipeline.py` | Where the time went, per hardware resource, **zoomable**, with the roofline for that run below it |
 | `timeline-<chip>-<model>-<phase>-<dtype>.html` | `plot_pipeline.py --model` | A network instead of a matmul, one page per phase |
 | `timeline-compare-<a>-vs-<b>-….html` | `plot_pipeline.py --compare` | Two chips, one workload, **one shared absolute time axis**, plus both rooflines |
+| `animate-<chip>-<dtype>.html` | `plot_pipeline.py --animate` | A lone matmul's tile schedule, **played back** as DRAM -> SRAM -> Accelerator motion. Matmul only, opt-in — not part of `make plots` |
 
 **Figures are not the report.** These show where the time went; the numbers, their derivations and
 the assumptions drawer come from `bwz matmul` / `bwz run`, and the plot scripts print only
-`wrote …`. See [`../CLI.md`](../CLI.md) §2 and §3.
+`wrote …`. See [`../CLI.md`](../CLI.md) §2 and §4.
 
 ## The zoomable timeline
 
@@ -64,6 +65,42 @@ a **new tab in an existing window** rather than a new window.
 rather than needing a second, coarser register kept legible at a fixed scale (D37).
 
 Zoom is x-only: the y axis is a list of resources, not a scale.
+
+## Playing the flow animation
+
+`--animate` writes a second, self-contained page — same one-file, no-CDN constraint — that plays
+the same tile schedule the timeline draws, as motion between three fixed stations (DRAM, SRAM,
+Accelerator, D5a's machine model) instead of a static strip of bars:
+
+```bash
+uv run python scripts/plot_pipeline.py --chip metis_aipu --matmul 2048,2048,2048 \
+    --weights int8 --b-dataflow on-demand --animate --out /tmp/anim
+xdg-open /tmp/anim/animate-metis_aipu-int8.html
+```
+
+Matmul only, and opt-in — it never runs as part of `make plots`, and `--animate` is rejected
+alongside `--model`/`--encoder`/`--compare` (a whole network's per-operation trace has no single
+tile-shaped stream of events to animate this way).
+
+**Not to scale, deliberately.** Block size is a log-compressed function of each event's own bytes,
+so the smallest and largest tiles in one trace both stay visible — reading a size off the page as a
+literal byte count would be wrong by design. The **timing is not**: play/pause/scrub drive a virtual
+clock through the trace's real `start_s`/`end_s` values, and the live panel underneath states the
+current time, the reported latency, and any pipeline fill/drain this trace's schedule shows (D19) —
+never the other way around.
+
+- solid blocks are operand B, hatched blocks are operand A streaming (`--a-strategy stream`, D31),
+  hollow blocks are the result written back
+- the Accelerator station **glows** while executing; nothing visibly "enters" it, because the
+  byte/flop model has no event distinct from the arithmetic itself for that moment
+- `--a-strategy` changes what you see directly — `stream` trickles many small hatched blocks,
+  `stage`/`whole` concentrate them at k-slice boundaries — because A's schedule already differs by
+  strategy (D33/D31)
+- `--b-dataflow on-demand` now shows a real gap between a load starting to move and the previous
+  wave's glow ending; `persistent` plays identically to `write-ahead`, and the page says so, because
+  that is what the schedule actually does in one pass (D40) — a future extension animating
+  `--iterations` repeats back to back is the only way `persistent`'s real advantage (its 2nd+ pass B
+  load genuinely vanishing) would show up in motion
 
 ## Reading the roofline
 

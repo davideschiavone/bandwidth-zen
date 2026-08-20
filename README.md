@@ -185,7 +185,7 @@ what each one is *for*.
 |---|---|
 | `bwz list` | the bundled chip and model profiles, with peaks, shapes and provenance |
 | `bwz matmul` | one `A[M,K] × B[K,N] → C[M,N]` — the smallest probe of a machine |
-| `bwz single-layer-encoder` | one encoder layer, sized from the command line |
+| `bwz encoder-layer` | one encoder layer, sized from the command line |
 | `bwz run` | a model profile on a chip |
 | `bwz compare` | chips head to head, with the prefill crossover |
 | `bwz version` | print the installed `bwz` version |
@@ -238,15 +238,15 @@ Both `whole` and `persistent` **clamp rather than error** when they don't fit �
 scratchpad to hold all of A, `persistent` needs the array to hold all of B — falling back to
 `stage`/`write-ahead` and naming the fallback in the assumptions drawer, never silently.
 
-### `bwz single-layer-encoder` — the shape is the dimensions
+### `bwz encoder-layer` — the shape is the dimensions
 
 The transformer counterpart: arguments rather than a profile, so one term can be changed and its
 effect read off.
 
 ```bash
-uv run bwz single-layer-encoder --chip a100_80gb --ideal             # 664 params, 5280 ops
-uv run bwz single-layer-encoder --chip a100_80gb --ideal --ffn 32    # 920 params, 7392 ops
-uv run bwz single-layer-encoder --chip a100_80gb --ideal -S 16       # 664 params, 29184 ops
+uv run bwz encoder-layer --chip a100_80gb --ideal             # 664 params, 5280 ops
+uv run bwz encoder-layer --chip a100_80gb --ideal --ffn 32    # 920 params, 7392 ops
+uv run bwz encoder-layer --chip a100_80gb --ideal -S 16       # 664 params, 29184 ops
 ```
 
 `--hidden -d` · `--heads` · `--head-dim` · `--ffn` · `--vocab` · `-S/--tokens` · `-b/--batch` ·
@@ -260,7 +260,7 @@ encoder has no later step to reuse a cache for.
 
 ```bash
 uv run bwz run --model llama3_8b --chip a100_80gb --input-tokens 2048 --output-tokens 128
-uv run bwz run --model single_layer_encoder --chip a100_80gb --input-tokens 4 --show-ops 20 --ideal
+uv run bwz run --model single_layer_encoder_toy --chip a100_80gb --input-tokens 4 --show-ops 20 --ideal
 ```
 
 `-m/--model` · `-c/--chip` · `-b/--batch` · `--input-tokens` · `--output-tokens` · `--context` ·
@@ -338,7 +338,7 @@ It draws one of three things, and the flags mirror the report commands above:
 # a profile — one page per phase
 … plot_pipeline.py --chip a100_80gb --model llama3_8b -S 512 --out ..
 
-# an ad-hoc single-layer encoder, sized like the command of the same name
+# an ad-hoc single-layer encoder, sized like `bwz encoder-layer`
 … plot_pipeline.py --chip a100_80gb --encoder --hidden 4096 --heads 64 --ffn 16384 -S 4096 \
     --ideal --out ..
 ```
@@ -444,7 +444,7 @@ operation by operation** — operand shapes, the algebra, the flop count as an e
 (`2·M·N·K = 2·4·8·8 = 512`) and a pseudo-C loop nest with the real extents, so the model can be
 back-tested against code rather than trusted.
 
-**The figures are not the report.** `bwz matmul`, `bwz run` and `bwz single-layer-encoder` print the
+**The figures are not the report.** `bwz matmul`, `bwz run` and `bwz encoder-layer` print the
 numbers, their derivations and the assumptions drawer; the plot scripts write files and print only
 `wrote …`. [`docs/plots/README.md`](docs/plots/README.md) covers how to read each figure and
 [`docs/CLI.md`](docs/CLI.md) every flag with its real output.
@@ -507,21 +507,21 @@ of its fields you can trust is written on the profile itself.
 **Models:** GPT-3, BERT-base, Llama-3-8B, Llama-2-70B, Mistral-7B, Mixtral-8x7B, Gemma-4,
 MobileNetV3, ViT-B/16, Stable Diffusion U-Net.
 
-Plus **`single_layer_encoder`** — a one-layer encoder sized so every number can be checked with a
+Plus **`single_layer_encoder_toy`** — a one-layer encoder sized so every number can be checked with a
 calculator: 664 parameters, 5280 operations over 4 tokens, with the derivation in the profile's own
 header.
 
 ```bash
-uv run bwz run --model single_layer_encoder --chip a100_80gb --input-tokens 4 --show-ops 20 --ideal
+uv run bwz run --model single_layer_encoder_toy --chip a100_80gb --input-tokens 4 --show-ops 20 --ideal
 ```
 
 Or size one from the command line, the way `bwz matmul` takes M/N/K — the shape is arguments, so a
 dimension can be changed and its effect read straight off:
 
 ```bash
-uv run bwz single-layer-encoder --chip a100_80gb --ideal          # 664 params, 5280 ops
-uv run bwz single-layer-encoder --chip a100_80gb --ideal --ffn 32 # 920 params, 7392 ops
-uv run bwz single-layer-encoder --chip a100_80gb --ideal -S 16    # 664 params, 29184 ops
+uv run bwz encoder-layer --chip a100_80gb --ideal          # 664 params, 5280 ops
+uv run bwz encoder-layer --chip a100_80gb --ideal --ffn 32 # 920 params, 7392 ops
+uv run bwz encoder-layer --chip a100_80gb --ideal -S 16    # 664 params, 29184 ops
 ```
 
 Flags: `--hidden --heads --head-dim --ffn --vocab --tokens --batch --ffn-type --norm --tie/--untie

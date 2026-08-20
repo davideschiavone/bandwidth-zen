@@ -98,13 +98,14 @@ Nothing in `analysis/` may import from `api/`. Nothing in `graph/` may import fr
 | A new operator cost model | `operators/<family>.py`, registered via `@register_op` | `docs/MODEL.md`, unit test |
 | A new chip | `profiles/chips/<id>.yaml` with `source_url` | `tests/unit/test_profiles.py` |
 | A new model | `profiles/models/<id>.yaml` with `source_url` | golden param-count test |
+| An ad-hoc kernel-probe factory (`matmul_kernel`, `encoder_layer_kernel`) | `bwz/kernels.py` | `cli.py`, `scripts/plot_pipeline.py`, `docs/CLI.md` |
 | A new empirical constant | `calibration.py` only | `docs/CALIBRATION.md` |
 | A new report field | `report.py` | `docs/report.schema.json`, TS types, snapshot tests |
 | A new parallelism strategy | `analysis/parallelism.py` + `collectives.py` | `docs/MODEL.md` |
 | A new model family | `spec/model_spec.py` + `graph/<family>.py`, dispatched in `graph/builder.py` | `docs/SCHEMA.md`, `docs/MODEL.md`, golden test |
 | A new dtype | `spec/dtypes.py` only — widths are definitions, not calibration | `docs/SCHEMA.md` dtype lists |
 | A figure | `backend/scripts/plot_*.py`, never inside `bwz/` | `docs/plots/README.md`, `make plots` |
-| An interactive view | `backend/scripts/timeline_html.py` — one self-contained file, no CDN, no server, no third-party viewer | `docs/plots/README.md` |
+| An interactive view | `backend/scripts/timeline_html.py` / `dataflow_html.py` — one self-contained file each, no CDN, no server, no third-party viewer | `docs/plots/README.md` |
 | A CLI command or flag | `cli.py` | `docs/CLI.md` — with real output, not a description |
 | A new UI panel | `frontend/src/components/` | `Dashboard.tsx`, vitest |
 

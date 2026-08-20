@@ -29,7 +29,7 @@ def test_a_matmul_reads_as_its_formula() -> None:
     deployment = DeploymentSpec.model_validate(
         {"batch": 1, "input_tokens": 4, "output_tokens": 0, "phase": "prefill"}
     )
-    graph = build_graph(load_model("single_layer_encoder"), deployment, GraphPhase.PREFILL)
+    graph = build_graph(load_model("single_layer_encoder_toy"), deployment, GraphPhase.PREFILL)
     q_proj = next(e for e in explain_graph(graph) if e.op_id == "layer0.q_proj")
 
     assert q_proj.shapes == "A[4,8] x B[8,8] -> C[4,8]"

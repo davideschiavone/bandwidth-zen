@@ -55,7 +55,7 @@ from bwz.analysis.roofline import MATRIX_OP_TYPES, MachineModel
 from bwz.analysis.tiling import padded
 from bwz.graph.ops import ComputeGraph, GraphPhase, MatmulAttrs, Operation
 from bwz.report import OpResult, PhaseResult
-from bwz.spec.deployment import AStrategy
+from bwz.spec.deployment import AStrategy, BDataflow
 
 if TYPE_CHECKING:
     # analysis.dataflow imports tile_count/ntiles_per_kslice from this module,
@@ -474,6 +474,7 @@ def _tile_trace(
         activation_labels=activation_labels,
         a_fetch_mode=a_strategy.value,
         depth_override=(dataflow.a_prefetch_depth if dataflow is not None else None),
+        b_on_demand=(dataflow is not None and dataflow.b_dataflow is BDataflow.ON_DEMAND),
     )
     if a_strategy is AStrategy.WHOLE and ramp_s > 0:
         # Every k-slice staged before wave 0: one span for the whole ramp, and
@@ -627,6 +628,7 @@ def _pipelined_tiles(
     activation_labels: list[str] | None = None,
     a_fetch_mode: str = "stream",
     depth_override: int | None = None,
+    b_on_demand: bool = False,
 ) -> list[Span]:
     """Software-pipeline the tiles of ONE operation, per the constraints above.
 
@@ -644,6 +646,17 @@ def _pipelined_tiles(
     capacity would derive (``2`` double buffered, ``1`` otherwise). Schedule-only
     — the loop below is depth-agnostic beyond ``i >= depth``, so any depth >= 1
     is valid, not just the two capacity ever produces.
+
+    ``b_on_demand`` is ``--b-dataflow on-demand`` (D33/D40): B's load ordinarily
+    prefetches as early as the buffer and the DRAM port allow (write-ahead,
+    D33's default — hidden behind an earlier wave's compute). Setting this
+    forces tile i's load to wait for tile i-1's compute to finish first,
+    exposing the same, already-costed load duration on the critical path
+    instead of hiding it. Schedule-only, like ``depth_override``: it never
+    changes a byte count or the reported latency, only how much of the trace's
+    span is fill/drain (D19). ``persistent`` gets no parameter here — D40 shows
+    write-ahead's overlap is already this model's best case, so persistent's
+    trace is write-ahead's, unmodified.
     """
     steps = len(loads)
     a_loads = activation_loads if activation_loads is not None else [0.0] * steps
@@ -684,7 +697,12 @@ def _pipelined_tiles(
         # A buffer is free once its tile has been *written out*, not merely
         # computed — the hold below runs to the store, so the reuse test must too.
         freed = store_ends[i - depth] if i >= depth else dispatch_s
-        load_start = max(dram_free, freed)
+        # on-demand (D40): B's load may not start until the *previous* tile's
+        # compute has actually finished — no prefetch-ahead. write-ahead (the
+        # default) omits this term, so `load_start` stays gated only on the
+        # port and the buffer, exactly as it always has.
+        on_demand_floor = exec_end if b_on_demand else 0.0
+        load_start = max(dram_free, freed, on_demand_floor)
         load_end = load_start + loads[i] + a_loads[i]
         dram_free = load_end
         load_starts.append(load_start)

@@ -153,6 +153,19 @@ def plan_dataflow(
         )
         b_dataflow = BDataflow.WRITE_AHEAD
 
+    # write-ahead/on-demand/persistent are placements of a weight-bank write
+    # (D33) that only exists when the array holds resident weight tiles at
+    # all (D30) — a chip with weight_sets=1 reads both operands per
+    # instruction, so there is nothing to place ahead of, expose on demand,
+    # or keep resident. Every shipped GPU profile is weight_sets=1.
+    if b_dataflow is not BDataflow.WRITE_AHEAD and unit.weight_sets <= 1:
+        notes.append(
+            f"b_dataflow={b_dataflow.value} requested but this array holds no persistent "
+            f"weight banks (weight_sets=1); every wave's B tile is loaded and used directly, "
+            f"so the schedule and listing are identical to write-ahead's."
+        )
+        b_dataflow = BDataflow.WRITE_AHEAD
+
     iterations = deployment.iterations
     if b_dataflow is BDataflow.PERSISTENT and iterations > 1:
         b_write_multiplier = 1.0 / iterations

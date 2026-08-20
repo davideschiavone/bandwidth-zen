@@ -53,6 +53,7 @@ import textwrap
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+from dataflow_html import render as render_animation
 from timeline_html import Box, render
 
 import bwz
@@ -65,6 +66,7 @@ from bwz.deploy import deployment_of
 from bwz.explain import Explanation, explain_graph
 from bwz.graph import GraphPhase, build_graph, build_graphs
 from bwz.graph.ops import Operation
+from bwz.kernels import encoder_layer_kernel, matmul_kernel
 from bwz.operators.base import cost_of
 from bwz.report import Bound, PhaseResult
 from bwz.spec import (
@@ -74,8 +76,6 @@ from bwz.spec import (
     DeploymentSpec,
     DType,
     HardwareSpec,
-    MatmulSpec,
-    TransformerSpec,
     load_chip,
     load_model,
 )
@@ -361,6 +361,29 @@ def _boxes(panels: list[Panel]) -> list[Box]:
     return out
 
 
+def _stations_for(chip: HardwareSpec, dtype: DType) -> dict[str, dict[str, str]]:
+    """The three fixed stations ``--animate`` draws — not a reuse of ``rows_for``,
+    which enumerates every declared resource including grey unused ones. These
+    are conceptual stations (D5a's three-element machine), not a per-profile
+    resource list.
+    """
+    machine = machine_model(chip, dtype)
+    return {
+        "dram": {
+            "name": chip.dram.name,
+            "detail": format_bandwidth(chip.dram.bandwidth_bytes_per_s),
+        },
+        "sram": {
+            "name": "on-chip",
+            "detail": f"{format_bytes(chip.on_chip_capacity_bytes)} capacity",
+        },
+        "accelerator": {
+            "name": machine.unit.name,
+            "detail": f"{format_quantity(machine.peak_flops_per_s, 'OP/s')} peak",
+        },
+    }
+
+
 @dataclass(frozen=True)
 class Roof:
     """One chip's ceilings and the point this workload sits at under them."""
@@ -627,6 +650,76 @@ def _tip(span: Span) -> str:
     )
 
 
+_ANIMATION_STAGE = {
+    Stage.LOAD: "load_b",
+    Stage.LOAD_A: "load_a",
+    Stage.HOLD: "hold",
+    Stage.EXEC: "exec",
+    Stage.STORE: "store",
+}
+"""Kernel dispatch (Stage.DISPATCH) is fixed overhead, not a DRAM/SRAM/compute
+transaction, so it has nothing to animate and is left out of the map."""
+
+
+def _flow_spans(trace: PipelineTrace) -> list[dict[str, object]]:
+    """A trace's spans, as the events ``--animate`` plays back.
+
+    Reuses the trace and ``_tip`` verbatim — the animation is a player over the
+    same schedule the timeline draws, not a second model of it.
+    """
+    out: list[dict[str, object]] = []
+    for span in trace.spans:
+        stage = _ANIMATION_STAGE.get(span.stage)
+        if stage is None:
+            continue
+        out.append(
+            {
+                "stage": stage,
+                "lane": span.lane.value,
+                "start": span.start_s,
+                "end": span.end_s,
+                "bytes": span.resident_bytes if span.stage is Stage.HOLD else span.bytes_moved,
+                "tip": _tip(span),
+                "streaming": span.stage is Stage.LOAD_A and span.a_fetch_mode == "stream",
+                "step": span.step,
+            }
+        )
+    return out
+
+
+def write_animation_html(panel: Panel, command: str, out: Path) -> None:
+    """One chip's tile schedule as a self-contained DRAM -> SRAM -> Accelerator
+    flow animation (docs/CLI.md §3, docs/CORRECTIONS.md D40).
+
+    Matmul only: three fixed stations assume one tile-shaped stream of events,
+    which is what a lone matmul's trace is and a whole network's per-operation
+    trace is not — the caller only ever reaches this with a matmul workload.
+    """
+    work = panel.work
+    dataflow = work.dataflow
+    assert dataflow is not None, "--animate only ever draws the default matmul workload"
+    page = render_animation(
+        title=_title([panel]),
+        subtitle=_subtitle([panel]),
+        footer=(
+            f"bwz {bwz.__version__}{_git()} — playback of the same schedule the timeline "
+            f"draws; the reported latency, not the drawn span, is the ground truth."
+            f"<br><code>$ {command}</code>"
+        ),
+        flow=_flow_spans(work.trace),
+        total_s=work.trace.total_s,
+        reported_latency_s=work.trace.reported_latency_s,
+        fill_drain_s=work.trace.fill_drain_s,
+        stations=_stations_for(panel.chip, panel.dtype),
+        a_strategy=dataflow.a_strategy.value,
+        b_dataflow=dataflow.b_dataflow.value,
+        notes=list(dataflow.notes),
+    )
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(page, encoding="utf-8")
+    print(f"wrote {out}")
+
+
 def _quantity(row: Row, trace: PipelineTrace) -> str:
     """What went through this resource. The part an instruction-centric view
     cannot give: a row means nothing for a comparison until it carries a number."""
@@ -756,18 +849,7 @@ def build_matmul(
     a_prefetch_depth: int | None = None,
     iterations: int = 1,
 ) -> Workload:
-    spec = MatmulSpec.model_validate(
-        {
-            "id": "p",
-            "name": f"matmul {m}x{n}x{k}",
-            "family": "matmul",
-            "m": m,
-            "n": n,
-            "k": k,
-            "a_dtype": dtype,
-            "b_dtype": dtype,
-        }
-    )
+    spec = matmul_kernel(m, n, k, a_dtype=dtype, b_dtype=dtype)
     deployment = DeploymentSpec.model_validate(
         {
             "batch": 1,
@@ -841,31 +923,13 @@ def build_encoder(
     dtype: DType,
     steps: int,
 ) -> list[Workload]:
-    """A single-layer encoder built from dimensions, mirroring `bwz single-layer-encoder`.
+    """A single-layer encoder built from dimensions, mirroring `bwz encoder-layer`.
 
     The same reason that command exists: a shape you can change one term of and
     watch the picture move, without writing a profile for every experiment.
     """
-    spec = TransformerSpec.model_validate(
-        {
-            "id": "single_layer_encoder_cli",
-            "name": f"1-layer encoder d={hidden} h={heads} ffn={ffn} S={tokens}",
-            "family": "transformer_encoder",
-            "hypothetical": True,
-            "params": {
-                "layers": 1,
-                "hidden": hidden,
-                "heads": heads,
-                "head_dim": head_dim,
-                "ffn_hidden": ffn,
-                "ffn_type": "relu",
-                "vocab": vocab,
-                "max_context": max(tokens, 1),
-                "norm": "rmsnorm",
-                "positional": "none",
-                "tie_embeddings": True,
-            },
-        }
+    spec = encoder_layer_kernel(
+        hidden=hidden, heads=heads, head_dim=head_dim, ffn=ffn, vocab=vocab, tokens=tokens
     )
     return _workloads_for(chip, spec, tokens, dtype, steps)
 
@@ -1100,6 +1164,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "zooms, so there is no separate static-figure register to keep legible",
     )
     output.add_argument("--out", type=Path, default=Path("../docs/plots"), help="Output directory")
+    output.add_argument(
+        "--animate",
+        action="store_true",
+        help="Also write a self-contained DRAM->SRAM->Accelerator flow animation "
+        "(matmul only; opt-in, not part of `make plots`)",
+    )
     return parser
 
 
@@ -1160,6 +1230,14 @@ def _reject_flags_for_the_wrong_workload(
         args.a_strategy = args.a_strategy or AStrategy.STAGE.value
         args.b_dataflow = args.b_dataflow or BDataflow.WRITE_AHEAD.value
         args.iterations = 1 if args.iterations is None else args.iterations
+
+    if args.animate and (args.model or args.encoder):
+        parser.error(
+            "--animate only draws the default matmul workload; drop --model/--encoder "
+            "or drop --animate (docs/CLI.md §3)"
+        )
+    if args.animate and args.compare:
+        parser.error("--animate draws one chip's schedule; drop --compare or drop --animate")
 
 
 def main() -> None:
@@ -1244,11 +1322,14 @@ def main() -> None:
     for chip in chips:
         dtype = DType(args.weights) if args.weights else _default_dtype(chip)
         for index, work in enumerate(workloads(chip, dtype, args.steps)):
+            panel = Panel(chip, dtype, work)
             write_html(
-                [Panel(chip, dtype, work)],
-                command,
-                args.out / f"timeline-{slug(chip.id, dtype, work, index)}.html",
+                [panel], command, args.out / f"timeline-{slug(chip.id, dtype, work, index)}.html"
             )
+            if args.animate:
+                write_animation_html(
+                    panel, command, args.out / f"animate-{slug(chip.id, dtype, work, index)}.html"
+                )
 
 
 if __name__ == "__main__":

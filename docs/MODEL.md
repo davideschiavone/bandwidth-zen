@@ -508,6 +508,23 @@ not be rewritten on a repeat invocation, so with `iterations = N > 1` the report
 amortised share `1/N` of one full write — the first invocation pays it, the other `N-1` pay nothing.
 `analyze()` still returns one report, not `N`; `iterations` only ever reaches this one multiplier.
 
+**`on-demand` does get real schedule timing (D40).** No bytes move, but *when* B's already-costed
+DRAM load is allowed to overlap compute is a legitimate, zero-new-constant thing to model: the
+double-buffered tile schedule (`analysis/pipeline.py`) ordinarily lets a wave's B load prefetch as
+early as the port and buffer allow — that overlap *is* `write-ahead`'s definition. `on-demand`
+removes it, forcing the load to wait for the previous wave's compute to finish, exposing the same
+load duration on the critical path instead of hiding it. This changes the **drawn trace**
+(`trace.total_s`/`fill_drain_s` grow, exactly like `--a-prefetch-depth 1` already does) and never
+the **reported** `t_dram`/`t_compute`/`latency` — D19's asymmetry rule again: a trace may run slower
+than the report it illustrates, never faster, and the report itself never moves. `persistent` gets
+no schedule change: `write-ahead`'s existing overlap already achieves this model's best case (any
+buffering depth beyond 2 is provably equivalent — swept empirically, and `docs/CLI.md` §2.5's own
+`--a-prefetch-depth` example independently shows the same thing), so there is no byte-conserving
+reordering that makes a single-pass `persistent` trace faster than `write-ahead`'s. Both placements
+are gated on `weight_sets > 1` — a chip with no resident weight bank (`weight_sets = 1`, every
+shipped GPU profile) has nothing to place ahead of, expose, or persist, and resolves either choice
+straight back to `write-ahead`.
+
 Both `whole` (scratchpad `>= |A|`) and `persistent` (`tiles <= units · weight_sets`) clamp rather
 than raise when they do not fit, falling back to `stage`/`write-ahead` with the requested value, the
 value used and why named in `report.assumptions` — never silently.

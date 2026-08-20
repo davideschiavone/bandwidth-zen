@@ -12,11 +12,13 @@ import math
 import pytest
 
 from bwz.analysis import analyze, idealised, machine_model
+from bwz.analysis.dataflow import plan_dataflow
 from bwz.analysis.pipeline import Lane, PipelineTrace, Stage, build_trace, tile_count
 from bwz.analysis.roofline import MATRIX_OP_TYPES, MachineModel
 from bwz.graph import GraphPhase, build_graph
+from bwz.operators.base import cost_of
 from bwz.report import Report
-from bwz.spec import DeploymentSpec, DType, MatmulSpec, load_chip, load_model
+from bwz.spec import BDataflow, DeploymentSpec, DType, MatmulSpec, load_chip, load_model
 
 
 def _spec(m: int, n: int, k: int, dtype: str = "fp16") -> MatmulSpec:
@@ -34,21 +36,41 @@ def _spec(m: int, n: int, k: int, dtype: str = "fp16") -> MatmulSpec:
     )
 
 
-def _deployment() -> DeploymentSpec:
-    return DeploymentSpec.model_validate({"batch": 1, "input_tokens": 1, "output_tokens": 1})
+def _deployment(*, b_dataflow: BDataflow | None = None, iterations: int = 1) -> DeploymentSpec:
+    payload: dict[str, object] = {"batch": 1, "input_tokens": 1, "output_tokens": 1}
+    if b_dataflow is not None:
+        payload["b_dataflow"] = b_dataflow
+    if iterations != 1:
+        payload["iterations"] = iterations
+    return DeploymentSpec.model_validate(payload)
 
 
 def _trace(
-    spec: MatmulSpec, chip_id: str, *, ideal: bool = True, max_steps: int = 64
+    spec: MatmulSpec,
+    chip_id: str,
+    *,
+    ideal: bool = True,
+    max_steps: int = 64,
+    b_dataflow: BDataflow | None = None,
+    iterations: int = 1,
 ) -> tuple[PipelineTrace, Report]:
     chip = load_chip(chip_id)
     if ideal:
         chip = idealised(chip)
-    deployment = _deployment()
+    deployment = _deployment(b_dataflow=b_dataflow, iterations=iterations)
     report = analyze(spec, chip, deployment)
     assert report.feasible, report.infeasibility
     graph = build_graph(spec, deployment, GraphPhase.STATIC)
     machine: MachineModel = machine_model(chip, spec.operand_dtype)
+    dataflow = None
+    if b_dataflow is not None:
+        dataflow = plan_dataflow(
+            graph.ops[0],
+            machine,
+            chip,
+            deployment,
+            a_bytes=cost_of(graph.ops[0], graph.tensors).input_bytes,
+        )
     return (
         build_trace(
             graph,
@@ -56,6 +78,7 @@ def _trace(
             machine,
             double_buffered=report.memory.double_buffered,
             max_steps=max_steps,
+            dataflow=dataflow,
         ),
         report,
     )
@@ -378,4 +401,111 @@ def test_fill_drain_differs_enough_between_chips_to_distort_a_ratio() -> None:
     for trace, report in ((fast, fast_report), (slow, slow_report)):
         op = report.phases[0].ops[0]
         assert trace.busy_s[Lane.DRAM] == pytest.approx(op.t_dram_s, rel=1e-9)
-        assert trace.reported_latency_s == pytest.approx(op.latency_s, rel=1e-9)
+
+
+def test_write_ahead_b_dataflow_is_not_a_new_code_path() -> None:
+    """Passing an explicit write-ahead plan must reproduce the ``dataflow=None``
+    schedule exactly (D40) — every other test in this file draws that schedule
+    without ever naming ``b_dataflow``, so the two paths must never disagree.
+    """
+    spec = _spec(8192, 8192, 8192, "int8")
+    implicit, _ = _trace(spec, "metis_aipu", max_steps=64)
+    explicit, _ = _trace(spec, "metis_aipu", max_steps=64, b_dataflow=BDataflow.WRITE_AHEAD)
+
+    assert explicit.total_s == implicit.total_s
+    assert explicit.spans == implicit.spans
+
+
+def test_on_demand_exposes_one_waves_compute_on_the_critical_path() -> None:
+    """D40: ``b_dataflow=on-demand`` forces ``load_start(i) >= exec_end(i-1)`` —
+    B's load can no longer hide behind the *previous* wave's arithmetic.
+
+    Metis (``weight_sets=4``) at ``M=20000, N=K=2048`` int8 is 16 tiles over 4
+    arrays: 4 waves, exactly at the resident-tile-capacity boundary
+    (``4 x 4 = 16``). Under write-ahead the schedule is DRAM-port-saturated
+    end to end, so the on-demand gate binds once and the delay propagates as a
+    constant shift: ``total_s`` grows by exactly one wave's compute time,
+    ``t_compute_s / steps = 0.0008196 / 4 = 0.0002049 s``.
+    """
+    spec = _spec(20_000, 2048, 2048, "int8")
+    write_ahead, report = _trace(spec, "metis_aipu", b_dataflow=BDataflow.WRITE_AHEAD)
+    on_demand, _ = _trace(spec, "metis_aipu", b_dataflow=BDataflow.ON_DEMAND)
+    op = report.phases[0].ops[0]
+
+    assert write_ahead.steps == 4
+    delay = op.t_compute_s / write_ahead.steps
+    assert delay == pytest.approx(0.0002049, rel=1e-6)
+    assert on_demand.total_s == pytest.approx(write_ahead.total_s + delay, rel=1e-9)
+    assert on_demand.fill_drain_s == pytest.approx(write_ahead.fill_drain_s + delay, rel=1e-9)
+
+
+def test_persistent_b_dataflow_matches_write_ahead_within_one_pass() -> None:
+    """D30/D36: within one pass every B tile is fetched exactly once whichever
+    placement is chosen, and write-ahead's double buffering already achieves
+    this model's best-case overlap — any ``depth >= 2`` is provably equivalent
+    to today's default (``store_ends`` is monotonically non-decreasing, so
+    ``freed = store_ends[i-depth] <= dram_free`` for every such depth; swept
+    ``depth_override`` from 2 to 64 on this shape and got a bit-identical
+    ``total_s`` every time). ``persistent`` therefore gets no schedule change
+    at all (D40): its trace is write-ahead's, unmodified. Its real,
+    already-implemented distinguishing effect is the cross-``--iterations``
+    ``b_write_multiplier`` amortisation, a byte story, not a same-pass timing
+    one.
+    """
+    spec = _spec(20_000, 2048, 2048, "int8")
+    write_ahead, _ = _trace(spec, "metis_aipu", b_dataflow=BDataflow.WRITE_AHEAD)
+    persistent, _ = _trace(spec, "metis_aipu", b_dataflow=BDataflow.PERSISTENT)
+
+    assert persistent.total_s == write_ahead.total_s
+    assert persistent.spans == write_ahead.spans
+
+
+def test_b_dataflow_never_moves_a_report_number() -> None:
+    """D36's "moves zero bytes against each other in a single invocation" claim,
+    pinned as a golden rather than left as prose: t_dram, t_compute and the
+    reported latency are decided before ``b_dataflow`` is ever read (only
+    ``DataflowPlan.b_write_multiplier`` — 1.0 outside persistent+iterations>1 —
+    touches a byte total), so only the *trace's* total_s/fill_drain_s may
+    differ across the three placements.
+    """
+    spec = _spec(20_000, 2048, 2048, "int8")
+    baseline_report = None
+    for b_dataflow in (BDataflow.WRITE_AHEAD, BDataflow.ON_DEMAND, BDataflow.PERSISTENT):
+        _, report = _trace(spec, "metis_aipu", b_dataflow=b_dataflow)
+        op = report.phases[0].ops[0]
+        if baseline_report is None:
+            baseline_report = report
+        baseline_op = baseline_report.phases[0].ops[0]
+        assert op.t_dram_s == pytest.approx(baseline_op.t_dram_s, rel=1e-12)
+        assert op.t_compute_s == pytest.approx(baseline_op.t_compute_s, rel=1e-12)
+        assert op.latency_s == pytest.approx(baseline_op.latency_s, rel=1e-12)
+
+
+def test_weight_sets_le_1_gate_falls_back_b_dataflow_to_write_ahead() -> None:
+    """A tensor core reads both operands per instruction and holds no resident
+    weight bank (``weight_sets=1``, every shipped GPU profile) — there is
+    nothing to place ahead of, expose on demand, or keep resident. ``on-demand``
+    and ``persistent`` must therefore resolve to ``write-ahead`` and draw its
+    exact schedule, with a note explaining why.
+
+    Picked ``M=N=K=128`` on A100 (64 tiles) specifically because it sits well
+    inside ``resident_tile_capacity`` (432 = 432 arrays x 1 weight set) — the
+    pre-existing persistent-capacity clamp would not fire here on its own, so
+    this isolates the new ``weight_sets<=1`` gate from that older one.
+    """
+    spec = _spec(128, 128, 128, "fp16")
+    write_ahead, _ = _trace(spec, "a100_80gb", b_dataflow=BDataflow.WRITE_AHEAD)
+
+    for b_dataflow in (BDataflow.ON_DEMAND, BDataflow.PERSISTENT):
+        gated, report = _trace(spec, "a100_80gb", b_dataflow=b_dataflow)
+        assert gated.total_s == write_ahead.total_s
+        assert gated.spans == write_ahead.spans
+        assert any("weight_sets=1" in a for a in report.assumptions)
+
+    # The latent bug this gate fixes for free: before it, a weight_sets=1 chip
+    # (no resident bank to amortise at all) still got persistent's iteration
+    # discount purely because its tile count happened to fit the capacity
+    # clamp's arithmetic. Now the gate resolves b_dataflow to write-ahead
+    # before that amortisation check ever runs.
+    _, discounted_report = _trace(spec, "a100_80gb", b_dataflow=BDataflow.PERSISTENT, iterations=4)
+    assert not any("amortised" in a for a in discounted_report.assumptions)

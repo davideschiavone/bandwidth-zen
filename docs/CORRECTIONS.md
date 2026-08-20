@@ -664,10 +664,10 @@ token-by-token phase to separate. Now encoders return `(PREFILL,)`.
 MLM head, a pooler — is task-specific. Counting one here would be inventing a layer, so the head is
 built for decoders only.
 
-Ships with `profiles/models/single_layer_encoder.yaml`: one layer, hidden 8, 2 heads of 4, FFN 16,
+Ships with `profiles/models/single_layer_encoder_toy.yaml`: one layer, hidden 8, 2 heads of 4, FFN 16,
 vocab 16, tied embeddings, ReLU FFN. Small enough that every figure is a product of two small
 integers — **664 parameters** and **5280 operations** over 4 tokens — with the full derivation in
-the profile's own header and in `tests/unit/test_single_layer_encoder.py`, which recomputes both from the
+the profile's own header and in `tests/unit/test_single_layer_encoder_toy.py`, which recomputes both from the
 dimensions rather than asserting what the engine happened to produce.
 
 **It was given a KV cache.** K and V were tagged `KV_CACHE`, so the memory plan reported a
@@ -1325,3 +1325,116 @@ delivered rate is far below it because the array is idle most of the span. The t
 apart (`achieved` vs `while busy`) so a reader cannot mistake "the array ran at 622 TOP/s while it
 was running" for "the chip delivered 622 TOP/s on this workload" — confusing them was the failure
 this correction exists to prevent.
+
+## D39 — The two kernel probes get one factory each, not two hand-typed dicts (2026-08-20)
+
+`bwz matmul`/`bwz single-layer-encoder` and `scripts/plot_pipeline.py`'s `--matmul`/`--encoder`
+each build a spec straight from CLI shape arguments — a "kernel probe", the smallest unit the
+engine costs, as opposed to a model loaded from a profile. The CLI's report and the script's figure
+are meant to describe the same probe; each independently hand-built the same dict a second time,
+and they had already drifted.
+
+**What had drifted, found by a user question asking why the encoder profile and the encoder command
+looked like the same thing.** `plot_pipeline.py`'s `build_matmul()` used a placeholder id (`"p"`)
+where `bwz matmul` derives one from the shape, and dropped per-operand width support entirely — no
+`--out`/`--a`/`--b` exist on the script, so a plotted matmul can never show a widening accumulator
+or mixed operands, only `bwz matmul` can. `build_encoder()` hardcoded three architecture knobs
+(`ffn_type`, `norm`, `tie_embeddings`) that `bwz single-layer-encoder` exposes as `--ffn-type`/
+`--norm`/`--tie`, with no way to override them from the script. And `build_encoder()`'s `name`
+baked in `S={tokens}`, which the shared `_workloads_for()` helper then appended a second time —
+the HTML timeline title for `--encoder` read `...ffn=16 S=512 prefill S=512`.
+
+**Fix: `bwz/kernels.py`**, two pure factory functions — `matmul_kernel(m, n, k, *, a_dtype, b_dtype,
+out_dtype=None)` and `encoder_layer_kernel(*, hidden, heads, head_dim=None, ffn, vocab, tokens,
+ffn_type=RELU, norm=RMSNORM, tie_embeddings=True)` — both deriving id and name from the shape
+(`matmul_4096x4096x4096`, `encoder_layer_d8_h2_ffn16_s4`) rather than a placeholder or a constant.
+`cli.py`'s `matmul`/`encoder-layer` commands and `plot_pipeline.py`'s `build_matmul`/`build_encoder`
+now call these instead of each writing the dict by hand. The `S=` double-embed is gone as a side
+effect: the factory's `name` doesn't carry it, so `_workloads_for()`'s own append is the only place
+it appears. **Scope, decided deliberately:** the factories accept the full parameter set `cli.py`
+already had (so nothing there loses capability), but no new flags were added to `plot_pipeline.py`
+— `build_matmul`/`build_encoder` still pass through only what the script already exposes, defaulting
+the rest exactly as before. Closing the `--out`/`--a`/`--b`/`--ffn-type`/`--norm`/`--tie` gap on the
+script, if wanted, is a separate decision.
+
+**The command is renamed** `bwz single-layer-encoder` → `bwz encoder-layer`, to read as a kernel
+probe the same way `bwz matmul` does — one word naming the kernel (`matmul`, `encoder-layer`), not a
+sentence describing it.
+
+**The bundled profile is renamed** `single_layer_encoder` → `single_layer_encoder_toy`
+(`profiles/models/single_layer_encoder_toy.yaml`, D24's hand-countable reference model — 664
+parameters, 5280 operations, unchanged by this rename). Its old id read as the same thing as the
+`bwz single-layer-encoder` command even though they were unrelated: one a frozen teaching profile
+loaded by id, the other an ad-hoc probe built from flags. `_check_id_matches_filename()`
+(`bwz/spec/loaders.py`) keeps the filename and `id:` field in lockstep automatically.
+
+`tests/unit/test_single_layer_encoder.py` splits along the same line the two concepts now make
+explicit: the profile-only tests stay in the renamed `test_single_layer_encoder_toy.py`, and
+`test_the_cli_shape_matches_the_profile` — which asserts the kernel probe's default shape and the
+toy profile agree — moves to the new `test_kernels.py`, now calling `encoder_layer_kernel()` instead
+of re-typing the dict a third time.
+
+## D40 — B-dataflow gets real schedule timing, and persistent provably can't buy more than write-ahead already does (2026-08-20)
+
+A request for a DRAM -> SRAM -> Accelerator flow animation (`plot_pipeline.py --animate`) needed
+`--b-dataflow` to look different in motion, not just in a text listing. Before this entry,
+`--b-dataflow` (D33) only changed the pseudo-C text `deploy.py` prints — `_pipelined_tiles`
+(`analysis/pipeline.py`), the function that actually times the schedule, never read
+`dataflow.b_dataflow` at all. Animating it honestly meant giving it real timing first.
+
+**The constraint that ruled out the obvious approach.** `deploy.py`'s pseudo-C shows
+`write-ahead`/`on-demand`/`persistent` placing an `imc_write` (the on-chip-buffer -> array-register
+write) differently, and the naive fix is to cost that write. It has no cost anywhere in this
+codebase — no on-chip write-bandwidth term exists in `calibration.py`, and D5b/D30/D36 already
+establish that as a deliberate v1 boundary. Costing it would mean fabricating an uncited constant,
+which CLAUDE.md forbids outright. The fix instead reuses only the one already-costed quantity that
+exists — B's per-wave DRAM load duration, a real bandwidth-based number — and changes only *when*
+that existing cost is allowed to overlap compute. No new constants anywhere.
+
+**`on-demand` (D40 fix).** `_pipelined_tiles`'s recurrence schedules B's load as
+`load_start = max(dram_free, freed)` — never gated on the previous wave's compute, which is
+`write-ahead`'s definition (hidden behind an earlier wave's arithmetic) and was already every
+chip's unconditional behaviour. `on-demand` adds one more lower bound,
+`max(dram_free, freed, exec_end)`, forcing the load to wait for the previous wave's compute to
+finish — no prefetch-ahead — which exposes the same, already-modelled load duration on the critical
+path. Verified against the real engine (`bwz matmul -M 20000 -N 2048 -K 2048 -c metis_aipu -d int8`):
+`on-demand`'s `trace.total_s` is `write-ahead`'s plus exactly one wave's compute time
+(`t_compute_s / steps = 0.0008196 / 4 = 0.0002049 s`), because the DRAM port is saturated end to
+end under `write-ahead` on this shape, so the gate binds once and the delay is a constant shift.
+
+**`persistent` — no schedule change, and this is the load-bearing finding, not a shortfall.** Two
+tempting fixes were tried and are both wrong. Zeroing the load for waves after wave 0 breaks D36's
+own invariant ("moves zero bytes against each other in a single invocation") and desyncs a span's
+bytes from its timing, double-counting the amortisation `DataflowPlan.b_write_multiplier` already
+applies one layer up, before `_tile_trace` ever runs. Letting a `depth_override` (mirroring
+`--a-prefetch-depth`) skip further ahead is a no-op: `store_ends` is monotonically non-decreasing by
+construction, so `freed = store_ends[i-depth] <= dram_free` for *every* `depth >= 2` — swept
+`depth_override` from 2 to 64 on a real shape and got a bit-identical `trace.total_s` every time,
+which `docs/CLI.md` §2.5's own worked `--a-prefetch-depth` example independently corroborates (it
+only ever shows `depth=1` differing from the default). The honest conclusion: `write-ahead`'s
+existing double buffering already achieves this model's best-case overlap, so there is no
+byte-conserving reordering of B's fixed loads that makes a single-pass `persistent` trace faster.
+`persistent` therefore gets no schedule change at all — its trace is `write-ahead`'s, span for
+span. Its real, already-correctly-implemented effect stays `DataflowPlan.b_write_multiplier`, a
+byte story across `--iterations`, not a same-pass timing one.
+
+**The `weight_sets <= 1` gate, and a bug it fixes for free.** `deploy.py` already gates every
+write-ahead/on-demand/persistent-specific line behind `unit.weight_sets > 1` — a chip with no
+resident weight bank (`weight_sets = 1`, every shipped GPU profile) has nothing to place ahead of,
+expose, or persist. `plan_dataflow` (`analysis/dataflow.py`) needed the same gate, added right after
+the existing persistent-capacity clamp: `on-demand`/`persistent` requested on a `weight_sets <= 1`
+chip now resolve to `write-ahead`, with a note. This closes a real, verified latent bug as a side
+effect: before the gate, `--b-dataflow persistent --iterations 4` on `a100_80gb` (`weight_sets=1`)
+gave `b_write_multiplier=0.25` — a 25% DRAM-write discount for a chip whose tensor cores have no
+resident weight bank at all to amortise across calls, contradicting the chip's own declared physics.
+
+**What this does and does not change.** `t_dram`, `t_compute` and the reported `latency` are
+identical across all three placements for the same shape — pinned as a golden
+(`test_b_dataflow_never_moves_a_report_number`, `tests/unit/test_pipeline.py`) — because they are
+decided before `b_dataflow` is ever read; only `trace.total_s`/`fill_drain_s`, the *drawn* schedule,
+differ. This is D19's asymmetry rule again: a trace may run slower than the report it illustrates,
+never faster, and the report itself never moves — the same rule `--a-prefetch-depth` already
+established for A. Five golden tests in `test_pipeline.py` cover: `write-ahead` is not a new code
+path (regression guard — every other test in the file assumes it), `on-demand`'s exact derived
+delay, `persistent` matching `write-ahead` span for span, the byte/latency invariant across all
+three, and the `weight_sets <= 1` gate plus the `--iterations` bug fix.

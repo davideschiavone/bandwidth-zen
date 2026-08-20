@@ -278,9 +278,110 @@ under 1% at the default depth on the same shape (`sram` reads `1.00 of 1 buf` ag
 buffers) — while `latency` itself is untouched: `636 µs` either way. The reported latency always
 comes from the roofline's formula, never from the drawn schedule (D19, D35).
 
+**`--b-dataflow on-demand` is the same kind of schedule-only cost, on the other operand (D40).**
+`write-ahead` (the default) already prefetches B's load behind the previous wave's compute;
+`on-demand` forces the load to wait instead, exposing the same, already-costed load duration on the
+critical path:
+
+```bash
+uv run bwz matmul -M 20000 -N 2048 -K 2048 -c metis_aipu -d int8 --ideal --b-dataflow on-demand
+```
+
+```
+  sram     4.62 ms   1.69 of 2 buf   tile buffers held from fetch to use
+  4 tile steps, double buffered. Span 2.73 ms against a reported 2.52 ms: the
+extra 205 µs (7.5%) is pipeline fill/drain, which max(load, compute) omits.
+```
+
+205 µs is exactly one wave's compute time (`t_compute / steps = 820 µs / 4`) — the DRAM port is
+saturated end to end under `write-ahead` on this shape, so the gate binds once and the delay
+propagates as a constant shift. `t_dram`, `t_compute` and `latency` are unchanged from `write-ahead`
+(2.52 ms either way) — only the drawn span moves, the same D19 rule `--a-prefetch-depth` follows.
+
+`--b-dataflow persistent` on the same shape draws **byte-for-byte and timing-for-timing identical**
+to `write-ahead` — not a rounding-error difference, an exact one: `write-ahead`'s existing double
+buffering already achieves this model's best-case overlap, so there is no reordering of B's fixed
+loads that makes a same-pass `persistent` trace faster (D40). `persistent`'s real effect stays the
+cross-`--iterations` amortisation §2.5 already documents above, a byte story, not a schedule one.
+
 ---
 
-## 3. `bwz run` — a network on a chip
+## 3. `bwz encoder-layer` — one encoder layer, sized from the command line
+
+The transformer counterpart of `bwz matmul` (§2): the shape comes from the command line, not a
+profile. Bidirectional attention over all `S` tokens, no KV cache, no LM head — one layer, always.
+For anything deeper, load a profile and use `bwz run` (§4).
+
+| Flag | Meaning |
+|---|---|
+| `-c`, `--chip` | chip profile id or path (required) |
+| `-d`, `--hidden` | model width (default 8) |
+| `--heads` | attention heads (default 2) |
+| `--head-dim` | defaults to `hidden // heads` |
+| `--ffn` | FFN inner width (default 16) |
+| `--vocab` | vocabulary size (default 16) |
+| `-S`, `--tokens` | sequence length (default 4) |
+| `-b`, `--batch` | batch size (default 1) |
+| `--ffn-type` | `relu` (default) \| `gelu` \| `swiglu` \| `geglu` |
+| `--norm` | `layernorm` \| `rmsnorm` (default) \| `batchnorm` \| `none` |
+| `--tie` / `--untie` | tie the embedding and output tables (default tie) |
+| `--weights` | precision (default `fp16`) |
+| `--ideal`, `--json` | as for `matmul` |
+
+### 3.1 The default shape — small enough to count by hand
+
+```bash
+uv run bwz encoder-layer --chip a100_80gb --ideal
+```
+
+```
+  what         parameters   derivation
+ ───────────────────────────────────────────────
+  Q, K, V, O          256   8x8 + 2 x 8x8 + 8x8
+  FFN                 256   2 x 8 x 16
+  norms                16   2 x rmsnorm over 8 channels
+  per layer           528
+  embeddings          128   16 x 8, tied
+  final norm            8
+  total               664
+
+  phase     latency   bound            util    t_dram   t_compute   t_fixed
+ ─────────────────────────────────────────────────────────────────────────
+  prefill    122 ns   COMPUTE_BOUND   0.01%   31.4 ps      122 ns       0 s
+
+  TTFT      122 ns
+  total     122 ns
+  achieved  43.1 GOP/s of 312 TOP/s (0.01%)
+```
+
+664 parameters, 5280 operations at the defaults — the golden numbers that `tests/unit/test_kernels.py`
+and the bundled `single_layer_encoder_toy` profile both pin to (`docs/CORRECTIONS.md` D39): the CLI
+probe and the frozen teaching profile agree exactly because they run through the same
+`encoder_layer_kernel` factory (`bwz/kernels.py`), the way `bwz matmul` runs through `matmul_kernel`.
+
+Shape utilisation bottoms out at 0.01% — 8-wide operands do not begin to fill a 16×16 array — which
+is the point of the default: every number here is checkable by hand, not representative of a real
+workload.
+
+### 3.2 Widening one dimension at a time
+
+```bash
+uv run bwz encoder-layer --chip a100_80gb --ideal --ffn 32   # 920 params, 7392 ops
+uv run bwz encoder-layer --chip a100_80gb --ideal -S 16      # 664 params, 29184 ops
+```
+
+`--ffn` only moves the FFN block's own count (256 → 512 params; per-layer 528 → 784; total 664 →
+920). `-S` moves no parameter count at all — sequence length is a deployment quantity, not a weight
+— but every op count grows with it, and not linearly: 4 → 16 tokens is 4× the sequence but 5280 →
+29184 is 5.5× the operations, because attention's `Q·Kᵀ` and `A·V` scale with `S²` while the
+projections and FFN stay linear in `S`.
+
+Both variants keep the same shape-derived `id`/`name` construction as §3.1 — `encoder_layer_d8_h2_ffn32_s4`,
+never a placeholder.
+
+---
+
+## 4. `bwz run` — a network on a chip
 
 | Flag | Meaning |
 |---|---|
@@ -326,7 +427,7 @@ uv run bwz run -m gemma3_4b -c chip_a --weights int8 --input-tokens 512 --output
 
 ---
 
-## 4. `bwz compare` — chips head to head
+## 5. `bwz compare` — chips head to head
 
 ```bash
 uv run bwz compare --chips chip_a,chip_b --models gemma3_4b
@@ -346,10 +447,10 @@ Flags: `--chips`, `--models` (comma-separated), `--batch`, `--input-tokens`, `--
 
 ---
 
-## 5. Figures
+## 6. Figures
 
 **The figures are not the report.** `bwz matmul` and `bwz run` print the numbers, their derivations
-and the assumptions drawer (§2, §3); the plot scripts write files and print only `wrote …`. Two
+and the assumptions drawer (§2, §4); the plot scripts write files and print only `wrote …`. Two
 commands, on purpose — `make plots` runs the scripts several times and a wall of tables per chip
 would drown it.
 
@@ -384,9 +485,11 @@ uv run python scripts/plot_pipeline.py --chip h100_sxm --matmul 8192,8192,8192
 
 plus `--chip` (repeatable), `--compare`, `--weights`, `--ideal`, `--steps` (default 256 — the only
 resolution knob; the page zooms, so there is no separate static-figure register to keep legible),
-`--out`.
+`--out`, and `--animate` — matmul only, opt-in, rejected alongside `--model`/`--encoder`/`--compare`;
+writes a second self-contained page playing the same schedule back as DRAM -> SRAM -> Accelerator
+motion instead of a static strip (`docs/plots/README.md` "Playing the flow animation", D40).
 
-### 5.1 `--compare` — two chips, one workload, one page
+### 6.1 `--compare` — two chips, one workload, one page
 
 Without it, `--chip A --chip B` writes one page per chip, each with x normalised to that chip's own
 span. With it, they land in **one** page on a **shared, absolute** axis:
@@ -507,7 +610,7 @@ this model never uses. See [`plots/README.md`](plots/README.md) for how to read 
 
 ---
 
-## 6. Development
+## 7. Development
 
 ```bash
 make test          # pytest + vitest
@@ -526,7 +629,7 @@ cd backend && uv run pytest tests/unit/test_pipeline.py::test_double_buffering_h
 
 ---
 
-## 7. Where each claim is derived
+## 8. Where each claim is derived
 
 | Claim | Command | Derivation |
 |---|---|---|
@@ -536,10 +639,10 @@ cd backend && uv run pytest tests/unit/test_pipeline.py::test_double_buffering_h
 | mixed operands run at the wider | §2.3 | `docs/CORRECTIONS.md` D18 |
 | SRAM depth 1.97 of 2 buffers | §2.4 | `docs/MODEL.md` §6.5, D19 |
 | the result is always written back | §2.1, §2.3 | `docs/CORRECTIONS.md` D22 |
-| grey rows = the model's boundary | §5 | `docs/CORRECTIONS.md` D20 |
+| grey rows = the model's boundary | §6 | `docs/CORRECTIONS.md` D20 |
 | no Konata, no Kanata | — | `docs/CORRECTIONS.md` D21 |
-| 1.40% residency on chip_a | §3 | `docs/CORRECTIONS.md` D8, D15 |
+| 1.40% residency on chip_a | §4 | `docs/CORRECTIONS.md` D8, D15 |
 | traffic is a lower bound when the working set does not fit | every report's assumptions | `docs/MODEL.md` §6.2 |
 | stream is 16x the staged total | §2.5 | `docs/MODEL.md` §6.3a, `docs/CORRECTIONS.md` D36 |
 | whole/persistent clamp rather than raise | §2.5 | `docs/CORRECTIONS.md` D36, CLAUDE.md #8 |
-| 622/186 TOP/s achieved, 3.34x inverted | §5.1 | `docs/CORRECTIONS.md` D35, D37 |
+| 622/186 TOP/s achieved, 3.34x inverted | §6.1 | `docs/CORRECTIONS.md` D35, D37 |

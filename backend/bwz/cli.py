@@ -26,6 +26,7 @@ from bwz.analysis.pipeline import Lane, PipelineTrace, build_trace
 from bwz.analysis.roofline import compute_dtype
 from bwz.graph import build_graph
 from bwz.graph.ops import GraphPhase
+from bwz.kernels import encoder_layer_kernel, matmul_kernel
 from bwz.operators.base import cost_of
 from bwz.report import Bound, Report
 from bwz.spec import (
@@ -610,19 +611,7 @@ def matmul(
     a = a_dtype if a_dtype is not None else dtype
     b = b_dtype if b_dtype is not None else dtype
     try:
-        spec = MatmulSpec.model_validate(
-            {
-                "id": f"matmul_{m}x{n}x{k}",
-                "name": f"matmul {m}x{n}x{k}",
-                "family": "matmul",
-                "m": m,
-                "n": n,
-                "k": k,
-                "a_dtype": a,
-                "b_dtype": b,
-                "out_dtype": out_dtype,
-            }
-        )
+        spec = matmul_kernel(m, n, k, a_dtype=a, b_dtype=b, out_dtype=out_dtype)
         # DeploymentSpec is required by analyze() but a bare matmul reads nothing
         # from it beyond the dataflow strategy flags: the builder takes its widths
         # from the spec (D18) and there is no batch, context or phase to describe.
@@ -770,8 +759,8 @@ def matmul(
         console.print(f"  • {assumption}", highlight=False)
 
 
-@app.command(name="single-layer-encoder")
-def single_layer_encoder(
+@app.command(name="encoder-layer")
+def encoder_layer(
     chip: str = typer.Option(
         ..., "--chip", "-c", help="Chip profile id or path", rich_help_panel=PANEL_SHAPE
     ),
@@ -830,26 +819,16 @@ def single_layer_encoder(
     task-specific (docs/CORRECTIONS.md D24).
     """
     try:
-        spec = TransformerSpec.model_validate(
-            {
-                "id": "single_layer_encoder_cli",
-                "name": f"1-layer encoder d={hidden} h={heads} ffn={ffn}",
-                "family": "transformer_encoder",
-                "hypothetical": True,
-                "params": {
-                    "layers": 1,
-                    "hidden": hidden,
-                    "heads": heads,
-                    "head_dim": head_dim,
-                    "ffn_hidden": ffn,
-                    "ffn_type": ffn_type,
-                    "vocab": vocab,
-                    "max_context": max(tokens, 1),
-                    "norm": norm,
-                    "positional": "none",
-                    "tie_embeddings": tie,
-                },
-            }
+        spec = encoder_layer_kernel(
+            hidden=hidden,
+            heads=heads,
+            head_dim=head_dim,
+            ffn=ffn,
+            vocab=vocab,
+            tokens=tokens,
+            ffn_type=ffn_type,
+            norm=norm,
+            tie_embeddings=tie,
         )
         deployment = DeploymentSpec.model_validate(
             {
