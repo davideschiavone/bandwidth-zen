@@ -146,6 +146,13 @@ These are known-good behaviours. If a change breaks one, the change is wrong.
 
 - **One milestone at a time.** `PROMPT.md` §8 defines them. Finish, test, lint, commit, summarize,
   then stop for review before starting the next.
+- **Commit is a standing authorization, not something to ask permission for each time.** Once a
+  change is tested and linted clean, commit it as the last step of finishing that unit of work —
+  do not wait for the user to separately say "commit". This line *is* the durable, in-repo
+  authorization Claude Code's own safety default asks for before it will act on standing
+  permission for a consequential action. Scope: local commits only. Pushing to a remote,
+  force-pushing, or any destructive git operation still requires the user to ask in the moment —
+  this bullet does not extend to those.
 - **Plan before large changes.** For anything touching more than ~3 files, state the plan first.
 - **Prefer editing over rewriting.** Don't restructure modules that already have passing tests.
 - **Small commits, conventional messages:** `feat(analysis): flat roofline with tiled DRAM traffic`,
