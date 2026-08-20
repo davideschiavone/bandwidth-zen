@@ -294,30 +294,24 @@ def test_a_network_gets_a_sequence_listing_rather_than_a_tile_nest() -> None:
     assert "TILES" not in listing.code
 
 
-def test_network_listing_tags_stage_lines_for_the_debug_view() -> None:
-    """D42: `--animate`'s code pane needs to know which line is which stage for
-    a network graph too, not just a lone matmul (D41). The loop is generic —
-    `for (i = 0; i < OPS; ++i) { load_B(op[i]); ...; store_C(op[i]); }` — never
-    unrolled per named operation (real names like "q_proj" live in the trace's
-    spans, not this text), so a tag can only ever mean "a load/store/compute is
-    happening right now", not "*this* operation's".
-
-    Both compute branches (`if (is_matrix(op[i])) ... else ...`, D27's
-    matrix/vector split) tag the same `"exec"` stage — deliberately coarse,
-    since which branch runs for a given `op[i]` is exactly what this generic
-    loop never names either.
-    """
+def _network_listing(chip_id: str, dtype: DType, precision: dict[str, str] | None = None):  # type: ignore[no-untyped-def]
     from bwz.kernels import encoder_layer_kernel
 
     spec = encoder_layer_kernel(hidden=8, heads=2, ffn=16, vocab=16, tokens=4)
-    chip = idealised(load_chip("a100_80gb"))
-    deployment = DeploymentSpec.model_validate(
-        {"batch": 1, "input_tokens": 4, "output_tokens": 0, "phase": "prefill"}
-    )
+    chip = idealised(load_chip(chip_id))
+    payload: dict[str, object] = {
+        "batch": 1,
+        "input_tokens": 4,
+        "output_tokens": 0,
+        "phase": "prefill",
+    }
+    if precision is not None:
+        payload["precision"] = precision
+    deployment = DeploymentSpec.model_validate(payload)
     report = analyze(spec, chip, deployment)
     assert report.feasible, report.infeasibility
     phase = report.phases[0]
-    machine = machine_model(chip, DType.FP16)
+    machine = machine_model(chip, dtype)
     trace = build_trace(
         build_graph(spec, deployment, phase.phase),
         phase,
@@ -326,14 +320,59 @@ def test_network_listing_tags_stage_lines_for_the_debug_view() -> None:
     )
     listing = deployment_of(chip, machine, phase, trace, workload="encoder")
     check(listing, trace)
+    return listing, trace
+
+
+def test_network_listing_tags_stage_lines_for_the_debug_view() -> None:
+    """D42/D43: `--animate`'s code pane needs to know which line is which stage
+    for a network graph too, not just a lone matmul (D41). The loop is generic —
+    `for (i = 0; i < OPS; ++i) { load_B(op[i]); ...; store_C(op[i]); }` — never
+    unrolled per named operation (real names like "q_proj" live in the trace's
+    spans, not this text), so a tag can only ever mean "a load/store/compute is
+    happening right now", not "*this* operation's".
+
+    The two compute branches (`if (is_matrix(op[i])) ... else ...`, D27's
+    matrix/vector split) tag *distinct* stages, `exec_core`/`exec_vector`
+    (D43) — which one runs for a given `op[i]` is still something this generic
+    loop never names, but *which engine* is a real distinction the animation
+    can already tell from a span's lane, so each branch gets its own tag
+    rather than sharing one (D42's original choice, superseded once per-engine
+    animation stations existed to make use of the split).
+    """
+    listing, _trace = _network_listing("a100_80gb", DType.FP16)
 
     assert listing.kind == "operations"
     lines = listing.code.split("\n")
     by_stage = dict(listing.stage_lines)
-    assert set(by_stage) == {"load_b", "load_a", "exec", "store"}
-    assert len(by_stage["load_b"]) == len(by_stage["load_a"]) == len(by_stage["store"]) == 1
+    assert set(by_stage) == {"load_b", "load_a", "exec_core", "exec_vector", "store"}
+    assert all(len(idxs) == 1 for idxs in by_stage.values())
     assert "load_B(op[i]);" in lines[by_stage["load_b"][0]]
     assert "load_A(op[i]);" in lines[by_stage["load_a"][0]]
     assert "store_C(op[i]);" in lines[by_stage["store"][0]]
-    assert len(by_stage["exec"]) == 2, "both the matrix and vector compute branches tag exec"
-    assert all("op[i]);" in lines[i] for i in by_stage["exec"])
+    assert "op[i]);" in lines[by_stage["exec_core"][0]]
+    assert "op[i]);" in lines[by_stage["exec_vector"][0]]
+    assert "imc_write" not in listing.code, "a100 tensor cores hold no resident weight set (D30)"
+
+
+def test_network_listing_writes_the_weight_set_when_the_array_has_one() -> None:
+    """D43: the tiled matmul path has always shown `imc_write` (untimed, D40)
+    for a `weight_sets > 1` array; the network path never mentioned it at all,
+    even though the same D-IMC array needs its weight set written before *any*
+    operation's arithmetic, not just a lone matmul's. Unlike the tiled path,
+    a network trace carries no `b_dataflow` (`_network_deployment` never
+    receives one), so the added line makes no write-ahead/on-demand/persistent
+    placement claim — just that the write happens, honestly scoped to what a
+    generic, un-unrolled loop can actually say.
+    """
+    listing, _trace = _network_listing(
+        "metis_aipu", DType.INT8, {"weights": "int8", "activations": "int8", "kv_cache": "int8"}
+    )
+
+    assert "imc_write(op[i]);" in listing.code
+    # Untimed, like the tiled path's imc_write lines: no stage tag, no flow
+    # event exists to animate it against.
+    tagged_lines = {i for _tag, idxs in listing.stage_lines for i in idxs}
+    imc_write_line = next(
+        i for i, line in enumerate(listing.code.split("\n")) if "imc_write(op[i]);" in line
+    )
+    assert imc_write_line not in tagged_lines

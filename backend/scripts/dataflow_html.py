@@ -1,21 +1,25 @@
-"""Render a matmul's tile schedule as a self-contained, playable DRAM -> SRAM ->
-Accelerator flow animation.
+"""Render a matmul's or the ad-hoc encoder's schedule as a self-contained,
+playable resource-flow animation.
 
 The timeline (``timeline_html.py``) answers "where did the time go, on which
-resource" as a static, zoomable strip. This answers a different question — "what
-does the chosen A-strategy/B-dataflow actually look like happening" — by playing
-the same schedule (``bwz.analysis.pipeline.PipelineTrace``) back as motion between
-three fixed stations, sized from each tile's own bytes but not pixel-accurate to
-them (docs/CORRECTIONS.md D40).
+resource" as a static, zoomable strip, with one row per resource a chip profile
+declares — grey for what v1 doesn't cost (D20). This answers a different
+question — "what does that schedule actually look like happening" — by playing
+the same trace (``bwz.analysis.pipeline.PipelineTrace``) back as motion, using
+the *same* per-resource station list ``rows_for`` gives the timeline (D43), not
+a bespoke three-station shape: a chip with more declared memory levels or a
+second compute engine gets more stations, sized from each event's own bytes but
+not pixel-accurate to them (docs/CORRECTIONS.md D40).
 
 One file, no server, no download, no CDN — open it with ``file://``, same
 constraint as ``timeline_html.py``, same visual vocabulary (the ``--dram``/
-``--sram``/``--core`` colours, the streaming-A hatch) copied verbatim rather than
-imported, because each self-contained page has to stand completely alone.
+``--sram``/``--core``/``--vector`` colours, the streaming-A hatch) copied
+verbatim rather than imported, because each self-contained page has to stand
+completely alone.
 
-Matmul only: a station diagram assumes one tile-shaped stream of DRAM/SRAM/
-compute events, which is what a lone matmul's trace is and a whole network's
-per-operation trace is not (``docs/CLI.md`` §3 vs §4).
+Matmul or the ad-hoc encoder, not a full model: a station diagram assumes one
+tile- or operation-shaped stream of events, which a whole model's per-operation
+trace can run to hundreds of and this isn't built to usefully show (D42).
 """
 
 from __future__ import annotations
@@ -80,6 +84,10 @@ TEMPLATE = """<!doctype html>
     background: rgba(235, 104, 52, 0.14); border-left-color: var(--core); color: var(--ink);
     font-weight: 600;
   }}
+  .codeline.hot-vector {{
+    background: rgba(27, 175, 122, 0.14); border-left-color: var(--vector); color: var(--ink);
+    font-weight: 600;
+  }}
   .station {{ fill: var(--box); stroke: var(--grid); stroke-width: 1.5; }}
   .station-label {{ font-size: 13px; font-weight: 700; fill: var(--ink); }}
   .station-detail {{ font-size: 10.5px; fill: var(--ink-3); }}
@@ -107,13 +115,16 @@ TEMPLATE = """<!doctype html>
   {banner}
   {notes}
 </div>
-<p class="hint">Blocks are sized from each event's own bytes, log-compressed so the smallest and
-largest both stay visible — not to scale against each other or against the stations. Solid blocks
-are operand B, hatched blocks are operand A streaming (D31), hollow blocks are the result written
-back. The Accelerator station glows while it is executing; nothing "enters" it, since the byte/flop
-model does not distinguish that moment from the rest of a wave's arithmetic. The pseudo-C on the
-right lights up the line(s) executing right now — more than one at once when double buffering means
-more than one statement is truly concurrent (D41).</p>
+<p class="hint">Stations are the chip profile's own declared resources — one per memory level and
+compute unit, grey for the ones this model doesn't cost (hover a grey station for why, same as
+the timeline's rows, D20/D43). Blocks are sized from each event's own bytes, log-compressed so the
+smallest and largest both stay visible — not to scale against each other or against the stations.
+Solid blocks are operand B, hatched blocks are operand A streaming (D31), hollow blocks are the
+result written back. Each compute station glows independently while it executes — never "entering"
+it, since the byte/flop model has no event distinct from the arithmetic itself for that moment; two
+different engines never glow together, because operations run in strict sequence in this model
+(D5a). The pseudo-C on the right lights up the line(s) executing right now — more than one at once
+when double buffering means more than one statement is truly concurrent (D41).</p>
 
 <div id="controls">
   <button id="playBtn">Play</button>
@@ -139,7 +150,7 @@ more than one statement is truly concurrent (D41).</p>
 <script>
 const DATA = {data};
 
-const COLOUR = {{dram: "#2a78d6", sram: "#8a8983", core: "#eb6834"}};
+const COLOUR = {{dram: "#2a78d6", sram: "#8a8983", core: "#eb6834", vector: "#1baf7a"}};
 const svg = document.getElementById("chart");
 const tip = document.getElementById("tip");
 const wrap = document.getElementById("wrap");
@@ -162,15 +173,24 @@ function trim(v) {{
   return (Math.abs(v) >= 100 ? v.toFixed(0) : Math.abs(v) >= 10 ? v.toFixed(1) : v.toFixed(2));
 }}
 
-// Three fixed stations, left to right. Not to scale with each other or with the
-// blocks that move between them (the request this page answers: shapes and
-// strategy, not a floorplan).
-const W = {{dram: 0, sram: 1, acc: 2}};
-const STATION_W = 168, STATION_H = 74, LANE_Y = 130, MARGIN = 40;
-function stationX(which) {{
+// One station per DATA.stations entry (rows_for's own resource list, D43),
+// left to right, evenly spaced and shrunk to fit however many a chip
+// declares. Not to scale with each other or with the blocks that move
+// between them (the request this page answers: shapes and strategy, not a
+// floorplan).
+const STATION_H = 74, LANE_Y = 130, MARGIN = 40, GAP = 16;
+function stationLayout() {{
   const width = svg.clientWidth || svg.parentNode.clientWidth || 900;
-  const span = width - 2 * MARGIN - STATION_W;
-  return MARGIN + which * (span / 2);
+  const n = DATA.stations.length;
+  const sw = Math.max(90, Math.min(168, (width - 2 * MARGIN - (n - 1) * GAP) / n));
+  const totalW = n * sw + (n - 1) * GAP;
+  const left = MARGIN + Math.max(0, (width - 2 * MARGIN - totalW) / 2);
+  const positions = [];
+  for (let i = 0; i < n; i++) positions.push(left + i * (sw + GAP));
+  return {{sw, positions}};
+}}
+function stationIndexByLane(lane) {{
+  return DATA.stations.findIndex(s => s.lane === lane);
 }}
 
 // Log-compressed size: a straight linear map either vanishes the smallest event
@@ -189,11 +209,14 @@ function blockSize(bytes) {{
 
 // load_b/load_a move DRAM -> SRAM; store moves SRAM -> DRAM (the result stages
 // through the same port on its way out); hold sits at SRAM; exec moves nothing
-// and glows the Accelerator station instead (D40 — the model has no "entering
-// the array" event distinct from the arithmetic itself).
+// and glows its own engine's station instead (D40/D43 — the model has no
+// "entering the array" event distinct from the arithmetic itself). Named by
+// lane, not station index, so a chip's own grey intermediate levels (Metis:
+// LPDDR4x -> L2 -> L1 -> D-IMC) just sit on the path a block crosses without
+// being a stop -- an honest picture of "declared, not modelled" (D20).
 const PATH = {{
-  load_b: [W.dram, W.sram], load_a: [W.dram, W.sram],
-  store: [W.sram, W.dram], hold: [W.sram, W.sram],
+  load_b: ["dram", "sram"], load_a: ["dram", "sram"],
+  store: ["sram", "dram"], hold: ["sram", "sram"],
 }};
 
 function activeAt(t) {{
@@ -203,27 +226,29 @@ function activeAt(t) {{
 // ---- the debugger-style code pane -------------------------------------------
 const codepane = document.getElementById("codepane");
 const codeLineEls = Array.from(codepane.querySelectorAll(".codeline"));
-const STAGE_LANE = {{load_b: "dram", load_a: "dram", store: "dram", exec: "core"}};
 let lastHotLines = new Set();
 
 function updateCodeHighlight(events) {{
-  const hotStages = new Set(events.map(f => f.stage));
-  const hotLines = new Set();
-  hotStages.forEach(stage => (DATA.stage_lines[stage] || []).forEach(l => hotLines.add(l)));
+  // Every event already carries its real lane. Try a lane-specific tag first
+  // ("exec_core"/"exec_vector", D43 — the network path's matrix and vector
+  // branches get distinct lines); fall back to the plain stage name, which is
+  // what the tiled matmul path still uses unchanged (its exec line is always
+  // Lane.CORE, nothing to disambiguate).
+  const hotLineLane = new Map();
+  events.forEach(f => {{
+    const lines = DATA.stage_lines[f.stage + "_" + f.lane] || DATA.stage_lines[f.stage];
+    (lines || []).forEach(l => hotLineLane.set(l, f.lane));
+  }});
 
   codeLineEls.forEach((lineEl, i) => {{
-    lineEl.classList.remove("hot-dram", "hot-core");
-    if (!hotLines.has(i)) return;
-    for (const stage of hotStages) {{
-      if ((DATA.stage_lines[stage] || []).includes(i)) {{
-        lineEl.classList.add("hot-" + (STAGE_LANE[stage] || "dram"));
-        break;
-      }}
-    }}
+    lineEl.classList.remove("hot-dram", "hot-core", "hot-vector");
+    const lane = hotLineLane.get(i);
+    if (lane) lineEl.classList.add("hot-" + lane);
   }});
 
   // Only scroll when the hot set actually changed — every frame would fight a
   // reader who scrolled up to read the header/#defines.
+  const hotLines = new Set(hotLineLane.keys());
   const changed =
     hotLines.size !== lastHotLines.size || [...hotLines].some(l => !lastHotLines.has(l));
   if (changed && hotLines.size) {{
@@ -256,43 +281,61 @@ function draw(t) {{
   defs.appendChild(pat);
   svg.appendChild(defs);
 
-  svg.appendChild(el("line", {{
-    class: "lane-track", x1: stationX(W.dram) + STATION_W / 2, x2: stationX(W.acc) + STATION_W / 2,
-    y1: LANE_Y, y2: LANE_Y,
-  }}));
-
-  const stations = [
-    ["dram", DATA.stations.dram], ["sram", DATA.stations.sram], ["acc", DATA.stations.accelerator],
-  ];
-  stations.forEach(([key, info], i) => {{
-    const x0 = stationX(i);
-    svg.appendChild(el("rect", {{
-      class: "station", x: x0, y: LANE_Y - STATION_H / 2,
-      width: STATION_W, height: STATION_H, rx: 8,
-      style: "stroke: var(--" + key + ")",
+  const layout = stationLayout();
+  const dramIndex = stationIndexByLane("dram");
+  const lastIndex = DATA.stations.length - 1;
+  if (dramIndex >= 0) {{
+    // Spans the whole declared chain, DRAM to the last compute station, so
+    // grey intermediate levels sit visibly on the same track a block crosses
+    // without stopping there (D20/D43).
+    svg.appendChild(el("line", {{
+      class: "lane-track",
+      x1: layout.positions[dramIndex] + layout.sw / 2,
+      x2: layout.positions[lastIndex] + layout.sw / 2,
+      y1: LANE_Y, y2: LANE_Y,
     }}));
+  }}
+
+  const events = activeAt(t);
+
+  DATA.stations.forEach((station, i) => {{
+    const x0 = layout.positions[i];
+    const cssVar = station.lane ? "var(--" + station.lane + ")" : "var(--idle)";
+    const rect = el("rect", {{
+      class: "station", x: x0, y: LANE_Y - STATION_H / 2,
+      width: layout.sw, height: STATION_H, rx: 8,
+      style: "stroke:" + cssVar,
+    }});
+    if (station.note) rect.dataset.tip = station.name + "\\n" + station.note;
+    svg.appendChild(rect);
     svg.appendChild(el("text", {{
-      class: "station-label", x: x0 + STATION_W / 2, y: LANE_Y - 8, "text-anchor": "middle",
-      style: "fill: var(--" + key + ")",
-    }}, info.name));
+      class: "station-label", x: x0 + layout.sw / 2, y: LANE_Y - 8, "text-anchor": "middle",
+      style: "fill:" + cssVar,
+    }}, station.name));
     svg.appendChild(el("text", {{
-      class: "station-detail", x: x0 + STATION_W / 2, y: LANE_Y + 10, "text-anchor": "middle",
-    }}, info.detail));
-    if (key === "acc") {{
-      const active = activeAt(t).some(f => f.stage === "exec");
+      class: "station-detail", x: x0 + layout.sw / 2, y: LANE_Y + 10, "text-anchor": "middle",
+    }}, station.detail));
+    // Every compute station glows independently on its own matching-lane exec
+    // event, never together — operations run in strict sequence in this
+    // model (D5a), so at most one engine is ever really active at once.
+    if (station.lane === "core" || station.lane === "vector") {{
+      const active = events.some(f => f.stage === "exec" && f.lane === station.lane);
       const glow = el("rect", {{
-        class: "glow", x: x0 - 4, y: LANE_Y - STATION_H / 2 - 4, width: STATION_W + 8,
-        height: STATION_H + 8, rx: 10, style: "opacity:" + (active ? 0.9 : 0),
+        class: "glow", x: x0 - 4, y: LANE_Y - STATION_H / 2 - 4, width: layout.sw + 8,
+        height: STATION_H + 8, rx: 10,
+        style: "opacity:" + (active ? 0.9 : 0) + "; stroke:" + cssVar,
       }});
       svg.appendChild(glow);
     }}
   }});
 
-  const events = activeAt(t);
   events.forEach((f, i) => {{
-    if (f.stage === "exec") return;  // glow only, drawn on the station above
-    const [fromW, toW] = PATH[f.stage] || [W.sram, W.sram];
-    const x0c = stationX(fromW) + STATION_W / 2, x1c = stationX(toW) + STATION_W / 2;
+    if (f.stage === "exec") return;  // glow only, drawn on the stations above
+    const [fromLane, toLane] = PATH[f.stage] || ["sram", "sram"];
+    const fromIndex = stationIndexByLane(fromLane), toIndex = stationIndexByLane(toLane);
+    if (fromIndex < 0 || toIndex < 0) return;
+    const x0c = layout.positions[fromIndex] + layout.sw / 2;
+    const x1c = layout.positions[toIndex] + layout.sw / 2;
     const span = Math.max(f.end - f.start, 1e-15);
     const progress = Math.max(0, Math.min(1, (t - f.start) / span));
     // hold has no travel; everything else eases toward its destination.
@@ -407,7 +450,7 @@ def render(
     total_s: float,
     reported_latency_s: float,
     fill_drain_s: float,
-    stations: dict[str, dict[str, str]],
+    stations: list[dict[str, object]],
     a_strategy: str | None,
     b_dataflow: str | None,
     notes: list[str],

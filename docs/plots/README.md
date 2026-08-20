@@ -69,8 +69,11 @@ Zoom is x-only: the y axis is a list of resources, not a scale.
 ## Playing the flow animation
 
 `--animate` writes a second, self-contained page — same one-file, no-CDN constraint — that plays
-the same tile schedule the timeline draws, as motion between three fixed stations (DRAM, SRAM,
-Accelerator, D5a's machine model) instead of a static strip of bars:
+the same schedule the timeline draws, as motion between stations instead of a static strip of bars.
+Stations are `rows_for`'s own resource list (D43) — the same one the timeline draws as rows, one per
+declared memory level and compute unit, grey for what v1 doesn't cost (D20) — not a fixed shape:
+Metis gets 6 (LPDDR4x, L2, L1, D-IMC, `d_imc`, `dpu`), A100 gets 5 (HBM2e, L2, L1, `tensor_core`,
+`cuda_core`):
 
 ```bash
 uv run python scripts/plot_pipeline.py --chip metis_aipu --matmul 2048,2048,2048 \
@@ -80,7 +83,7 @@ xdg-open /tmp/anim/animate-metis_aipu-int8.html
 
 Matmul or `--encoder`, and opt-in — it never runs as part of `make plots`. `--model`/`--compare`
 are still rejected: a full model's per-operation trace can coalesce hundreds of operations, well
-past what a three-station diagram or a debug pane can usefully show (D42).
+past what a resource-station diagram or a debug pane can usefully show (D42).
 
 **Not to scale, deliberately.** Block size is a log-compressed function of each event's own bytes,
 so the smallest and largest tiles in one trace both stay visible — reading a size off the page as a
@@ -91,16 +94,21 @@ never the other way around.
 
 - solid blocks are operand B, hatched blocks are operand A streaming (`--a-strategy stream`, D31),
   hollow blocks are the result written back
-- the Accelerator station **glows** while executing; nothing visibly "enters" it, because the
-  byte/flop model has no event distinct from the arithmetic itself for that moment
+- grey stations (declared, not modelled — same rule as the timeline's grey rows, D20) hover to show
+  why, never glow, and are never a motion target — a block travelling DRAM->SRAM through Metis's
+  grey L2/L1 just crosses their position without stopping there
+- every station with a lane **glows independently** while its engine executes; nothing visibly
+  "enters" it, because the byte/flop model has no event distinct from the arithmetic itself for that
+  moment — and two engines never glow together, because operations run in strict sequence in this
+  model (D5a/D43)
 - `--a-strategy` changes what you see directly — `stream` trickles many small hatched blocks,
   `stage`/`whole` concentrate them at k-slice boundaries — because A's schedule already differs by
   strategy (D33/D31)
 - `--b-dataflow on-demand` now shows a real gap between a load starting to move and the previous
-  wave's glow ending; `persistent` plays identically to `write-ahead`, and the page says so, because
-  that is what the schedule actually does in one pass (D40) — a future extension animating
-  `--iterations` repeats back to back is the only way `persistent`'s real advantage (its 2nd+ pass B
-  load genuinely vanishing) would show up in motion
+  wave's compute station glow ending; `persistent` plays identically to `write-ahead`, and the page
+  says so, because that is what the schedule actually does in one pass (D40) — a future extension
+  animating `--iterations` repeats back to back is the only way `persistent`'s real advantage (its
+  2nd+ pass B load genuinely vanishing) would show up in motion
 
 **A pseudo-C pane plays alongside the diagram, debugger-style (D41).** The same loop nest the
 timeline page's "how it is deployed on the chip" section shows — now honestly double-buffered, with
@@ -108,20 +116,22 @@ a real wave-0 prologue and a steady-state loop that prefetches wave *w+1* beside
 compute, instead of reading as one serial block — lights up the line(s) executing at the current
 playback time. More than one line highlights at once exactly when double buffering means more than
 one statement is truly concurrent: watch for the `load_B` line and the `mac`/`feed` line lighting up
-together while a block is mid-flight toward the Accelerator station and another is sliding in from
-DRAM at the same time. `imc_write` lines are never highlighted — no event in this model currently
-times that statement (D40), so lighting it up would be decoration, not data.
+together while a block is mid-flight toward a compute station and another is sliding in from DRAM at
+the same time. `imc_write` lines are never highlighted — no event in this model currently times that
+statement (D40), so lighting it up would be decoration, not data — though the line itself is now
+shown for `weight_sets > 1` chips on both the tiled and network paths (D43).
 
 **`--encoder`'s code pane is honest about a real limit, not a smaller version of the matmul one
-(D42).** A network's loop is generic — `for (i = 0; i < OPS; ++i) { load_B(op[i]); ...;
+(D42/D43).** A network's loop is generic — `for (i = 0; i < OPS; ++i) { load_B(op[i]); ...;
 store_C(op[i]); }` — never unrolled per named operation, so the pane can show "a load is happening"
 but not "q_proj's load is happening"; the blocks and the hover text *do* carry the real operation
 name (`Span.label`), the pseudo-C just doesn't. Cross-operation overlap is zero in this model (D5a:
-operations run in strict sequence) — the highlight only ever lights up two lines together within
-one operation's own load/compute, e.g. a norm's `load_A`/`exec` overlapping because that operation's
-own schedule was double buffered, never two different operations' lines at once. Both compute
-branches (matrix array vs. vector unit, D27) tag the same `exec` line, since which one runs for a
-given operation is exactly what this generic loop never names either.
+operations run in strict sequence) — the highlight only ever lights up lines together within one
+operation's own load/compute, e.g. a norm's `load_A`/`exec` overlapping because that operation's own
+schedule was double buffered, never two different operations' lines at once. The two compute
+branches (matrix array vs. vector unit, D27) tag *distinct* lines, `exec_core`/`exec_vector` (D43) —
+so the matrix and vector stations now glow, and their code lines highlight, independently, matching
+which engine a given operation actually ran on rather than lighting both every time.
 
 ## Reading the roofline
 

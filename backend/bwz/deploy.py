@@ -514,20 +514,35 @@ def _network_deployment(
     # "q_proj") live in the trace and the animation's blocks/hover text, not
     # here — one static "load_B(op[i])" line stands for every operation's load,
     # so tagging it "load_b" highlights it whenever *any* op is loading, not a
-    # specific one. Both compute branches tag "exec" for the same reason: which
-    # one runs depends on op[i], which this text never names (D42).
+    # specific one. The two compute branches get distinct tags (exec_core,
+    # exec_vector, D43) so the debug view can glow the matrix and vector
+    # stations independently — which one runs depends on op[i], which this
+    # text never names, but *which engine* is a real, known distinction the
+    # trace already carries per span (D42's original single "exec" tag
+    # couldn't make that distinction; splitting it is what let per-engine
+    # animation stations exist at all).
+    imc_write_line: tuple[str, str | None] = (
+        "    imc_write(op[i]);                /* the array's weight set is written before "
+        "this op's arithmetic; no per-op write-ahead/on-demand/persistent placement is "
+        "modelled for a network trace (D43) */",
+        None,
+    )
     body: list[tuple[str, str | None]] = [
         ("for (int i = 0; i < OPS; ++i) {", None),
         ("    dispatch(op[i]);                  /* hatched bar, if the op costs one */", None),
         ("", None),
         ("    load_B(op[i]);                    /* weights   — solid bar   */", "load_b"),
+        *([imc_write_line] if unit.weight_sets > 1 else []),
         ("    load_A(op[i]);                    /* activations — hatched bar */", "load_a"),
         ("", None),
         ("    if (is_matrix(op[i]))", None),
         ("        parallel_for (int u = 0; u < UNITS; ++u)", None),
-        (f"            {unit.name}(u, op[i]);", "exec"),
+        (f"            {unit.name}(u, op[i]);", "exec_core"),
         ("    else", None),
-        (f"        {machine.vector_unit.name}(op[i]);   /* norms, activations (D27) */", "exec"),
+        (
+            f"        {machine.vector_unit.name}(op[i]);   /* norms, activations (D27) */",
+            "exec_vector",
+        ),
         ("", None),
         (
             "    store_C(op[i]);                   /* whatever no later op reads — hollow bar */",

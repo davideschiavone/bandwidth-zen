@@ -361,29 +361,6 @@ def _boxes(panels: list[Panel]) -> list[Box]:
     return out
 
 
-def _stations_for(chip: HardwareSpec, dtype: DType) -> dict[str, dict[str, str]]:
-    """The three fixed stations ``--animate`` draws — not a reuse of ``rows_for``,
-    which enumerates every declared resource including grey unused ones. These
-    are conceptual stations (D5a's three-element machine), not a per-profile
-    resource list.
-    """
-    machine = machine_model(chip, dtype)
-    return {
-        "dram": {
-            "name": chip.dram.name,
-            "detail": format_bandwidth(chip.dram.bandwidth_bytes_per_s),
-        },
-        "sram": {
-            "name": "on-chip",
-            "detail": f"{format_bytes(chip.on_chip_capacity_bytes)} capacity",
-        },
-        "accelerator": {
-            "name": machine.unit.name,
-            "detail": f"{format_quantity(machine.peak_flops_per_s, 'OP/s')} peak",
-        },
-    }
-
-
 @dataclass(frozen=True)
 class Roof:
     """One chip's ceilings and the point this workload sits at under them."""
@@ -689,7 +666,7 @@ def _flow_spans(trace: PipelineTrace) -> list[dict[str, object]]:
 
 def write_animation_html(panel: Panel, command: str, out: Path) -> None:
     """One chip's schedule as a self-contained DRAM -> SRAM -> Accelerator flow
-    animation (docs/CLI.md §3, docs/CORRECTIONS.md D40/D42).
+    animation (docs/CLI.md §3, docs/CORRECTIONS.md D40/D42/D43).
 
     Matmul or the ad-hoc encoder — the caller never reaches this with a
     `--model` workload (`_reject_flags_for_the_wrong_workload` refuses that
@@ -697,6 +674,11 @@ def write_animation_html(panel: Panel, command: str, out: Path) -> None:
     encoder's per-operation trace has none — it is a sequence of named
     operations, not one A/B dataflow strategy to name (D5a) — so every
     dataflow-specific argument below is threaded through only when there is one.
+
+    Stations are ``rows_for``'s own resource list (D43) — the same one the
+    timeline draws, grey for what v1 declares but does not cost (D20) — not a
+    bespoke three-station shape, so a chip with more declared memory levels or
+    a second compute engine gets more stations, not a collapsed picture of one.
     """
     work = panel.work
     dataflow = work.dataflow
@@ -715,6 +697,15 @@ def write_animation_html(panel: Panel, command: str, out: Path) -> None:
         ),
     )
     check_deployment(listing, work.trace)
+    stations: list[dict[str, object]] = [
+        {
+            "name": row.title,
+            "detail": row.detail,
+            "note": row.note,
+            "lane": row.lane.value if row.lane else None,
+        }
+        for row in rows_for(panel.chip, panel.dtype)
+    ]
     page = render_animation(
         title=_title([panel]),
         subtitle=_subtitle([panel]),
@@ -727,7 +718,7 @@ def write_animation_html(panel: Panel, command: str, out: Path) -> None:
         total_s=work.trace.total_s,
         reported_latency_s=work.trace.reported_latency_s,
         fill_drain_s=work.trace.fill_drain_s,
-        stations=_stations_for(panel.chip, panel.dtype),
+        stations=stations,
         a_strategy=dataflow.a_strategy.value if dataflow is not None else None,
         b_dataflow=dataflow.b_dataflow.value if dataflow is not None else None,
         notes=list(dataflow.notes) if dataflow is not None else [],

@@ -1555,3 +1555,84 @@ spans land on both `core` and `vector` lanes as predicted, and a real playback m
 assumed. One new golden test (`test_network_listing_tags_stage_lines_for_the_debug_view`,
 `tests/unit/test_deploy.py`) pins the tagging on the encoder-layer kernel fixture; the pre-existing
 `test_a_network_gets_a_sequence_listing_rather_than_a_tile_nest` passes unmodified.
+
+## D43 — The animation draws every declared resource, not three fixed stations; the array's weight write gets text on the network path too (2026-08-20)
+
+A user question ("Metis needs to move data from SRAM to the IMC — I don't see this in the
+animation... and doesn't `d_imc` only do matmul, where's the rest of the encoder's code?") led to
+two findings, one about physics, one about the animation's own fidelity to what the timeline
+already does.
+
+**On-chip movement is uncosted for every chip, not an NVIDIA-specific exemption.** D5a/D5b already
+establish this — the flat v1 machine has no on-chip bandwidth term for *any* chip, a deliberate,
+user-approved, quantified simplification, not a consequence of NVIDIA's tensor cores having
+"implicit" caching. Checking the actual profile data found a real asymmetry worth recording: A100's
+L1/L2 `bandwidth_bytes_per_s` fields are self-labelled "order-of-magnitude estimates; NVIDIA
+publishes neither" (`profiles/chips/a100_80gb.yaml`) — not proof-grade by this project's own
+standard. Metis's profile is more specific: its `estimates.memory` note *derives* an L1→D-IMC
+activation-feed figure (204.8 GB/s) directly from the paper's own stated architecture ("each cycle
+processing 512 single bit activations through the input feeder from the L1 memory"), and a
+D-IMC operand-delivery rate (838 TB/s) from the array's own MAC geometry — closer to real proof
+than anything NVIDIA has here, the opposite of what the existing `imc_write` asymmetry (Metis gets
+text, NVIDIA doesn't need it) might suggest. Not acted on here — D5b's own quantified margin
+analysis (3.8×–260× headroom before the omission would matter) was run against `chip_a`/`chip_b`
+before Metis joined the roster and has never been redone for Metis specifically, so whether costing
+this would actually change anything for Metis is still an open question, not one this entry closes.
+Trigger to revisit stays D5b's own: a published SRAM organisation or a measured figure — which
+Metis's paper-derived numbers arguably already clear and NVIDIA's do not.
+
+**The animation's own station list didn't match the timeline's.** `rows_for` (the timeline's row
+list) already draws one row per declared memory level and compute unit, grey for what v1 doesn't
+cost, with the reason (D20). `_stations_for` (the animation's, until this entry) hardcoded exactly
+three conceptual stations regardless of what a chip declares — its own docstring said so. Verified
+directly rather than assumed: under `rows_for`'s existing deepest/shallowest/matrix/vector/other
+rule, **Metis gets 6 stations** (LPDDR4x, L2, L1, D-IMC, `d_imc`, `dpu`) and **A100 gets 5** (HBM2e,
+L2, L1, `tensor_core`, `cuda_core`) — confirming `cuda_core` really is A100's `vector_unit`
+(`machine_model(...).vector_unit.name == "cuda_core"`), catching a wrong claim from first-pass
+research before it reached the design. Both chips need a second, distinct compute station — not a
+Metis-specific gap, matching what the user flagged.
+
+**Fix.** `_stations_for` is gone; `write_animation_html` calls `rows_for` directly, the same
+function the timeline already uses, converting each `Row` into a station dict (`name`, `detail`,
+`note`, `lane`). The animation's station layout is now dynamic (`stationLayout()` spaces N stations
+evenly, shrinking width with a floor rather than assuming 3), stations are found by **lane**, not a
+fixed index, and grey stations (`lane === null`) render `var(--idle)`-styled with no glow and no
+motion target, their hover tip showing `row.note` (e.g. *"declared, not modelled — the roofline is
+flat (D5)"*) — the same "grey with the reason" convention D20 established for the timeline, now
+shared rather than reinvented. **Every station with a lane glows independently** on its own
+matching-lane `exec` event, replacing the single hardcoded "accelerator glows on any exec" — this
+is the direct fix for "where's the dpu work": the vector station now visibly glows only when a
+vector-lane operation is genuinely running, never together with the matrix station (verified: 0
+moments of simultaneous core+vector glow in a real encoder trace, matching D5a's strict-sequence
+rule for a network).
+
+Two real, latent JS bugs were found and fixed as a side effect of keying station colour by lane
+instead of a station "key" string: the accelerator's stroke/label colour referenced `var(--acc)`,
+a CSS variable that was never defined (only `--dram`/`--sram`/`--core`/`--vector`/`--idle` exist);
+and the block-fill `COLOUR` map had no `"vector"` entry, so any `Lane.VECTOR` flow event (only
+possible since D42 added `--encoder` support) silently rendered grey instead of green. Neither was
+ever exercised by a test, since nothing checked animation SVG output directly.
+
+**The code pane's `"exec"` tag needed the same precision the stations just gained.**
+`_network_deployment` tagged both the matrix-branch and vector-branch lines with plain `"exec"`
+(D42's deliberate simplification, made before per-engine stations existed to use a finer split) —
+both would light up together even when only one station glows. Split into `"exec_core"`/
+`"exec_vector"`; the tiled matmul path is untouched (its `exec` line is always `Lane.CORE`, nothing
+to disambiguate, and touching it would only churn its own passing tests for no benefit). The JS
+lookup tries `stage + "_" + lane` first, falling back to the plain stage name — so the tiled path's
+still-plain `"exec"` keeps resolving with zero changes there. This is D42's stated reasoning
+partially superseded, recorded here rather than editing D42 (append-only).
+
+**The network path never mentioned `imc_write` at all**, even textually — unlike the tiled matmul
+path, which has shown it (untimed, D40) for `weight_sets > 1` chips since it existed. A real,
+additional inconsistency, not just "less detailed": the same D-IMC array needs its weight set
+written before *any* operation's arithmetic, not only a lone matmul's. Added one unconditional,
+untagged `imc_write(op[i]);` line when `unit.weight_sets > 1`, worded to claim nothing about
+placement — `_network_deployment` never receives a `b_dataflow` at all (a network trace has no
+per-operation dataflow strategy to name, D5a), so it cannot honestly say write-ahead, on-demand, or
+persistent the way the tiled path's three placements do.
+
+Two new/updated golden tests in `test_deploy.py`: the D42 stage-lines test updated for the
+`exec_core`/`exec_vector` split (23 total tests, all green, nothing else in the file touched); a
+new test confirming `imc_write` appears for Metis and is absent for A100, mirroring the tiled
+path's own `test_an_imc_array_gets_weight_sets_and_a_write_and_a_tensor_core_does_not`.
