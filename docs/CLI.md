@@ -477,15 +477,25 @@ uv run python scripts/plot_pipeline.py --chip h100_sxm --matmul 8192,8192,8192
 (repeatable), `--tokens`, `--out`.
 `plot_pipeline.py` draws one of three things, and the flags mirror the report commands:
 
-| what | flags |
-|---|---|
-| a matmul (default) | `--matmul M,N,K`, plus the dataflow strategy flags of §2.5 |
-| a profile | `--model ID`, `--tokens/-S` — one page per phase |
-| an ad-hoc single-layer encoder | `--encoder --hidden --heads --head-dim --ffn --vocab --tokens/-S` |
+| what | flags | if you pass none of them |
+|---|---|---|
+| a matmul (default) | `--matmul M,N,K`, plus the dataflow strategy flags of §2.5 | `4096,4096,4096`, `stage`/`write-ahead`/1 iteration — the same defaults as `bwz matmul` |
+| a profile | `--model ID`, `--tokens/-S` — one page per phase | no default `--model`; `-S` defaults to **512** |
+| an ad-hoc single-layer encoder | `--encoder --hidden --heads --head-dim --ffn --vocab --tokens/-S` | `--hidden 8 --heads 2 --ffn 16 --vocab 16`, `-S` **512** |
 
-plus `--chip` (repeatable), `--compare`, `--weights`, `--ideal`, `--steps` (default 256 — the only
-resolution knob; the page zooms, so there is no separate static-figure register to keep legible),
-`--out`, and `--animate` — matmul or `--encoder`, opt-in, `--model`/`--compare` still rejected;
+**The encoder's `-S` default does not match `bwz encoder-layer`'s own default.** The report
+command defaults to `-S 4` (`bwz encoder-layer`'s whole point is a shape small enough to count by
+hand, §3.1); this script defaults to `-S 512`, the same default every `--model`/`--encoder` figure
+uses, because a 4-token trace has almost nothing to draw a picture of. Pass `-S 4` explicitly if you
+want the figure to match the hand-countable numbers §3 prints.
+
+Plus `--chip` (repeatable; **defaults to `a100_80gb` and `chip_a` together** — two pages — when
+omitted entirely, not one), `--compare`, `--weights` (defaults **per chip**: the first it supports
+of fp16, int8, bf16, fp32, in that order — so two chips can default to two different precisions,
+which is exactly why `--compare` refuses to run without picking one shared dtype, §6.1), `--ideal`,
+`--steps` (default 256 — the only resolution knob; the page zooms, so there is no separate
+static-figure register to keep legible), `--out` (default `../docs/plots`, i.e. relative to
+`backend/`), and `--animate` — matmul or `--encoder`, opt-in, `--model`/`--compare` still rejected;
 writes a second self-contained page playing the same schedule back as DRAM -> SRAM -> Accelerator
 motion instead of a static strip (`docs/plots/README.md` "Playing the flow animation", D40, D42).
 
