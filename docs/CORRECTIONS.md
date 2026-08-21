@@ -1666,3 +1666,33 @@ encoder-layer`'s existing `except (SpecLoadError, ValidationError)` block gained
 catch it cleanly; `plot_pipeline.py`'s `build_encoder()` (which has no typer-style handling to
 inherit) converts it to `SystemExit`, the same idiom `build_matmul()` already uses for a
 user-facing construction failure.
+
+## D45 — `--ffn`'s default follows `--dmodel`, but only when `--dmodel` was actually typed (2026-08-21)
+
+User request (2026-08-21): make `--ffn`'s default `4 x dmodel`, matching the standard transformer
+FFN-expansion ratio, instead of the fixed `16` it inherited from `single_layer_encoder_toy.yaml`'s
+own toy numbers.
+
+**Why not unconditionally `4 x dmodel`.** `bwz encoder-layer`'s bare invocation (no flags beyond
+`--chip`) is the hand-countable example §3.1 and D24 pin: `dmodel=8, ffn=16` producing exactly 664
+parameters / 5280 operations, quoted in `docs/CLI.md`, `README.md`, and the profile's own header.
+`4 x 8 = 32`, not 16 — so making the rule unconditional would silently move the one number this
+whole example exists to keep fixed, breaking every doc and test that quotes it. Raised via
+`AskUserQuestion` rather than picked silently; user chose **conditional on `--dmodel` being
+explicit** over recomputing the golden numbers.
+
+**The rule:** `--ffn` defaults to `16` when `--dmodel` is also left at its own default (8) — the
+bare command is unchanged, byte for byte. The moment `--dmodel` is passed explicitly, an omitted
+`--ffn` becomes `4 x --dmodel` instead. An explicit `--ffn` always wins over either default. This
+needed a "was `dmodel` actually typed" boolean, not just "what did `dmodel` resolve to" — the two
+CLI layers implement it with the same `None`-sentinel pattern already used elsewhere for
+order-dependent defaults: `bwz/cli.py`'s `encoder_layer` command takes `dmodel: int | None` and
+`ffn: int | None` (`typer.Option(None, ...)`), resolves `dmodel_given = dmodel is not None` before
+filling in `dmodel`'s own default, then fills `ffn` conditionally; `plot_pipeline.py`'s
+`_reject_flags_for_the_wrong_workload` does the equivalent with `argparse`'s existing
+`default=None` fields. Both call sites share the identical three-line resolution shape.
+
+Verified unchanged: `bwz encoder-layer --chip a100_80gb --ideal` still prints 664 params / 5280 ops.
+Verified new behaviour: `--dmodel 32` alone gives `ffn=128` (4x32, 8,192 FFN params); `--dmodel 32
+--ffn 64` gives `ffn=64`, the explicit value, not 128. `plot_pipeline.py --encoder --dmodel 32`
+mirrors the same `ffn=128` in its generated timeline title and pseudo-C.

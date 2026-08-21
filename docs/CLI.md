@@ -317,7 +317,7 @@ For anything deeper, load a profile and use `bwz run` (§4).
 | `-c`, `--chip` | chip profile id or path (required) |
 | `-d`, `--dmodel` | model width (default 8) |
 | `--nheads` | attention heads (default 2) — `dmodel` must divide evenly by this; `head_dim` is always `dmodel // nheads`, never a separate input, and a non-divisible pair is rejected rather than floored |
-| `--ffn` | FFN inner width (default 16) |
+| `--ffn` | FFN inner width (default 16, or 4x `--dmodel` when `--dmodel` is explicitly set — D45) |
 | `--vocab` | vocabulary size (default 16) |
 | `-S`, `--tokens` | sequence length (default 4) |
 | `-b`, `--batch` | batch size (default 1) |
@@ -481,6 +481,10 @@ uv run python scripts/plot_pipeline.py --chip h100_sxm --matmul 8192,8192,8192
 | a matmul (default) | `--matmul M,N,K`, plus the dataflow strategy flags of §2.5 | `4096,4096,4096`, `stage`/`write-ahead`/1 iteration — the same defaults as `bwz matmul` |
 | a profile | `--model ID`, `--tokens/-S` — one page per phase | no default `--model`; `-S` defaults to **512** |
 | an ad-hoc single-layer encoder | `--encoder --dmodel --nheads --ffn --vocab --tokens/-S` | `--dmodel 8 --nheads 2 --ffn 16 --vocab 16`, `-S` **512** |
+
+**`--ffn`'s default is conditional, same as `bwz encoder-layer`'s (D45): 16 only when `--dmodel`
+is also left at its default; pass `--dmodel` explicitly with no `--ffn` and it becomes `4 x --dmodel`
+instead, so `--dmodel 4096` alone gives `--ffn 16384`, not 16. An explicit `--ffn` always wins.
 
 **The encoder's `-S` default does not match `bwz encoder-layer`'s own default.** The report
 command defaults to `-S 4` (`bwz encoder-layer`'s whole point is a shape small enough to count by

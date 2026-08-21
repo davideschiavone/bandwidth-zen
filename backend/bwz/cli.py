@@ -764,8 +764,8 @@ def encoder_layer(
     chip: str = typer.Option(
         ..., "--chip", "-c", help="Chip profile id or path", rich_help_panel=PANEL_SHAPE
     ),
-    dmodel: int = typer.Option(
-        8, "--dmodel", "-d", help="Model width", rich_help_panel=PANEL_SHAPE
+    dmodel: int | None = typer.Option(
+        None, "--dmodel", "-d", help="Model width (default 8)", rich_help_panel=PANEL_SHAPE
     ),
     nheads: int = typer.Option(
         2,
@@ -773,7 +773,12 @@ def encoder_layer(
         help="Attention heads; dmodel must divide evenly by this",
         rich_help_panel=PANEL_SHAPE,
     ),
-    ffn: int = typer.Option(16, "--ffn", help="FFN inner width", rich_help_panel=PANEL_SHAPE),
+    ffn: int | None = typer.Option(
+        None,
+        "--ffn",
+        help="FFN inner width (default 16, or 4x dmodel when --dmodel is set)",
+        rich_help_panel=PANEL_SHAPE,
+    ),
     vocab: int = typer.Option(16, "--vocab", help="Vocabulary size", rich_help_panel=PANEL_SHAPE),
     tokens: int = typer.Option(
         4, "--tokens", "-S", help="Sequence length", rich_help_panel=PANEL_SHAPE
@@ -820,6 +825,15 @@ def encoder_layer(
     encoder has no later step to reuse a cache for, and what sits on top of it is
     task-specific (docs/CORRECTIONS.md D24).
     """
+    # ffn's own default depends on whether dmodel was actually typed, not just
+    # on dmodel's resolved value: the bare command (no flags) has to keep
+    # reproducing 664 params/5280 ops, the hand-countable example every doc
+    # quotes (D24) — so ffn only follows the 4x-dmodel convention when dmodel
+    # was itself an explicit choice (D45).
+    dmodel_given = dmodel is not None
+    dmodel = 8 if dmodel is None else dmodel
+    if ffn is None:
+        ffn = 4 * dmodel if dmodel_given else 16
     try:
         spec = encoder_layer_kernel(
             dmodel=dmodel,

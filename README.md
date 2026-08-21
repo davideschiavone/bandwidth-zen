@@ -257,6 +257,11 @@ $ uv run bwz encoder-layer --chip a100_80gb --ideal --dmodel 100 --nheads 6
 bwz: dmodel (100) is not divisible by nheads (6); choose a head count dividing 100 evenly
 ```
 
+`--ffn`'s own default is conditional: 16 only when `--dmodel` is also left at its default of 8;
+pass `--dmodel` explicitly with no `--ffn` and it becomes `4 x --dmodel` instead (an explicit
+`--ffn` always overrides either way) — the bare command still has to print the hand-countable
+664 params / 5280 ops above, so the 4x convention only kicks in once `--dmodel` was itself a choice.
+
 `--dmodel -d` · `--nheads` · `--ffn` · `--vocab` · `-S/--tokens` · `-b/--batch` ·
 `--ffn-type` · `--norm` · `--tie/--untie` · `--weights` · `--ideal` · `--show-ops` · `--json`.
 

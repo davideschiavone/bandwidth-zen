@@ -1112,7 +1112,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Attention heads (default 2); dmodel must divide evenly by this "
         "-- head_dim is always dmodel // nheads, never set separately",
     )
-    shape.add_argument("--ffn", type=int, default=None, help="FFN inner width (default 16)")
+    shape.add_argument(
+        "--ffn",
+        type=int,
+        default=None,
+        help="FFN inner width (default 16, or 4x --dmodel when --dmodel is set)",
+    )
     shape.add_argument("--vocab", type=int, default=None, help="Vocabulary (default 16)")
     shape.add_argument(
         "--tokens",
@@ -1204,9 +1209,16 @@ def _reject_flags_for_the_wrong_workload(
         return [f"--{name.replace('_', '-')}" for name, value in flags.items() if value is not None]
 
     if args.encoder:
+        # ffn's default depends on whether dmodel was actually typed, not on
+        # its resolved value: the bare --encoder invocation has to keep
+        # matching bwz encoder-layer's own bare defaults, hand-countable at
+        # 664 params/5280 ops (D24) — the 4x-dmodel convention only applies
+        # once dmodel was itself an explicit choice (D45).
+        dmodel_given = args.dmodel is not None
         args.dmodel = 8 if args.dmodel is None else args.dmodel
         args.nheads = 2 if args.nheads is None else args.nheads
-        args.ffn = 16 if args.ffn is None else args.ffn
+        if args.ffn is None:
+            args.ffn = 4 * args.dmodel if dmodel_given else 16
         args.vocab = 16 if args.vocab is None else args.vocab
     else:
         bad = given(
