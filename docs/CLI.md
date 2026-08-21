@@ -315,9 +315,8 @@ For anything deeper, load a profile and use `bwz run` (§4).
 | Flag | Meaning |
 |---|---|
 | `-c`, `--chip` | chip profile id or path (required) |
-| `-d`, `--hidden` | model width (default 8) |
-| `--heads` | attention heads (default 2) |
-| `--head-dim` | defaults to `hidden // heads` |
+| `-d`, `--dmodel` | model width (default 8) |
+| `--nheads` | attention heads (default 2) — `dmodel` must divide evenly by this; `head_dim` is always `dmodel // nheads`, never a separate input, and a non-divisible pair is rejected rather than floored |
 | `--ffn` | FFN inner width (default 16) |
 | `--vocab` | vocabulary size (default 16) |
 | `-S`, `--tokens` | sequence length (default 4) |
@@ -481,7 +480,7 @@ uv run python scripts/plot_pipeline.py --chip h100_sxm --matmul 8192,8192,8192
 |---|---|---|
 | a matmul (default) | `--matmul M,N,K`, plus the dataflow strategy flags of §2.5 | `4096,4096,4096`, `stage`/`write-ahead`/1 iteration — the same defaults as `bwz matmul` |
 | a profile | `--model ID`, `--tokens/-S` — one page per phase | no default `--model`; `-S` defaults to **512** |
-| an ad-hoc single-layer encoder | `--encoder --hidden --heads --head-dim --ffn --vocab --tokens/-S` | `--hidden 8 --heads 2 --ffn 16 --vocab 16`, `-S` **512** |
+| an ad-hoc single-layer encoder | `--encoder --dmodel --nheads --ffn --vocab --tokens/-S` | `--dmodel 8 --nheads 2 --ffn 16 --vocab 16`, `-S` **512** |
 
 **The encoder's `-S` default does not match `bwz encoder-layer`'s own default.** The report
 command defaults to `-S 4` (`bwz encoder-layer`'s whole point is a shape small enough to count by
@@ -522,7 +521,7 @@ It works for all three workload kinds and for more than two chips:
 
 ```bash
 … --chip a100_80gb --chip metis_aipu --compare --matmul 4096,4096,4096
-… --chip a100_80gb --chip metis_aipu --compare --encoder --hidden 4096 --heads 64 --ffn 16384 -S 1024
+… --chip a100_80gb --chip metis_aipu --compare --encoder --dmodel 4096 --nheads 64 --ffn 16384 -S 1024
 … --chip a100_80gb --chip metis_aipu --chip jetson_orin --compare --matmul 2048,2048,2048
 ```
 
@@ -574,7 +573,7 @@ already carries its dimensions:
 
 ```bash
 uv run python scripts/plot_pipeline.py --chip a100_80gb \
-  --encoder --hidden 4096 --heads 64 --ffn 16384 -S 4096 --ideal --out ..
+  --encoder --dmodel 4096 --nheads 64 --ffn 16384 -S 4096 --ideal --out ..
 ```
 
 `--model` draws a network instead of a matmul, one page per phase — which is where the

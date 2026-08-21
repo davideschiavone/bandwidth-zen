@@ -1636,3 +1636,33 @@ Two new/updated golden tests in `test_deploy.py`: the D42 stage-lines test updat
 `exec_core`/`exec_vector` split (23 total tests, all green, nothing else in the file touched); a
 new test confirming `imc_write` appears for Metis and is absent for A100, mirroring the tiled
 path's own `test_an_imc_array_gets_weight_sets_and_a_write_and_a_tensor_core_does_not`.
+
+## D44 — The encoder kernel probe takes `dmodel`/`nheads`, not `head_dim` (2026-08-21)
+
+`bwz encoder-layer`/`plot_pipeline.py --encoder` took `--hidden`/`--heads` with an optional
+`--head-dim` override that silently floor-divided (`hidden // heads`) when omitted, with no
+validation at all if an explicit override left the three inconsistent. User request (2026-08-21):
+rename to the standard transformer literature's own terms (`dmodel`/`nheads`), and stop
+`head_dim` being a separate input at all — always `dmodel // nheads`, erroring rather than
+flooring when it doesn't divide evenly.
+
+**Scope, deliberately narrow — the kernel probe only, not the schema every loaded model uses.**
+`TransformerParams` (`bwz/spec/model_spec.py`) already has near-identical validation
+(`_check_shapes`: errors when `head_dim is None and hidden % heads != 0`) but deliberately keeps
+`head_dim` independently settable, because real profiles need it — Gemma-3 is `8 heads x 256
+head_dim = 2048`, against a `hidden` of `2560`, not `2560/8`. Removing that flexibility from the
+schema would break every GQA-style profile. `bwz/kernels.py`'s `encoder_layer_kernel` is
+different: it exists so a shape can be typed on the command line and its effect read straight off
+(§3.1's "small enough to count by hand"), and for that purpose one head-count knob that must
+divide cleanly is the right amount of flexibility, not a missing feature. The two renamed CLI
+surfaces (`bwz encoder-layer`, `plot_pipeline.py --encoder`) call this factory; nothing about
+`--model`, loaded profiles, or the schema itself changed.
+
+`encoder_layer_kernel` raises a plain `ValueError` — in the caller's own vocabulary (`dmodel`/
+`nheads`), not the schema's (`hidden`/`heads`), which would otherwise print terms nobody typed —
+before ever constructing a spec, so `TransformerParams`'s own validator becomes an
+unreachable-but-harmless backstop from this path (it still applies in full to `--model`). `bwz
+encoder-layer`'s existing `except (SpecLoadError, ValidationError)` block gained `ValueError` to
+catch it cleanly; `plot_pipeline.py`'s `build_encoder()` (which has no typer-style handling to
+inherit) converts it to `SystemExit`, the same idiom `build_matmul()` already uses for a
+user-facing construction failure.

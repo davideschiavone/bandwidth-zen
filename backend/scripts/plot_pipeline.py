@@ -924,9 +924,8 @@ def build_model(
 def build_encoder(
     chip: HardwareSpec,
     *,
-    hidden: int,
-    heads: int,
-    head_dim: int | None,
+    dmodel: int,
+    nheads: int,
     ffn: int,
     vocab: int,
     tokens: int,
@@ -938,9 +937,12 @@ def build_encoder(
     The same reason that command exists: a shape you can change one term of and
     watch the picture move, without writing a profile for every experiment.
     """
-    spec = encoder_layer_kernel(
-        hidden=hidden, heads=heads, head_dim=head_dim, ffn=ffn, vocab=vocab, tokens=tokens
-    )
+    try:
+        spec = encoder_layer_kernel(
+            dmodel=dmodel, nheads=nheads, ffn=ffn, vocab=vocab, tokens=tokens
+        )
+    except ValueError as exc:
+        raise SystemExit(f"bwz: {exc}") from exc
     return _workloads_for(chip, spec, tokens, dtype, steps)
 
 
@@ -1065,7 +1067,7 @@ def _build_parser() -> argparse.ArgumentParser:
               plot_pipeline.py --chip a100_80gb --model llama3_8b -S 512
 
               # an ad-hoc single-layer encoder, sized from the shape flags
-              plot_pipeline.py --chip a100_80gb --encoder --hidden 4096 --heads 64 \\
+              plot_pipeline.py --chip a100_80gb --encoder --dmodel 4096 --nheads 64 \\
                   --ffn 16384 -S 4096
 
               # two chips, one shared page, head to head
@@ -1076,7 +1078,7 @@ def _build_parser() -> argparse.ArgumentParser:
                   --a-strategy stream --b-dataflow persistent
 
             --matmul / --model / --encoder are mutually exclusive: pick one workload.
-            The encoder shape flags (--hidden --heads --head-dim --ffn --vocab) and
+            The encoder shape flags (--dmodel --nheads --ffn --vocab) and
             --tokens/-S only mean anything for --encoder or --model; the dataflow
             strategy flags (--a-strategy --b-dataflow --a-residency-tiles
             --a-prefetch-depth --iterations) only mean anything for the default matmul
@@ -1102,9 +1104,14 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     shape = parser.add_argument_group("encoder shape — only with --encoder")
-    shape.add_argument("--hidden", type=int, default=None, help="Model width (default 8)")
-    shape.add_argument("--heads", type=int, default=None, help="Attention heads (default 2)")
-    shape.add_argument("--head-dim", type=int, default=None, help="Defaults to hidden/heads")
+    shape.add_argument("--dmodel", type=int, default=None, help="Model width (default 8)")
+    shape.add_argument(
+        "--nheads",
+        type=int,
+        default=None,
+        help="Attention heads (default 2); dmodel must divide evenly by this "
+        "-- head_dim is always dmodel // nheads, never set separately",
+    )
     shape.add_argument("--ffn", type=int, default=None, help="FFN inner width (default 16)")
     shape.add_argument("--vocab", type=int, default=None, help="Vocabulary (default 16)")
     shape.add_argument(
@@ -1189,23 +1196,22 @@ def _reject_flags_for_the_wrong_workload(
     """Fill in the real defaults for the chosen workload, and refuse a flag
     scoped to a workload that was not chosen — a flag combination this script
     would otherwise silently ignore, which is worse than an error naming it
-    (CLAUDE.md #8): `--head-dim` with `--matmul` never reaches an encoder to
-    apply to, and previously said nothing about that at all.
+    (CLAUDE.md #8): `--ffn` with `--matmul` never reaches an encoder to apply
+    to, and previously said nothing about that at all.
     """
 
     def given(**flags: object) -> list[str]:
         return [f"--{name.replace('_', '-')}" for name, value in flags.items() if value is not None]
 
     if args.encoder:
-        args.hidden = 8 if args.hidden is None else args.hidden
-        args.heads = 2 if args.heads is None else args.heads
+        args.dmodel = 8 if args.dmodel is None else args.dmodel
+        args.nheads = 2 if args.nheads is None else args.nheads
         args.ffn = 16 if args.ffn is None else args.ffn
         args.vocab = 16 if args.vocab is None else args.vocab
     else:
         bad = given(
-            hidden=args.hidden,
-            heads=args.heads,
-            head_dim=args.head_dim,
+            dmodel=args.dmodel,
+            nheads=args.nheads,
             ffn=args.ffn,
             vocab=args.vocab,
         )
@@ -1261,7 +1267,7 @@ def main() -> None:
     def slug(prefix: str, dtype: DType, work: Workload, index: int) -> str:
         """File stem. A model gets one figure per phase, so the phase is in the name."""
         if args.encoder:
-            return f"{prefix}-encoder-d{args.hidden}-S{args.tokens}-{dtype.value}"
+            return f"{prefix}-encoder-d{args.dmodel}-S{args.tokens}-{dtype.value}"
         if args.model is None:
             return f"{prefix}-{dtype.value}"
         phase = work.trace.spans[0].phase.value if work.trace.spans else str(index)
@@ -1272,9 +1278,8 @@ def main() -> None:
         if args.encoder:
             return build_encoder(
                 chip,
-                hidden=args.hidden,
-                heads=args.heads,
-                head_dim=args.head_dim,
+                dmodel=args.dmodel,
+                nheads=args.nheads,
                 ffn=args.ffn,
                 vocab=args.vocab,
                 tokens=args.tokens,

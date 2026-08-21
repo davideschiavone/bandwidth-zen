@@ -28,13 +28,13 @@ def test_matmul_kernel_threads_out_dtype() -> None:
 
 
 def test_encoder_layer_kernel_id_and_name_come_from_the_shape() -> None:
-    spec = encoder_layer_kernel(hidden=8, heads=2, ffn=16, vocab=16, tokens=4)
+    spec = encoder_layer_kernel(dmodel=8, nheads=2, ffn=16, vocab=16, tokens=4)
     assert spec.id == "encoder_layer_d8_h2_ffn16_s4"
     assert spec.name == "1-layer encoder d=8 h=2 ffn=16"
 
 
 def test_encoder_layer_kernel_defaults_to_the_plainest_architecture() -> None:
-    spec = encoder_layer_kernel(hidden=8, heads=2, ffn=16, vocab=16, tokens=4)
+    spec = encoder_layer_kernel(dmodel=8, nheads=2, ffn=16, vocab=16, tokens=4)
     assert spec.params.ffn_type is FFNType.RELU
     assert spec.params.norm is NormType.RMSNORM
     assert spec.params.tie_embeddings is True
@@ -42,8 +42,8 @@ def test_encoder_layer_kernel_defaults_to_the_plainest_architecture() -> None:
 
 def test_encoder_layer_kernel_threads_architecture_overrides() -> None:
     spec = encoder_layer_kernel(
-        hidden=8,
-        heads=2,
+        dmodel=8,
+        nheads=2,
         ffn=16,
         vocab=16,
         tokens=4,
@@ -66,7 +66,7 @@ def test_default_encoder_layer_shape_matches_the_toy_profile() -> None:
     the CLI's own construction a name (`encoder_layer_kernel`) to call here
     instead of re-typing the dict a third time.
     """
-    kernel = encoder_layer_kernel(hidden=8, heads=2, ffn=16, vocab=16, tokens=4)
+    kernel = encoder_layer_kernel(dmodel=8, nheads=2, ffn=16, vocab=16, tokens=4)
     profile = load_model("single_layer_encoder_toy")
     assert kernel.parameter_count() == profile.parameter_count() == 664
 
@@ -77,3 +77,16 @@ def test_default_encoder_layer_shape_matches_the_toy_profile() -> None:
     kernel_flops = analyze(kernel, chip, deployment).phases[0].flops
     profile_flops = analyze(profile, chip, deployment).phases[0].flops
     assert kernel_flops == pytest.approx(profile_flops) == pytest.approx(5280)
+
+
+def test_encoder_layer_kernel_rejects_indivisible_shapes() -> None:
+    """D44: the kernel probe has no `head_dim` override — it is always `dmodel
+    // nheads` — so a shape that does not divide evenly is rejected outright
+    rather than silently floored. Unlike `TransformerParams`'s own, more
+    permissive validator (`bwz/spec/model_spec.py`, which lets `head_dim` be
+    set independently for real GQA profiles like Gemma-3), this error is
+    raised before a spec is ever built, in the caller's own vocabulary
+    (`dmodel`/`nheads`), not the schema's (`hidden`/`heads`).
+    """
+    with pytest.raises(ValueError, match=r"dmodel \(100\) is not divisible by nheads \(6\)"):
+        encoder_layer_kernel(dmodel=100, nheads=6, ffn=16, vocab=16, tokens=4)

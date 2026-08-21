@@ -249,7 +249,15 @@ uv run bwz encoder-layer --chip a100_80gb --ideal --ffn 32    # 920 params, 7392
 uv run bwz encoder-layer --chip a100_80gb --ideal -S 16       # 664 params, 29184 ops
 ```
 
-`--hidden -d` · `--heads` · `--head-dim` · `--ffn` · `--vocab` · `-S/--tokens` · `-b/--batch` ·
+`head_dim` is never a separate input — always `dmodel // nheads` — so a pair that doesn't divide
+evenly is rejected outright rather than silently floored:
+
+```bash
+$ uv run bwz encoder-layer --chip a100_80gb --ideal --dmodel 100 --nheads 6
+bwz: dmodel (100) is not divisible by nheads (6); choose a head count dividing 100 evenly
+```
+
+`--dmodel -d` · `--nheads` · `--ffn` · `--vocab` · `-S/--tokens` · `-b/--batch` ·
 `--ffn-type` · `--norm` · `--tie/--untie` · `--weights` · `--ideal` · `--show-ops` · `--json`.
 
 It leads with a table of *where* the parameters are, not just the total. One layer always — that is
@@ -339,14 +347,14 @@ It draws one of three things, and the flags mirror the report commands above:
 … plot_pipeline.py --chip a100_80gb --model llama3_8b -S 512 --out ..
 
 # an ad-hoc single-layer encoder, sized like `bwz encoder-layer`
-… plot_pipeline.py --chip a100_80gb --encoder --hidden 4096 --heads 64 --ffn 16384 -S 4096 \
+… plot_pipeline.py --chip a100_80gb --encoder --dmodel 4096 --nheads 64 --ffn 16384 -S 4096 \
     --ideal --out ..
 ```
 
 `--help` groups every flag by which workload it belongs to. `--chip` (repeatable) · `--compare` ·
 `--weights` · `--ideal` · `--steps` (default 256 — the only resolution knob; the page zooms, so
 there is no second, coarser register to keep legible) · `--out` apply to all three. `--matmul M,N,K`
-· `--model ID` · `--encoder` (with `--hidden --heads --head-dim --ffn --vocab` and `-S/--tokens`)
+· `--model ID` · `--encoder` (with `--dmodel --nheads --ffn --vocab` and `-S/--tokens`)
 pick the workload — passing two of them is rejected, not resolved by silent priority.
 
 The dataflow strategy flags (`--a-strategy`, `--b-dataflow`, `--a-residency-tiles`,
@@ -356,8 +364,8 @@ The dataflow strategy flags (`--a-strategy`, `--b-dataflow`, `--a-residency-tile
 that quietly did nothing —
 
 ```bash
-$ … plot_pipeline.py --chip a100_80gb --head-dim 64
-plot_pipeline.py: error: --head-dim only applies to --encoder; pass --encoder or drop it
+$ … plot_pipeline.py --chip a100_80gb --nheads 64
+plot_pipeline.py: error: --nheads only applies to --encoder; pass --encoder or drop it
 ```
 
 ### `--compare` — two chips, one workload, one picture
@@ -524,7 +532,7 @@ uv run bwz encoder-layer --chip a100_80gb --ideal --ffn 32 # 920 params, 7392 op
 uv run bwz encoder-layer --chip a100_80gb --ideal -S 16    # 664 params, 29184 ops
 ```
 
-Flags: `--hidden --heads --head-dim --ffn --vocab --tokens --batch --ffn-type --norm --tie/--untie
+Flags: `--dmodel --nheads --ffn --vocab --tokens --batch --ffn-type --norm --tie/--untie
 --weights --ideal --show-ops`. One layer always — that is the point; for anything deeper write a
 profile.
 

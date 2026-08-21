@@ -764,12 +764,14 @@ def encoder_layer(
     chip: str = typer.Option(
         ..., "--chip", "-c", help="Chip profile id or path", rich_help_panel=PANEL_SHAPE
     ),
-    hidden: int = typer.Option(
-        8, "--hidden", "-d", help="Model width", rich_help_panel=PANEL_SHAPE
+    dmodel: int = typer.Option(
+        8, "--dmodel", "-d", help="Model width", rich_help_panel=PANEL_SHAPE
     ),
-    heads: int = typer.Option(2, "--heads", help="Attention heads", rich_help_panel=PANEL_SHAPE),
-    head_dim: int | None = typer.Option(
-        None, "--head-dim", help="Defaults to hidden // heads", rich_help_panel=PANEL_SHAPE
+    nheads: int = typer.Option(
+        2,
+        "--nheads",
+        help="Attention heads; dmodel must divide evenly by this",
+        rich_help_panel=PANEL_SHAPE,
     ),
     ffn: int = typer.Option(16, "--ffn", help="FFN inner width", rich_help_panel=PANEL_SHAPE),
     vocab: int = typer.Option(16, "--vocab", help="Vocabulary size", rich_help_panel=PANEL_SHAPE),
@@ -820,9 +822,8 @@ def encoder_layer(
     """
     try:
         spec = encoder_layer_kernel(
-            hidden=hidden,
-            heads=heads,
-            head_dim=head_dim,
+            dmodel=dmodel,
+            nheads=nheads,
             ffn=ffn,
             vocab=vocab,
             tokens=tokens,
@@ -840,7 +841,7 @@ def encoder_layer(
             }
         )
         report = _report_for(spec, chip, deployment, ideal=ideal)
-    except (SpecLoadError, ValidationError) as exc:
+    except (SpecLoadError, ValidationError, ValueError) as exc:
         console.print(f"[red]bwz:[/red] {exc}")
         raise typer.Exit(code=1) from exc
 

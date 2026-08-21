@@ -50,9 +50,8 @@ def matmul_kernel(
 
 def encoder_layer_kernel(
     *,
-    hidden: int,
-    heads: int,
-    head_dim: int | None = None,
+    dmodel: int,
+    nheads: int,
     ffn: int,
     vocab: int,
     tokens: int,
@@ -67,18 +66,31 @@ def encoder_layer_kernel(
     the same defaults ``bwz encoder-layer`` itself uses — so a caller that only
     knows the shape gets the same encoder either way. Like :func:`matmul_kernel`,
     the id encodes shape only, not these three architecture knobs.
+
+    Unlike :class:`bwz.spec.model_spec.TransformerParams` (which a loaded
+    ``--model`` profile uses and which lets ``head_dim`` be set independently
+    of ``dmodel``/``nheads`` — real GQA profiles like Gemma-3 need that, D44),
+    this probe has no ``head_dim`` knob at all: it is always ``dmodel //
+    nheads``, and a shape that does not divide evenly is rejected outright
+    rather than silently floored. One shape typed on the command line should
+    have one unambiguous meaning.
     """
+    if dmodel % nheads != 0:
+        raise ValueError(
+            f"dmodel ({dmodel}) is not divisible by nheads ({nheads}); choose a head count "
+            f"dividing {dmodel} evenly"
+        )
     return TransformerSpec.model_validate(
         {
-            "id": f"encoder_layer_d{hidden}_h{heads}_ffn{ffn}_s{tokens}",
-            "name": f"1-layer encoder d={hidden} h={heads} ffn={ffn}",
+            "id": f"encoder_layer_d{dmodel}_h{nheads}_ffn{ffn}_s{tokens}",
+            "name": f"1-layer encoder d={dmodel} h={nheads} ffn={ffn}",
             "family": "transformer_encoder",
             "hypothetical": True,
             "params": {
                 "layers": 1,
-                "hidden": hidden,
-                "heads": heads,
-                "head_dim": head_dim,
+                "hidden": dmodel,
+                "heads": nheads,
+                "head_dim": None,
                 "ffn_hidden": ffn,
                 "ffn_type": ffn_type,
                 "vocab": vocab,
