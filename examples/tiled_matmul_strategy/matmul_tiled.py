@@ -65,9 +65,6 @@ def matmul_tiled(A, B, tile_k=16, tile_n=16, units=UNITS):
 
             k_start = k_slice * tile_k
             k_end = min(k_start + tile_k, K)
-            if wave in (0, 1) and core_id == 0:
-                print(f"  wave={wave} core_id={core_id} tile_index={tile_index}: "
-                      f"k_slice={k_slice}, n_tile={n_tile}, k_start={k_start}, k_end={k_end}")
 
             n_start = n_tile * tile_n
             n_end = min(n_start + tile_n, N)
