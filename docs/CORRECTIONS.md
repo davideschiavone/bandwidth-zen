@@ -1731,3 +1731,33 @@ report's `t_dram` to within `1e-6` relative — confirmed to fail against the pr
 large multi-wave case (`4096,4096,4096` on `a100_80gb`) is unaffected: DRAM busy still matches
 `t_dram` exactly, as it did before — that shape's tile count already divided evenly into the array
 count, so `waves * units` and `tiles` coincided there and the bug never showed.
+
+## D47 — The pseudo-C's per-tile B/C byte annotations had the same D46 bug (2026-08-21)
+
+Found while answering "is the generated pseudo-code correct too?" right after D46. `deploy.py`'s
+`deployment_of` prints `load_B`/`store_C` comments annotated with one representative tile's byte
+share (`b_bytes`, `c_bytes`), computed as `result.dram_weight_read_bytes / per` and
+`result.dram_write_bytes / per` with `per = max(waves, 1) * units` — the exact same
+theoretical-capacity divisor D46 had just removed from `_tile_trace`, in a different call site
+computing a different annotation.
+
+For `matmul 1,1,2` on `a100_80gb` this printed `store_C(...)  /* 4.63 mB — hollow bar */` for what
+is actually one whole 2 B write — a fractional-byte quantity with no physical meaning, the same
+symptom D46 fixed, just visible here as a comment shrinking below one byte instead of a span
+duration inflating. On `metis_aipu` the same shape printed `250 mB`. A's own `k_slice_bytes`
+annotation was never affected — it already divided by `k_slices`, a real geometric property
+(`ceil(K/rows)`), not by unit count.
+
+**The fix**, mirroring D46 exactly: `per = max(tiles, 1)` — the real tile count — instead of
+`waves * units`. For any shape whose tile count already divides evenly into the array count the two
+coincide, so nothing changes there (confirmed: `4096,4096,4096` on `a100_80gb`, itself off by 128
+of 65664 slots, moved `store_C`'s annotation by 0.2%, an unchanged display value). For an underfull
+wave, `store_C` now reads `2 B` on `a100_80gb` and `1 B` on `metis_aipu` — the true, whole write —
+instead of a fraction of one.
+
+Added `test_the_per_tile_byte_share_does_not_shrink_when_the_wave_is_underfull`
+(`tests/unit/test_deploy.py`), same `matmul 1,1,2` shape D46's own test uses, asserting the exact
+`store_C` comment text and that no `mB` string appears in the listing at all — confirmed to fail
+against the pre-fix code (`4.63 mB` in the listing) before the change, and to pass after. No
+existing test in `test_deploy.py` pinned exact byte values in these comments — only line structure
+and presence — so nothing else needed updating.

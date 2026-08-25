@@ -110,8 +110,12 @@ def deployment_of(
     multiplier = unit.dtype_multipliers.get(machine.dtype, 1.0)
     sub_cycles = round(1 / multiplier) if 0 < multiplier < 1 else 1
     depth = 2 if trace.double_buffered else 1
-    # Per-wave, per-array shares of the traffic the report charged.
-    per = max(waves, 1) * units
+    # One representative tile's share of the traffic the report charged. This
+    # must divide by the real tile count, not waves * units (the array's
+    # theoretical capacity): when tiles doesn't divide evenly into units, the
+    # last wave leaves slots idle, and waves * units overcounts how many tiles
+    # actually shared the total, understating each one's share (D46).
+    per = max(tiles, 1)
     b_bytes = format_bytes(result.dram_weight_read_bytes / per)
     c_bytes = format_bytes(result.dram_write_bytes / per)
     # The k-slice structure behind the listing: tiles are counted k-major, each

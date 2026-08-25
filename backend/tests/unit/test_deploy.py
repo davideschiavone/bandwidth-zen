@@ -83,6 +83,23 @@ def test_the_listing_quotes_the_tile_and_wave_counts_it_computed() -> None:
     assert "Each is still written once in this pass" in listing.code
 
 
+def test_the_per_tile_byte_share_does_not_shrink_when_the_wave_is_underfull() -> None:
+    """D46: 1x1x2 on A100 is 1 real tile against 432 tensor cores, one wave.
+
+    C's DRAM write is 2 B in total (``1x1`` at fp16) and there is exactly one
+    real tile, so the per-tile share the listing prints for ``store_C`` must be
+    that same 2 B. Before D46 the divisor was ``waves * units`` (432, the
+    array's theoretical capacity in this one-wave case) instead of the 1 real
+    tile, so the comment printed ``2 B / 432 = 4.63 mB`` — a fractional-byte
+    quantity with no physical meaning.
+    """
+    _chip, _machine, _graph, _trace, listing = _run("a100_80gb", 1, 1, 2, dtype="fp16")
+
+    assert (listing.tiles, listing.waves, listing.units) == (1, 1, 432)
+    assert "store_C(u, tile(w, u));       /* 2 B — hollow bar */" in listing.code
+    assert "mB" not in listing.code
+
+
 def test_an_imc_array_gets_weight_sets_and_a_write_and_a_tensor_core_does_not() -> None:
     """The branch is driven by ``weight_sets``, not by the vendor's name.
 
