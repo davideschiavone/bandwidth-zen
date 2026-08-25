@@ -55,7 +55,14 @@ def matmul_tiled(A, B, tile_k=16, tile_n=16, units=UNITS):
             if tile_index >= n_tiles_total:
                 break  # last wave is underfull: these cores sit idle (D46)
 
-            k_slice, n_tile = divmod(tile_index, n_n_tiles)
+            # Turn the flat tile number back into its (row, column) position
+            # in B's tile grid. Tiles are numbered k-major: all n_n_tiles
+            # tiles of k-slice 0 come first, then all of k-slice 1, and so
+            # on -- so dividing gives the k-slice (which row of the grid)
+            # and the remainder gives the n-tile (which column within it).
+            k_slice = tile_index // n_n_tiles
+            n_tile = tile_index % n_n_tiles
+
             k_start = k_slice * tile_k
             k_end = min(k_start + tile_k, K)
             if wave in (0, 1) and core_id == 0:

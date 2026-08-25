@@ -6,6 +6,13 @@ import numpy as np
 # "weight sets" before any compute can use it. A tensor core has no such
 # step: it reads both operands fresh, every instruction, and stores nothing
 # (docs/CORRECTIONS.md D30/D33). That write is the whole strategy difference.
+#
+# Same naming convention as the A100 script, two different things:
+#   CORE  -- one of the chip's independent AI-core arrays. There are UNITS of
+#            them and they all compute AT THE SAME INSTANT, in parallel.
+#            `core_id` indexes this, 0 .. UNITS-1.
+#   WAVE  -- one whole-chip iteration: every core busy once. `wave` indexes
+#            this, and it is the SEQUENTIAL dimension.
 UNITS = 4          # Metis's 4 independent AI-core arrays
 WEIGHT_SETS = 4    # resident B-tile slots PER array -- 16 chip-wide
 TILE_K = 512       # array rows -> K per tile (512x512, not the A100's 16x16:
@@ -42,30 +49,42 @@ def matmul_tiled_imc(A, B, tile_k=TILE_K, tile_n=TILE_N, units=UNITS, weight_set
     n_tiles_total = n_k_slices * n_n_tiles
     n_waves = (n_tiles_total + units - 1) // units
 
-    # resident[unit][weight_set] = which global tile index currently
+    # resident[core_id][weight_set] = which global tile index currently
     # occupies that slot, or None if the slot has never been written.
     resident = [[None] * weight_sets for _ in range(units)]
     rewrites = 0
 
-    for wave_number in range(n_waves):
-        weight_set_index = wave_number % weight_sets
-        wave_start = wave_number * units
-        wave_end = min(wave_start + units, n_tiles_total)
+    for wave in range(n_waves):  # SEQUENTIAL: one whole-chip iteration each
+        weight_set_index = wave % weight_sets
+        first_tile_in_wave = wave * units
 
-        for unit, t in enumerate(range(wave_start, wave_end)):
+        # PARALLEL: on real hardware every core_id below runs at the same
+        # instant, each on its own array with its own resident weight sets.
+        for core_id in range(units):
+            tile_index = first_tile_in_wave + core_id
+            if tile_index >= n_tiles_total:
+                break  # last wave is underfull: these cores sit idle (D46)
+
             # imc_write: this tile must be resident before it can compute.
-            if resident[unit][weight_set_index] is not None:
+            if resident[core_id][weight_set_index] is not None:
                 rewrites += 1  # this slot already held a DIFFERENT tile
-            resident[unit][weight_set_index] = t
+            resident[core_id][weight_set_index] = tile_index
 
-            k_slice, n_tile = divmod(t, n_n_tiles)
+            # Turn the flat tile number back into its (row, column) position
+            # in B's tile grid. Tiles are numbered k-major: all n_n_tiles
+            # tiles of k-slice 0 come first, then all of k-slice 1, and so
+            # on -- so dividing gives the k-slice (which row of the grid)
+            # and the remainder gives the n-tile (which column within it).
+            k_slice = tile_index // n_n_tiles
+            n_tile = tile_index % n_n_tiles
+
             k_start = k_slice * tile_k
             k_end = min(k_start + tile_k, K)
             n_start = n_tile * tile_n
             n_end = min(n_start + tile_n, N)
 
-            A_tile = A[:, k_start:k_end]  # M x tile_k -- shared by every unit
-            #                                in this same k-slice
+            A_tile = A[:, k_start:k_end]  # M x tile_k -- shared by every core
+            #                                working on this same k-slice
             B_tile = B[k_start:k_end, n_start:n_end]  # now resident in the array
             C_tile = C[:, n_start:n_end]
 
@@ -92,9 +111,10 @@ def main():
     print(f"Matrix sizes: A={A.shape}, B={B.shape}")
     print(f"Tiling: tile_k={TILE_K}, tile_n={TILE_N} (Metis's 512x512 array, not A100's 16x16)")
     print(f"K-slices: {n_k_slices}, N-tiles: {n_n_tiles}, total tiles: {n_tiles_total}")
-    print(f"Units (AI cores): {UNITS} -> {n_waves} waves")
+    print(f"Cores (UNITS, AI cores, run in parallel): {UNITS}")
+    print(f"Waves (whole-chip iterations, run in sequence): {n_waves}")
     print(
-        f"Weight sets per unit: {WEIGHT_SETS} -> {resident_capacity} tiles resident "
+        f"Weight sets per core: {WEIGHT_SETS} -> {resident_capacity} tiles resident "
         f"chip-wide at once"
     )
 
