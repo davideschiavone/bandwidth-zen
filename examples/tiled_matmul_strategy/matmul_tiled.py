@@ -75,12 +75,37 @@ def main():
     print(f"K-slices: {n_k_slices}, N-tiles: {n_n_tiles}, total tiles: {n_tiles_total}")
     print(f"Units (tensor cores): {UNITS} -> {n_waves} waves")
 
-    # Wave 0's own tiles, k-slice by k-slice -- shows the 432 isn't "432
-    # tiles of one k-slice": it's 432 independent units, and 432 doesn't
-    # divide evenly by n_n_tiles, so wave 0 spans several k-slices at once.
-    wave0_k_slices = sorted({t // n_n_tiles for t in range(min(UNITS, n_tiles_total))})
-    print(f"Wave 0 touches k-slices {wave0_k_slices[0]}..{wave0_k_slices[-1]} "
-          f"({len(wave0_k_slices)} of them)")
+    # Every wave's own tile count and k-slice span -- wave 0 was never
+    # special, it was just the easiest one to explain. Every interior wave
+    # spans several k-slices too, since 432 never divides evenly into
+    # 125-tile k-slice rows. The one wave that's genuinely different is the
+    # LAST one: unlike every other wave, it doesn't have to be full. Here
+    # 23,500 tiles over 432 units leaves the last wave only 172 tiles -- the
+    # same "real tile count, not waves * units" idle-slot effect this
+    # project's own model corrects for (docs/CORRECTIONS.md D46).
+    print()
+    for wave_number in range(n_waves):
+        wave_start = wave_number * UNITS
+        wave_end = min(wave_start + UNITS, n_tiles_total)
+
+        k_slices_seen_in_this_wave = set()
+        for t in range(wave_start, wave_end):
+            k_slice_of_this_tile = t // n_n_tiles
+            k_slices_seen_in_this_wave.add(k_slice_of_this_tile)
+        k_slices_seen_in_this_wave = sorted(k_slices_seen_in_this_wave)
+        first_k_slice = k_slices_seen_in_this_wave[0]
+        last_k_slice = k_slices_seen_in_this_wave[-1]
+
+        tile_count_this_wave = wave_end - wave_start
+        fullness = (
+            "full"
+            if tile_count_this_wave == UNITS
+            else f"UNDERFULL, only {tile_count_this_wave} tiles"
+        )
+        print(
+            f"  wave {wave_number:2d}: k-slices {first_k_slice}..{last_k_slice} "
+            f"({len(k_slices_seen_in_this_wave)} of them) -- {fullness}"
+        )
 
     C_tiled = matmul_tiled(A, B, tile_k, tile_n)
     C_golden = A @ B
