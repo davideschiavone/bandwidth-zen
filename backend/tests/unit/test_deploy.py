@@ -81,6 +81,8 @@ def test_the_listing_quotes_the_tile_and_wave_counts_it_computed() -> None:
     assert "#define UNITS        4" in listing.code
     assert "256 tiles and only 16 fit, so 240 of them" in listing.code
     assert "Each is still written once in this pass" in listing.code
+    assert (listing.array_rows, listing.array_cols) == (512, 512)
+    assert (listing.k_slices, listing.tiles_per_ks) == (16, 16)
 
 
 def test_the_per_tile_byte_share_does_not_shrink_when_the_wave_is_underfull() -> None:
@@ -309,6 +311,8 @@ def test_a_network_gets_a_sequence_listing_rather_than_a_tile_nest() -> None:
     assert "#define OPS" in listing.code
     assert "SEQUENCE" in listing.code
     assert "TILES" not in listing.code
+    assert (listing.array_rows, listing.array_cols) == (0, 0)
+    assert (listing.k_slices, listing.tiles_per_ks) == (0, 0)
 
 
 def _network_listing(chip_id: str, dtype: DType, precision: dict[str, str] | None = None):  # type: ignore[no-untyped-def]

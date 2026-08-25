@@ -65,7 +65,7 @@ from bwz.deploy import check as check_deployment
 from bwz.deploy import deployment_of
 from bwz.explain import Explanation, explain_graph
 from bwz.graph import GraphPhase, build_graph, build_graphs
-from bwz.graph.ops import Operation
+from bwz.graph.ops import MatmulAttrs, Operation
 from bwz.kernels import encoder_layer_kernel, matmul_kernel
 from bwz.operators.base import cost_of
 from bwz.report import Bound, PhaseResult
@@ -659,6 +659,8 @@ def _flow_spans(trace: PipelineTrace) -> list[dict[str, object]]:
                 "tip": _tip(span),
                 "streaming": span.stage is Stage.LOAD_A and span.a_fetch_mode == "stream",
                 "step": span.step,
+                "tile_start": span.tile_start,
+                "tile_end": span.tile_end,
             }
         )
     return out
@@ -697,6 +699,19 @@ def write_animation_html(panel: Panel, command: str, out: Path) -> None:
         ),
     )
     check_deployment(listing, work.trace)
+    geometry: dict[str, int] | None = None
+    if listing.kind == "tiles" and work.operation is not None:
+        attrs = work.operation.attrs
+        if isinstance(attrs, MatmulAttrs):
+            geometry = {
+                "m": attrs.m,
+                "n": attrs.n,
+                "k": attrs.k,
+                "rows": listing.array_rows,
+                "cols": listing.array_cols,
+                "k_slices": listing.k_slices,
+                "tiles_per_ks": listing.tiles_per_ks,
+            }
     stations: list[dict[str, object]] = [
         {
             "name": row.title,
@@ -724,6 +739,7 @@ def write_animation_html(panel: Panel, command: str, out: Path) -> None:
         notes=list(dataflow.notes) if dataflow is not None else [],
         code_lines=listing.code.split("\n"),
         stage_lines={tag: list(indices) for tag, indices in listing.stage_lines},
+        geometry=geometry,
     )
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(page, encoding="utf-8")

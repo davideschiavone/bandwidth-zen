@@ -63,6 +63,18 @@ class Deployment:
     at. Lets a debug view highlight the line(s) live at the animation's current
     time — more than one at once when double buffering means more than one
     statement is truly concurrent (D41)."""
+    array_rows: int = 0
+    array_cols: int = 0
+    k_slices: int = 0
+    tiles_per_ks: int = 0
+    """The tile-grid geometry a ``"tiles"`` listing was built from: B is cut
+    into ``array_rows x array_cols`` tiles, ``k_slices`` of them along K
+    (``ceil(K/array_rows)``) each holding ``tiles_per_ks`` along N
+    (``ceil(N/array_cols)``). A is cut only along K, into the same
+    ``k_slices`` -- never along M, which streams (D30/D33). All four are 0 for
+    an ``"operations"`` network listing, which has no tile grid at all. Lets
+    the ``--animate`` geometry panel (D48) draw A/B/C without recomputing this
+    module's own arithmetic."""
 
 
 def _int(value: float) -> str:
@@ -475,6 +487,10 @@ def deployment_of(
         resident_tiles=resident,
         reloads=reloads,
         stage_lines=tuple((tag, tuple(indices)) for tag, indices in stage_line_map.items()),
+        array_rows=rows,
+        array_cols=cols,
+        k_slices=k_slices,
+        tiles_per_ks=n_tiles_per_ks,
     )
 
 

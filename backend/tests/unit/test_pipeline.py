@@ -365,6 +365,45 @@ def test_a_load_bytes_do_not_inflate_when_the_last_wave_is_underfull() -> None:
     assert dram_busy_s == pytest.approx(op.t_dram_s, rel=1e-6)
 
 
+def test_span_tile_ranges_partition_the_real_tiles_without_gaps_or_overlap() -> None:
+    """D48: every span's ``[tile_start, tile_end)`` is the animation panel's only
+    source for "which tile is this". An 8192-cubed INT8 matmul on Metis (four
+    512x512 arrays) is ceil(8192/512)^2 = 256 tiles over 64 drawn steps, 4 tiles
+    each — the same shape ``test_a_tile_step_is_a_wave_not_a_single_tile`` uses.
+    Every step's range must be exactly 4 wide, and the 64 ranges must partition
+    [0, 256) with no gap and no overlap. A k-slice's own boundary is
+    ``n_tiles_per_ks`` wide (``ceil(8192/512) = 16``); the 16 LOAD_A openings
+    must land on k-slice indices 0..15 in order once ``tile_start`` is divided
+    by that width, one opening per k-slice (D33).
+    """
+    trace, _report = _trace(_spec(8192, 8192, 8192, "int8"), "metis_aipu", max_steps=64)
+
+    exec_spans = [s for s in trace.spans if s.stage is Stage.EXEC]
+    assert all(s.tile_start is not None and s.tile_end is not None for s in exec_spans)
+    by_step: dict[int, tuple[int, int]] = {
+        s.step: (s.tile_start, s.tile_end)  # type: ignore[misc]  # asserted non-None above
+        for s in exec_spans
+    }
+    assert len(by_step) == 64
+    assert all(end - start == 4 for start, end in by_step.values())
+    ordered = [by_step[i] for i in range(64)]
+    assert ordered[0][0] == 0
+    assert ordered[-1][1] == 256
+    assert all(ordered[i][1] == ordered[i + 1][0] for i in range(63)), "no gap or overlap"
+
+    # A LOAD_A span's tile_start is the opening step's own tile window, not the
+    # k-slice's own boundary — e.g. the k-slice-0 opening fires at tile_start=12
+    # (the last 4-tile step before the boundary), not 0. What the animation
+    # panel actually needs is the derived k-slice index, tile_start //
+    # tiles_per_ks (n_tiles_per_ks = ceil(8192/512) = 16 here) — and that must
+    # land on 0, 1, 2, ... 15 in order, one per k-slice.
+    tiles_per_ks = 16
+    a_spans = [s for s in trace.spans if s.stage is Stage.LOAD_A]
+    assert len(a_spans) == 16, "one opening per k-slice, ceil(8192/512)"
+    k_slice_indices = [s.tile_start // tiles_per_ks for s in a_spans if s.tile_start is not None]
+    assert k_slice_indices == list(range(16))
+
+
 def test_a_tile_step_is_a_wave_not_a_single_tile() -> None:
     """The bars must not show a 4-core chip working one tile at a time (D30).
 

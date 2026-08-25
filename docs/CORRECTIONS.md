@@ -1761,3 +1761,59 @@ Added `test_the_per_tile_byte_share_does_not_shrink_when_the_wave_is_underfull`
 against the pre-fix code (`4.63 mB` in the listing) before the change, and to pass after. No
 existing test in `test_deploy.py` pinned exact byte values in these comments — only line structure
 and presence — so nothing else needed updating.
+
+## D48 — A tile-geometry panel for `--animate`: A/B/C's shapes, sizes, and index range (2026-08-21)
+
+User request (2026-08-21): the animation's only clue to which tile is moving was a text label like
+"A k-slice 1/125" — no picture of how big a tile actually is, which axis got cut to produce it, or
+where it sits in the whole operand. Educational project; the ask was to make the cut visible, not
+just narrated: three rectangles for M/N/K, the current A/B tile locations, tile size as "rows x
+cols" for both operands, and index labels like `A(0,0)` to `A(4,8)`.
+
+**One correction made transparent, not silently absorbed.** In this model A is never tiled along
+M — "M streams; it never tiles" (the pseudo-C's own existing comment, `deploy.py`). A is cut only
+along K into k-slices; the whole M height reads one staged slice. So A's honest index is
+one-dimensional (`A(:,0) … A(:,{k_slices-1})`), while B genuinely has a 2-D grid (`B(0,0) …
+B({k_slices-1},{tiles_per_ks-1})`, matching the user's `(0,0)` format exactly). The panel shows this
+directly — A's rectangle is cut with vertical lines only, B's with a full grid.
+
+**Layout**: the classic GEMM diagram (A bottom-left, B top-right, C bottom-right, blank top-left
+corner) rather than three disconnected boxes — it makes the shared axes visible for free: A's width
+and B's height are both K, drawn to one shared log-compressed scale (same principle `blockSize`
+already uses for byte-sized blocks, not a new one); B's width and C's width are both N; A's height
+and C's height are both M. Grid lines capped at ~40/axis with a coarser stride and an explicit note
+past that — never a silent truncation.
+
+**Data plumbing, no formula changes.** Everything the panel needs was already computed and
+discarded upstream — this just plumbs it through:
+- `analysis/pipeline.py`: `Span` gained `tile_start`/`tile_end` — the global, k-major
+  `[start, end)` tile-index range one drawn step covers, the same numbering `deploy.py`'s
+  `KSLICE`/`tile()` already use. Computed once in `_tile_trace` (reusing D46's `total_tiles = tiles`
+  fix, not duplicating it) and threaded through `_pipelined_tiles` onto every span a step produces —
+  one range per step, shared by LOAD/LOAD_A/HOLD/EXEC/STORE alike, since they all cover the same
+  real tiles. `None` for a network's per-operation trace, which has no tile grid.
+- `deploy.py`: `Deployment` gained `array_rows`/`array_cols`/`k_slices`/`tiles_per_ks` — the
+  tile-grid numbers `deployment_of` already computes locally, kept alongside the listing the same
+  way `stage_lines` was (D41). All 0 for a network's `"operations"` listing.
+- `plot_pipeline.py`: `_flow_spans` passes `tile_start`/`tile_end` straight off each `Span`;
+  `write_animation_html` builds a `geometry = {m, n, k, rows, cols, k_slices, tiles_per_ks}` object
+  (`None` when `listing.kind != "tiles"`) and threads it into `render_animation`.
+- `dataflow_html.py`: a new SVG panel + persistent dark caption (reusing `#tip`'s look, but
+  always-visible and updated every frame rather than hover-only, like the D41 code pane). A lights
+  on a `load_a` event, B on `exec`, C on `store` — each tied to whichever operand that instant
+  genuinely touches. A frame whose step coalesces many real tiles (e.g. the 65k-tile
+  `4096,4096,4096` example) shows the true multi-cell range it covers, never a fake single index.
+
+Verified: `matmul 4,4,32` on `a100_80gb` (2 k-slices, 1 n-tile-per-slice, hand-countable) produces
+the expected `geometry` object and per-frame ranges; `matmul 4096,4096,4096` shows real multi-tile
+ranges and the grid-cap note firing (256 k-slices/n-tiles, stride 7); `--encoder` gets
+`geometry: null` and the panel hides itself, unaffected. New golden tests:
+`test_span_tile_ranges_partition_the_real_tiles_without_gaps_or_overlap`
+(`tests/unit/test_pipeline.py`, an 8192-cubed Metis shape checking every step's range is 4 tiles
+wide, the 64 ranges partition `[0, 256)` with no gap or overlap, and each k-slice opening's derived
+index lands on 0..15 in order) and an extension of
+`test_the_listing_quotes_the_tile_and_wave_counts_it_computed` (`tests/unit/test_deploy.py`)
+asserting the new `Deployment` geometry fields. The generated pages were also executed end-to-end
+in a headless DOM (jsdom) — not just syntax-checked — confirming no runtime errors and sane caption
+output across the hand-countable, coalesced, and network cases, since a rendered SVG can't be
+eyeballed headlessly otherwise.

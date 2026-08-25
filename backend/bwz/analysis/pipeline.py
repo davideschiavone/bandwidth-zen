@@ -139,6 +139,12 @@ class Span:
     network's inter-op activation traffic has no k-slice structure to stage —
     it genuinely streams, the same physical picture ``a_strategy=stream``
     deliberately reproduces for a lone matmul."""
+    tile_start: int | None = None
+    tile_end: int | None = None
+    """A lone matmul only: the global, k-major tile-index range ``[tile_start,
+    tile_end)`` this step covers — the same numbering ``deploy.py``'s
+    ``KSLICE``/``tile()`` macros use. ``None`` for a network's per-operation
+    trace, which has no tile grid to index into (D48)."""
 
     @property
     def duration_s(self) -> float:
@@ -387,6 +393,19 @@ def _tile_trace(
     dims = machine.unit.systolic_dims
     shape = f"{dims[0]}x{dims[1]}" if dims is not None else "untiled"
     a_strategy = dataflow.a_strategy if dataflow is not None else AStrategy.STAGE
+    # The real, k-major tile-index range [open_tile, end_tile) each drawn step
+    # covers — independent of a_strategy, so computed once here and reused both
+    # for A's k-slice bookkeeping below and to tag every span this step produces
+    # with the tiles it actually represents (D48). Capped at the real `tiles`
+    # count, not waves * units (the array's theoretical capacity): when tiles
+    # doesn't divide evenly into units, the last wave leaves some array slots
+    # idle, and an idle slot is not a tile any span should claim (D46).
+    tile_ranges: list[tuple[int, int]] | None = None
+    if dims is not None:
+        tile_ranges = [
+            (math.floor(i * per_step * units), min(tiles, math.floor((i + 1) * per_step * units)))
+            for i in range(steps)
+        ]
     # D33: under stage/whole, A is not a stream — each k-slice is staged once
     # and every tile of its group reads the staging. Concentrate A's DRAM time
     # into one event per k-slice, at the step that opens it, instead of a
@@ -397,20 +416,13 @@ def _tile_trace(
     # dataflow.py), and this function only has to schedule what it is given.
     ramp_s = 0.0
     if dims is not None and a_strategy is not AStrategy.STREAM:
+        assert tile_ranges is not None
         rows, cols = dims
         tiles_per_ks = max(1, math.ceil(attrs.n / cols))
         k_slices = max(1, math.ceil(attrs.k / rows))
-        # The real tile count, not waves * units (the array's full theoretical
-        # capacity): when tiles doesn't divide evenly into units, the last wave
-        # leaves some array slots idle rather than holding a real tile, and an
-        # idle slot opens no k-slice. Capping at `tiles` here is what makes
-        # `open_tile`/`end_tile` below count occupied tiles, not empty ones.
-        total_tiles = tiles
         a_bytes_step: list[float] = []
         ks_opened: list[int] = []
-        for i in range(steps):
-            end_tile = min(total_tiles, math.floor((i + 1) * per_step * units))
-            open_tile = math.floor(i * per_step * units)
+        for open_tile, end_tile in tile_ranges:
             openings = end_tile // tiles_per_ks - open_tile // tiles_per_ks
             a_bytes_step.append(result.dram_activation_read_bytes * openings / k_slices)
             ks_opened.append(open_tile // tiles_per_ks + 1 if openings else 0)
@@ -480,6 +492,7 @@ def _tile_trace(
         a_fetch_mode=a_strategy.value,
         depth_override=(dataflow.a_prefetch_depth if dataflow is not None else None),
         b_on_demand=(dataflow is not None and dataflow.b_dataflow is BDataflow.ON_DEMAND),
+        tile_ranges=tile_ranges,
     )
     if a_strategy is AStrategy.WHOLE and ramp_s > 0:
         # Every k-slice staged before wave 0: one span for the whole ramp, and
@@ -497,6 +510,8 @@ def _tile_trace(
             op_type=op.op_type.value,
             bytes_moved=result.dram_activation_read_bytes,
             a_fetch_mode=AStrategy.WHOLE.value,
+            tile_start=0,
+            tile_end=tiles,
         )
         spans = [
             ramp,
@@ -634,6 +649,7 @@ def _pipelined_tiles(
     a_fetch_mode: str = "stream",
     depth_override: int | None = None,
     b_on_demand: bool = False,
+    tile_ranges: list[tuple[int, int]] | None = None,
 ) -> list[Span]:
     """Software-pipeline the tiles of ONE operation, per the constraints above.
 
@@ -662,11 +678,19 @@ def _pipelined_tiles(
     span is fill/drain (D19). ``persistent`` gets no parameter here — D40 shows
     write-ahead's overlap is already this model's best case, so persistent's
     trace is write-ahead's, unmodified.
+
+    ``tile_ranges[i]`` is the ``[start, end)`` global tile-index range step
+    ``i`` covers (D48) — the same range for every span that step produces,
+    since they all cover the same real tiles. ``None`` when the caller has no
+    tile grid to index into (no declared systolic geometry).
     """
     steps = len(loads)
     a_loads = activation_loads if activation_loads is not None else [0.0] * steps
     a_bytes = activation_bytes_per_step if activation_bytes_per_step is not None else [0.0] * steps
     a_labels = activation_labels if activation_labels is not None else labels
+    ranges: list[tuple[int, int] | None] = (
+        list(tile_ranges) if tile_ranges is not None else [None] * steps
+    )
     spans: list[Span] = []
     if dispatch_s > 0:
         # Step -1: the dispatch is not a tile, and giving it step 0 would merge it
@@ -735,6 +759,8 @@ def _pipelined_tiles(
         # hair before the previous span's end and read as an overlap.
         exec_start, exec_end = exec_starts[i], exec_ends[i]
         store_start, store_end = store_starts[i], store_ends[i]
+        step_range = ranges[i]
+        tile_start, tile_end = step_range if step_range is not None else (None, None)
 
         # B first, then A, adjacent on the one port: the array cannot start
         # until its stationary operand has arrived.
@@ -750,6 +776,8 @@ def _pipelined_tiles(
                     phase,
                     op_type=op_types[i],
                     bytes_moved=bytes_per_step[i],
+                    tile_start=tile_start,
+                    tile_end=tile_end,
                 )
             )
         if a_loads[i] > 0:
@@ -765,6 +793,8 @@ def _pipelined_tiles(
                     op_type=op_types[i],
                     bytes_moved=a_bytes[i],
                     a_fetch_mode=a_fetch_mode,
+                    tile_start=tile_start,
+                    tile_end=tile_end,
                 )
             )
         # A buffer is occupied from the moment its fetch begins until its result
@@ -783,6 +813,8 @@ def _pipelined_tiles(
                 phase,
                 op_type=op_types[i],
                 resident_bytes=resident_per_step[i],
+                tile_start=tile_start,
+                tile_end=tile_end,
             )
         )
         if executes[i] > 0:
@@ -797,6 +829,8 @@ def _pipelined_tiles(
                     phase,
                     op_type=op_types[i],
                     flops=flops_per_step[i],
+                    tile_start=tile_start,
+                    tile_end=tile_end,
                 )
             )
         if stores[i] > 0:
@@ -811,6 +845,8 @@ def _pipelined_tiles(
                     phase,
                     op_type=op_types[i],
                     bytes_moved=stored_per_step[i],
+                    tile_start=tile_start,
+                    tile_end=tile_end,
                 )
             )
     return spans

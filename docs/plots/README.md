@@ -133,6 +133,21 @@ branches (matrix array vs. vector unit, D27) tag *distinct* lines, `exec_core`/`
 so the matrix and vector stations now glow, and their code lines highlight, independently, matching
 which engine a given operation actually ran on rather than lighting both every time.
 
+**A tile-geometry panel shows A/B/C's own shapes for a lone matmul (D48).** Below the flow diagram,
+three schematic rectangles — A (`M x K`), B (`K x N`), C (`M x N`) — in the classic GEMM layout, so
+the axes A and B share (K) and the axes B and C share (N) line up visually instead of reading as
+three unrelated boxes. **A is cut only along K**, into `k_slices` vertical stripes spanning the
+whole M height — M streams, it never tiles (D30/D33) — while **B genuinely has a 2-D tile grid**,
+`k_slices x tiles_per_ks`, and **C mirrors B's column cuts**. The lit cell tracks whichever operand
+the current instant actually touches: A lights on a `load_a` event (A being staged), B on `exec`
+(the tile in the array right now), C on `store` (the result landing) — a coalesced frame that
+covers many real tiles at once lights the true range it covers, never one fake single index. The
+dark info box states each operand's tile size as rows x cols and the whole index range (`A(:,0) …
+A(:,{k_slices-1})`, `B(0,0) … B({k_slices-1},{tiles_per_ks-1})`), updating live as playback moves.
+Grid lines are capped at roughly 40 per axis; past that a coarser stride draws instead, and the
+caption says the real count and stride — never a silent truncation. Not rendered for `--encoder`:
+a network's per-operation trace has no single A/B tile grid to draw (D42's own documented limit).
+
 ## Reading the roofline
 
 Solid roof = datasheet, which is what `--ideal` reports. Dashed roof = the same machine after the

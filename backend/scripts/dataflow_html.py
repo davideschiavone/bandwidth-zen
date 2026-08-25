@@ -93,6 +93,18 @@ TEMPLATE = """<!doctype html>
   .station-detail {{ font-size: 10.5px; fill: var(--ink-3); }}
   .lane-track {{ stroke: var(--grid); stroke-width: 1; stroke-dasharray: 3 4; }}
   .glow {{ fill: none; stroke: var(--core); stroke-width: 3; opacity: 0; }}
+  #georow {{ margin-top: 18px; border-top: 1px solid var(--grid); padding-top: 12px; }}
+  #geometry {{ display: block; width: 100%; max-width: 480px; }}
+  .geo-rect {{ fill: var(--box); stroke: var(--grid); stroke-width: 1.5; }}
+  .geo-grid {{ stroke: var(--grid); stroke-width: 1; }}
+  .geo-label {{ font-size: 11px; fill: var(--ink-2); }}
+  .geo-highlight {{ fill-opacity: 0.3; stroke-width: 2; }}
+  #geocaption {{
+    background: #17171a; color: #fff; border-radius: 7px; padding: 10px 14px;
+    margin-top: 10px; font-size: 12px; line-height: 1.55; max-width: 480px;
+  }}
+  #geocaption .geo-static {{ color: #c9c8c3; }}
+  #geocaption .geo-active {{ margin-top: 4px; color: #fff; }}
   #tip {{
     position: absolute; pointer-events: none; opacity: 0; transition: opacity .08s;
     background: #17171a; color: #fff; padding: 7px 10px; border-radius: 5px;
@@ -124,7 +136,10 @@ result written back. Each compute station glows independently while it executes 
 it, since the byte/flop model has no event distinct from the arithmetic itself for that moment; two
 different engines never glow together, because operations run in strict sequence in this model
 (D5a). The pseudo-C on the right lights up the line(s) executing right now — more than one at once
-when double buffering means more than one statement is truly concurrent (D41).</p>
+when double buffering means more than one statement is truly concurrent (D41). Below, A/B/C's own
+shapes (schematic, not to scale, D48): A is cut only along K into k-slices — the whole M height
+reads one staged slice, never tiled along M — while B genuinely has a 2-D tile grid, and C mirrors
+B's column cuts. The lit cell tracks whichever operand the current instant actually touches.</p>
 
 <div id="controls">
   <button id="playBtn">Play</button>
@@ -143,6 +158,8 @@ when double buffering means more than one statement is truly concurrent (D41).</
   <div id="wrap"><svg id="chart"></svg><div id="tip"></div></div>
   <pre id="codepane">{code}</pre>
 </div>
+<div id="georow"><svg id="geometry"></svg></div>
+<div id="geocaption"></div>
 <div id="annotation"></div>
 
 <footer>{footer}</footer>
@@ -264,6 +281,170 @@ function updateCodeHighlight(events) {{
   lastHotLines = hotLines;
 }}
 
+// ---- the tile-geometry panel (A/B/C, D48) -----------------------------------
+// A is M x K, cut only along K into k_slices — the whole M height reads one
+// staged slice, never tiled along M (D30/D33). B is K x N, cut into a real
+// k_slices x tiles_per_ks grid. C mirrors B's column cuts (a result tile is
+// the full M height x one B tile's width). The classic GEMM diagram makes the
+// shared axes visible for free: A's width and B's height are both K, drawn to
+// the same pixel scale; B's width and C's width are both N; A's height and
+// C's height are both M.
+const geoSvg = document.getElementById("geometry");
+const geoCaption = document.getElementById("geocaption");
+const georow = document.getElementById("georow");
+const GEO = DATA.geometry;
+const GEO_GAP = 14, GEO_MIN_PX = 40, GEO_MAX_PX = 200, GEO_GRID_CAP = 40;
+
+if (!GEO) {{
+  georow.style.display = "none";
+  geoCaption.style.display = "none";
+}}
+
+function geoAxisScale() {{
+  // Same log-compression principle as blockSize: a batch-1 M and a 4096 K
+  // both have to stay legible on the same page, not scaled 1:1 against size.
+  const vals = [GEO.m, GEO.n, GEO.k];
+  const lo = Math.log1p(Math.min(...vals)), hi = Math.log1p(Math.max(...vals));
+  return v => {{
+    if (hi <= lo) return (GEO_MIN_PX + GEO_MAX_PX) / 2;
+    const frac = (Math.log1p(v) - lo) / (hi - lo);
+    return GEO_MIN_PX + frac * (GEO_MAX_PX - GEO_MIN_PX);
+  }};
+}}
+
+function geoSegments(f) {{
+  // Split one flow event's [tile_start, tile_end) into per-k-slice-row
+  // segments {{kRow, nStart, nEnd}}: a coalesced step (many real tiles per
+  // drawn frame) can span more than one k-slice row, and each row's own
+  // column range has to be drawn separately — never one fake single cell.
+  if (!GEO || f.tile_start == null || f.tile_end == null) return [];
+  const segments = [];
+  let t = f.tile_start;
+  while (t < f.tile_end) {{
+    const kRow = Math.floor(t / GEO.tiles_per_ks);
+    const rowEnd = (kRow + 1) * GEO.tiles_per_ks;
+    const segEnd = Math.min(f.tile_end, rowEnd);
+    segments.push({{
+      kRow, nStart: t - kRow * GEO.tiles_per_ks, nEnd: segEnd - kRow * GEO.tiles_per_ks,
+    }});
+    t = segEnd;
+  }}
+  return segments;
+}}
+
+function drawGeometry(events) {{
+  if (!GEO) return;
+  while (geoSvg.firstChild) geoSvg.removeChild(geoSvg.firstChild);
+
+  const scale = geoAxisScale();
+  const mPx = scale(GEO.m), nPx = scale(GEO.n), kPx = scale(GEO.k);
+  const aX = 0, aY = kPx + GEO_GAP;
+  const bX = kPx + GEO_GAP, bY = 0;
+  const cX = bX, cY = aY;
+  geoSvg.setAttribute("viewBox", `0 0 ${{bX + nPx + 10}} ${{aY + mPx + 16}}`);
+
+  geoSvg.appendChild(el("rect", {{class: "geo-rect", x: aX, y: aY, width: kPx, height: mPx}}));
+  geoSvg.appendChild(el("rect", {{class: "geo-rect", x: bX, y: bY, width: nPx, height: kPx}}));
+  geoSvg.appendChild(el("rect", {{class: "geo-rect", x: cX, y: cY, width: nPx, height: mPx}}));
+  geoSvg.appendChild(el("text", {{
+    class: "geo-label", x: aX + kPx / 2, y: aY - 5, "text-anchor": "middle",
+  }}, `A  ${{GEO.m}} x ${{GEO.k}}`));
+  geoSvg.appendChild(el("text", {{
+    class: "geo-label", x: bX + nPx / 2, y: bY - 5, "text-anchor": "middle",
+  }}, `B  ${{GEO.k}} x ${{GEO.n}}`));
+  geoSvg.appendChild(el("text", {{
+    class: "geo-label", x: cX + nPx / 2, y: cY - 5, "text-anchor": "middle",
+  }}, `C  ${{GEO.m}} x ${{GEO.n}}`));
+
+  // Grid lines, capped: past GEO_GRID_CAP a k-slice/n-tile count draws at a
+  // coarser stride instead of one line per tile, and the caption says so —
+  // never a silent truncation that would read as "this is the whole grid".
+  const strideK = Math.max(1, Math.ceil(GEO.k_slices / GEO_GRID_CAP));
+  const strideN = Math.max(1, Math.ceil(GEO.tiles_per_ks / GEO_GRID_CAP));
+  for (let g = strideK; g < GEO.k_slices; g += strideK) {{
+    const x = aX + (g / GEO.k_slices) * kPx;
+    geoSvg.appendChild(el("line", {{class: "geo-grid", x1: x, x2: x, y1: aY, y2: aY + mPx}}));
+    const y = bY + (g / GEO.k_slices) * kPx;
+    geoSvg.appendChild(el("line", {{class: "geo-grid", x1: bX, x2: bX + nPx, y1: y, y2: y}}));
+  }}
+  for (let u = strideN; u < GEO.tiles_per_ks; u += strideN) {{
+    const xB = bX + (u / GEO.tiles_per_ks) * nPx;
+    geoSvg.appendChild(el("line", {{class: "geo-grid", x1: xB, x2: xB, y1: bY, y2: bY + kPx}}));
+    const xC = cX + (u / GEO.tiles_per_ks) * nPx;
+    geoSvg.appendChild(el("line", {{class: "geo-grid", x1: xC, x2: xC, y1: cY, y2: cY + mPx}}));
+  }}
+
+  // Highlights: A lights on load_a (A is being staged), B on exec (the tile
+  // actually in the array right now), C on store (the result landing) — each
+  // tied to the event that genuinely touches that operand at this instant.
+  const aRows = new Set(), bSegs = [], cSegs = [];
+  events.forEach(f => {{
+    const segs = geoSegments(f);
+    if (f.stage === "load_a") segs.forEach(s => aRows.add(s.kRow));
+    else if (f.stage === "exec") bSegs.push(...segs);
+    else if (f.stage === "store") cSegs.push(...segs);
+  }});
+  aRows.forEach(kRow => {{
+    geoSvg.appendChild(el("rect", {{
+      class: "geo-highlight", x: aX + (kRow / GEO.k_slices) * kPx, y: aY,
+      width: kPx / GEO.k_slices, height: mPx,
+      style: "fill:" + COLOUR.dram + ";stroke:" + COLOUR.dram,
+    }}));
+  }});
+  bSegs.forEach(s => {{
+    geoSvg.appendChild(el("rect", {{
+      class: "geo-highlight",
+      x: bX + (s.nStart / GEO.tiles_per_ks) * nPx, y: bY + (s.kRow / GEO.k_slices) * kPx,
+      width: ((s.nEnd - s.nStart) / GEO.tiles_per_ks) * nPx, height: kPx / GEO.k_slices,
+      style: "fill:" + COLOUR.core + ";stroke:" + COLOUR.core,
+    }}));
+  }});
+  cSegs.forEach(s => {{
+    geoSvg.appendChild(el("rect", {{
+      class: "geo-highlight", x: cX + (s.nStart / GEO.tiles_per_ks) * nPx, y: cY,
+      width: ((s.nEnd - s.nStart) / GEO.tiles_per_ks) * nPx, height: mPx,
+      style: "fill:" + COLOUR.dram + ";stroke:" + COLOUR.dram,
+    }}));
+  }});
+
+  geoCaption.innerHTML = geoCaptionHtml(aRows, bSegs, cSegs, strideK, strideN);
+}}
+
+function geoCaptionHtml(aRows, bSegs, cSegs, strideK, strideN) {{
+  const g = GEO;
+  const gridNote =
+    strideK > 1 || strideN > 1
+      ? ` (gridlines every ${{strideK}} k-slice(s), ${{strideN}} n-tile(s) — ` +
+        `${{g.k_slices}}x${{g.tiles_per_ks}} total)`
+      : "";
+  const line1 =
+    `A tile = ${{g.m}} rows x ${{g.rows}} cols &middot; ${{g.k_slices}} k-slices &middot; ` +
+    `A(:,0) &hellip; A(:,${{g.k_slices - 1}})`;
+  const line2 =
+    `B tile = ${{g.rows}} rows x ${{g.cols}} cols &middot; ${{g.k_slices}}x${{g.tiles_per_ks}} ` +
+    `tiles &middot; B(0,0) &hellip; B(${{g.k_slices - 1}},${{g.tiles_per_ks - 1}})${{gridNote}}`;
+  const parts = [];
+  if (aRows.size) {{
+    parts.push("A(:," + [...aRows].sort((a, b) => a - b).join(",") + ")");
+  }}
+  bSegs.forEach(s => {{
+    const cols = s.nEnd - s.nStart === 1 ? `${{s.nStart}}` : `${{s.nStart}}..${{s.nEnd - 1}}`;
+    parts.push(`B(${{s.kRow}},${{cols}})`);
+  }});
+  if (cSegs.length) {{
+    const cols = cSegs.map(s => (
+      s.nEnd - s.nStart === 1 ? `${{s.nStart}}` : `${{s.nStart}}..${{s.nEnd - 1}}`
+    ));
+    parts.push("C(:," + cols.join("; ") + ")");
+  }}
+  const active = parts.length
+    ? `<div class="geo-active">active: ${{parts.join(" &middot; ")}}</div>`
+    : `<div class="geo-active geo-static">nothing in flight</div>`;
+  const line1Html = `<div class="geo-static">${{line1}}</div>`;
+  const line2Html = `<div class="geo-static">${{line2}}</div>`;
+  return line1Html + line2Html + active;
+}}
+
 function draw(t) {{
   const width = svg.clientWidth || svg.parentNode.clientWidth || 900;
   const height = LANE_Y + STATION_H + 30;
@@ -359,6 +540,7 @@ function draw(t) {{
 
   renderAnnotation(t, events);
   updateCodeHighlight(events);
+  drawGeometry(events);
 }}
 
 function renderAnnotation(t, events) {{
@@ -456,6 +638,7 @@ def render(
     notes: list[str],
     code_lines: list[str],
     stage_lines: dict[str, list[int]],
+    geometry: dict[str, int] | None = None,
 ) -> str:
     """Build the page. Pure: returns text, writes nothing.
 
@@ -468,6 +651,11 @@ def render(
     ``a_strategy``/``b_dataflow`` are ``None`` for a workload with no single
     A/B dataflow strategy to name — a network's operations run in sequence
     (D5a), not as one matmul (D42) — and the banner says so instead.
+
+    ``geometry`` is ``{m, n, k, rows, cols, k_slices, tiles_per_ks}`` for a
+    lone matmul (D48) — ``Deployment``'s own tile-grid numbers, straight
+    through with no re-derivation. ``None`` for a network workload, which has
+    no A/B tile grid; the geometry panel renders nothing in that case.
     """
     data = json.dumps(
         {
@@ -477,6 +665,7 @@ def render(
             "fill_drain_s": fill_drain_s,
             "stations": stations,
             "stage_lines": stage_lines,
+            "geometry": geometry,
         }
     )
     banner = (
