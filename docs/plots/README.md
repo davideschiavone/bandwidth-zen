@@ -87,10 +87,13 @@ past what a resource-station diagram or a debug pane can usefully show (D42).
 
 **Not to scale, deliberately.** Block size is a log-compressed function of each event's own bytes,
 so the smallest and largest tiles in one trace both stay visible — reading a size off the page as a
-literal byte count would be wrong by design. The **timing is not**: play/pause/scrub drive a virtual
-clock through the trace's real `start_s`/`end_s` values, and the live panel underneath states the
-current time, the reported latency, and any pipeline fill/drain this trace's schedule shows (D19) —
-never the other way around.
+literal byte count would be wrong by design. The **timing is not**: play/pause/scrub/next drive a
+virtual clock through the trace's real `start_s`/`end_s` values, and the live panel underneath
+states the current time, the reported latency, and any pipeline fill/drain this trace's schedule
+shows (D19) — never the other way around. **Next** jumps to the next moment the active-event set
+actually changes — a span starting or ending, not merely the next individual event's own start —
+stepping through load/hold/exec/store transitions one at a time, debugger-style, for reading a
+schedule by hand rather than watching it play.
 
 - solid blocks are operand B, hatched blocks are operand A streaming (`--a-strategy stream`, D31),
   hollow blocks are the result written back

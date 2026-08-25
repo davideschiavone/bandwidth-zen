@@ -145,6 +145,7 @@ B's column cuts. The lit cell tracks whichever operand the current instant actua
 <div id="controls">
   <button id="playBtn">Play</button>
   <button id="resetBtn">Reset</button>
+  <button id="nextBtn">Next</button>
   <select id="rateSelect">
     <option value="0.25">0.25x</option>
     <option value="1" selected>1x</option>
@@ -646,9 +647,16 @@ const WALL_SECONDS_PER_RUN = 12;  // real seconds for one full playthrough at 1x
 
 const playBtn = document.getElementById("playBtn");
 const resetBtn = document.getElementById("resetBtn");
+const nextBtn = document.getElementById("nextBtn");
 const rateSelect = document.getElementById("rateSelect");
 const scrub = document.getElementById("scrub");
 const clockLabel = document.getElementById("clockLabel");
+
+// Every moment the active-event set actually changes — a span starting or
+// ending — not every individual event's own start, so "Next" steps through
+// meaningful transitions (load -> hold -> exec -> store) one at a time,
+// debugger-style, matching the code pane's own step-by-step highlight (D41).
+const BOUNDARIES = [...new Set(DATA.flow.flatMap(f => [f.start, f.end]))].sort((a, b) => a - b);
 
 function syncScrub() {{
   scrub.value = String(Math.round((clock / DATA.total) * 1000) || 0);
@@ -679,6 +687,12 @@ playBtn.addEventListener("click", () => {{
 }});
 resetBtn.addEventListener("click", () => {{
   playing = false; playBtn.textContent = "Play"; clock = 0; draw(clock); syncScrub();
+}});
+nextBtn.addEventListener("click", () => {{
+  playing = false; playBtn.textContent = "Play";
+  const upcoming = BOUNDARIES.find(t => t > clock + 1e-15);
+  clock = upcoming === undefined ? DATA.total : upcoming;
+  draw(clock); syncScrub();
 }});
 rateSelect.addEventListener("change", () => {{ rate = parseFloat(rateSelect.value); }});
 scrub.addEventListener("input", () => {{

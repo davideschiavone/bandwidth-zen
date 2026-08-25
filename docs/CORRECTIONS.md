@@ -2022,3 +2022,16 @@ this real byte-accounting bug (now fixed), and simply computing by hand in binar
 (`96 000 / 1024 = 93.75`) against a tool that displays decimal kB (`96 000 / 1000 = 96.0`) — once
 the underlying byte count is exact, both conventions agree it's `96 000` bytes; they just print it
 differently. Not a bug, and not changed.
+
+## D49 — a "Next" button steps the animation through transitions one at a time (2026-08-25)
+
+User request: read the schedule by hand, one event at a time, instead of only continuous playback
+or manual scrubbing.
+
+Added a `Next` button (`dataflow_html.py`) beside `Play`/`Reset`. Steps to the next moment the
+active-event set actually *changes* — the next distinct span start or end across `DATA.flow`
+(`BOUNDARIES`, computed once, sorted and deduplicated) — not merely the next individual event's own
+start, so a wave's simultaneous `load_b`/`load_a` starting together (double buffering) is one step,
+not two. Pauses playback if running; stays at the trace's end once no boundary remains ahead. No
+new data — pure client-side navigation over the same `start_s`/`end_s` values play/scrub already
+use.
