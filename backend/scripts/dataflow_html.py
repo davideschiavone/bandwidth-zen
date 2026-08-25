@@ -377,13 +377,13 @@ function drawGeometry(events) {{
   geoSvg.appendChild(el("rect", {{class: "geo-rect", x: cX, y: cY, width: nPx, height: mPx}}));
   geoSvg.appendChild(el("text", {{
     class: "geo-label", x: aX + kPx / 2, y: aY - 5, "text-anchor": "middle",
-  }}, `A  ${{GEO.m}} x ${{GEO.k}}`));
+  }}, `A  M=${{GEO.m}} x K=${{GEO.k}}`));
   geoSvg.appendChild(el("text", {{
     class: "geo-label", x: bX + nPx / 2, y: bY - 5, "text-anchor": "middle",
-  }}, `B  ${{GEO.k}} x ${{GEO.n}}`));
+  }}, `B  K=${{GEO.k}} x N=${{GEO.n}}`));
   geoSvg.appendChild(el("text", {{
     class: "geo-label", x: cX + nPx / 2, y: cY - 5, "text-anchor": "middle",
-  }}, `C  ${{GEO.m}} x ${{GEO.n}}`));
+  }}, `C  M=${{GEO.m}} x N=${{GEO.n}}`));
 
   // Grid lines, capped: past GEO_GRID_CAP a k-slice/n-tile count draws at a
   // coarser stride instead of one line per tile, and the caption says so —

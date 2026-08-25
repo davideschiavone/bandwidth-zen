@@ -2050,3 +2050,13 @@ number tiles row-major within B's tile grid, `A(:,g)` has no column at all (A is
 wide, the whole M height), and a comma-range like `0..124` names every tile in that row, not one —
 worked through the reported example by hand (`125 + 125 + 125 + 57 = 432`) so a reader can verify
 it themselves rather than take it on faith.
+
+## D51 — the geometry panel's own rectangle labels didn't say which number is M, N, or K (2026-08-25)
+
+User report: labels like "A 1000 x 3000" don't say which of the two numbers is M and which is K —
+a reader has to already know the convention (A is M x K) to map the label back onto the M/N/K
+vocabulary the rest of the tool uses.
+
+Fixed in `dataflow_html.py`'s `drawGeometry`: the three rectangle labels now read "A M=1000 x
+K=3000", "B K=3000 x N=2000", "C M=1000 x N=2000" — naming the dimension inline rather than relying
+on the reader to remember which axis is which from position alone.
