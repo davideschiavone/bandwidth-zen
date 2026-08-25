@@ -1939,3 +1939,43 @@ the same amount so the whole diagram's relative geometry is unchanged — B's la
 Verified across the reported shape and two others already used as regression cases (`4,4,32`, the
 hand-countable example, and `4096,4096,4096`, the equal-dimension case): all three labels render
 with a positive `y` in every case.
+
+### D48 addendum 5 — the multi-k-slice label was off by one, in the direction it can't sanity-check itself (2026-08-25)
+
+User caught it by hand: for `matmul 1000,2000,3000` on `a100_80gb`, one hover read "A k-slices
+1-4/188 … 95.7 kB". One A k-slice is `1000 x 16 x 2 B = 32 kB`; 4 of them should be ~128 kB, not
+95.7 kB. The bytes were right — 95.7 kB is exactly *3* slices' worth — the label (addendum 2's own
+fix) was wrong, and wrong in the one direction a byte-total sanity check would catch, which is
+exactly how the user found it.
+
+**Root cause**: addendum 2 computed the label's `last` k-slice as the block the step's *last tile
+merely lands in* — `(end_tile - 1) // tiles_per_ks`. But `openings = end_tile // tiles_per_ks -
+open_tile // tiles_per_ks` (the quantity the byte total, unchanged and always correct, actually
+uses) counts blocks this step *finishes*, not blocks it *touches*: consecutive steps' `[start,
+end)` tile windows are contiguous, so `start//w` telescopes exactly — step *i*'s window
+`[start_i//w, end_i//w)` and step *i+1*'s `[end_i//w, end_{i+1}//w)` share the boundary `end_i//w`
+with no gap and no overlap. The block a step's last tile lands in straddles into whichever *later*
+step's own end actually crosses out of it — that later step is who finishes it, and whose bytes
+are charged for it. Naming it in *this* step's label too was double-naming a block across two
+consecutive steps, while the bytes were only ever charged once (correctly) — the fix is `last =
+end_tile // tiles_per_ks` (drop both the `-1` on `end_tile` and the `+1` at the end; they don't
+cancel the way addendum 2 assumed).
+
+**The same wrong (`_tile_segments`-based) decomposition had leaked into the `A(:,g)` index
+notation too** — both `plot_pipeline.py`'s `_index_notation` and the geometry panel's own `aRows`
+collection (`dataflow_html.py`) computed A's touched k-slices from the *raw* tile range, the same
+"touches vs. finishes" conflation, silently agreeing with the *old* wrong label (both said "4")
+while *disagreeing* with the correct bytes. Both now compute A's range directly as `[start //
+tiles_per_ks, end // tiles_per_ks)` — the same window the label and the bytes already agree on —
+bypassing the generic segmentation entirely for `Stage.LOAD_A` (that segmentation remains correct
+for B/EXEC and C/STORE, which genuinely span multiple rows/columns in true parallel within one
+step — a different physical claim, not subject to this single-owner byte-attribution rule at all).
+
+Rewrote `test_a_label_names_every_k_slice_a_step_opens_not_just_the_first` to assert the
+*invariant*, not just two hand-picked corrected strings: for every `LOAD_A` span, the label's own
+slice count (`last - first + 1`) must reconcile with `bytes_moved / (one slice's bytes)` exactly.
+Confirmed this version fails against the (already-committed) addendum-2 code — `assert
+a_spans[0].label == "...1-6/125..."` raised on `"...1-7/125..."` — and passes after. Re-verified
+across `--a-strategy stage/stream/whole` and Metis `--b-dataflow on-demand` via the same jsdom
+sweep: no runtime errors, and the label/index/bytes triple now agrees in every hover checked by
+hand, including the `whole`-strategy ramp (still correctly `A(:,0..187)`, all 188 slices at once).

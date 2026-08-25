@@ -399,10 +399,22 @@ function drawGeometry(events) {{
   // tied to the event that genuinely touches that operand at this instant.
   const aRows = new Set(), bSegs = [], cSegs = [];
   events.forEach(f => {{
-    const segs = geoSegments(f);
-    if (f.stage === "load_a") segs.forEach(s => aRows.add(s.kRow));
-    else if (f.stage === "exec") bSegs.push(...segs);
-    else if (f.stage === "store") cSegs.push(...segs);
+    if (f.stage === "load_a") {{
+      // Not geoSegments (the raw *touched* tile range — right for B/EXEC,
+      // which genuinely spans several rows at once). A's byte cost is
+      // openings-based (D33/D48): this event *completes* k-slices
+      // [start//w, end//w) — the same window the hover's label uses — never
+      // the block its last tile merely touches but a later event finishes
+      // and gets billed for.
+      if (f.tile_start == null || f.tile_end == null) return;
+      const first = Math.floor(f.tile_start / GEO.tiles_per_ks);
+      const last = Math.floor(f.tile_end / GEO.tiles_per_ks) - 1;
+      for (let k = first; k <= last; k++) aRows.add(k);
+    }} else if (f.stage === "exec") {{
+      bSegs.push(...geoSegments(f));
+    }} else if (f.stage === "store") {{
+      cSegs.push(...geoSegments(f));
+    }}
   }});
   // Boundary lines at the highlight's own real edges, regardless of the
   // coarse stride above — a highlighted cell must never sit unbounded by any

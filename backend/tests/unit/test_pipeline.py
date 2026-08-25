@@ -416,21 +416,45 @@ def test_a_label_names_every_k_slice_a_step_opens_not_just_the_first() -> None:
     first (``open_tile // tiles_per_ks``), even though the byte total already
     (correctly) charged every k-slice the step actually opens — a step
     spanning k-slices 1 through 7 read as "A k-slice 1/125", silently
-    dropping slices 2-7. It must now name the whole span it opens.
-    """
-    trace, _report = _trace(_spec(1000, 1000, 2000, "fp16"), "a100_80gb", max_steps=64)
-    a_spans = [s for s in trace.spans if s.stage is Stage.LOAD_A]
+    dropping slices 2-6. It must now name the whole span it opens.
 
-    assert a_spans[0].label == "A k-slices 1-7/125 (1000x16) — staged once, feed their tiles"
-    assert a_spans[1].label == "A k-slices 7-14/125 (1000x16) — staged once, feed their tiles"
-    # The label's range must agree with tile_start/tile_end via tiles_per_ks —
-    # never a separate, potentially-diverging computation.
+    D48's own first fix for this got the *count* wrong the other way — using
+    the block the step's *last tile merely touches*
+    (``(end_tile - 1) // tiles_per_ks``) rather than the block it *finishes*
+    (``end_tile // tiles_per_ks``) named ONE TOO MANY slices: step 0 read
+    "A k-slices 1-7/125" (7 slices) while its own ``bytes_moved`` (192 kB)
+    only ever charged 6 x 32 kB — the block a step's last tile lands in is
+    finished by whichever *later* step's own end crosses out of it, not by
+    this one, so this step must not claim it. Every assertion below is a
+    form of that one invariant: the label's slice *count* must equal
+    ``bytes_moved / (one slice's bytes)`` exactly, for every span, not just
+    a hand-checked pair.
+    """
+    trace, report = _trace(_spec(1000, 1000, 2000, "fp16"), "a100_80gb", max_steps=64)
+    op = report.phases[0].ops[0]
+    a_spans = [s for s in trace.spans if s.stage is Stage.LOAD_A]
+    k_slices = 125
+    bytes_per_slice = op.dram_activation_read_bytes / k_slices
+
+    assert a_spans[0].label == "A k-slices 1-6/125 (1000x16) — staged once, feed their tiles"
+    assert a_spans[1].label == "A k-slices 7-13/125 (1000x16) — staged once, feed their tiles"
+    assert sum(s.bytes_moved for s in a_spans) == pytest.approx(
+        op.dram_activation_read_bytes, rel=1e-9
+    )
     for span in a_spans:
         assert span.tile_start is not None and span.tile_end is not None
         assert span.tiles_per_ks is not None
         first = span.tile_start // span.tiles_per_ks + 1
-        last = (span.tile_end - 1) // span.tiles_per_ks + 1
-        assert f"A k-slices {first}-{last}/" in span.label or first == last
+        last = span.tile_end // span.tiles_per_ks
+        assert (
+            f"A k-slice {first}/" in span.label
+            if first == last
+            else f"A k-slices {first}-{last}/" in span.label
+        )
+        # The label's own slice count must reconcile with the bytes this
+        # exact span carries — the whole point being fixed here.
+        slice_count = last - first + 1
+        assert span.bytes_moved == pytest.approx(slice_count * bytes_per_slice, rel=1e-9)
 
 
 def test_a_tile_step_is_a_wave_not_a_single_tile() -> None:

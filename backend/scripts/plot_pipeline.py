@@ -628,9 +628,17 @@ def _index_notation(span: Span) -> str:
     """
     if span.tile_start is None or span.tile_end is None or span.tiles_per_ks is None:
         return ""
-    segments = _tile_segments(span.tile_start, span.tile_end, span.tiles_per_ks)
     if span.stage is Stage.LOAD_A:
-        return "A(:," + _format_index_ranges([k_row for k_row, _n0, _n1 in segments]) + ")"
+        # Not `_tile_segments` (which decomposes the step's raw *touched* tile
+        # range — right for B/EXEC, which genuinely spans several rows at
+        # once). A's own byte cost is `openings`-based (D33/D48): this event
+        # *completes* k-slices [start//w, end//w) — the same window
+        # `_tile_trace`'s label uses — never the block its last tile merely
+        # touches but a *later* event finishes and gets billed for.
+        first = span.tile_start // span.tiles_per_ks
+        last = span.tile_end // span.tiles_per_ks - 1
+        return "A(:," + _format_index_ranges(list(range(first, last + 1))) + ")"
+    segments = _tile_segments(span.tile_start, span.tile_end, span.tiles_per_ks)
     if span.stage is Stage.STORE:
         merged = _merge_column_ranges([(n0, n1) for _k, n0, n1 in segments])
         cells = [f"{n0}" if n1 - n0 == 1 else f"{n0}..{n1 - 1}" for n0, n1 in merged]

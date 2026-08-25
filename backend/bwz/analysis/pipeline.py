@@ -434,20 +434,25 @@ def _tile_trace(
         assert tiles_per_ks is not None
         k_slices = max(1, math.ceil(attrs.k / rows))
         a_bytes_step: list[float] = []
-        # (first, last) 1-based k-slice opened this step, or None if this step
-        # opens none. A step's real tile window can span several k-slices at
-        # once (whenever per-step tiles exceed tiles_per_ks, the common case —
-        # not an edge case), and the label must name the whole span it opens,
-        # not just the first: naming only the first here silently dropped the
-        # rest, contradicted by the byte total below, which already (and
-        # correctly) charges every k-slice this step actually opens.
+        # (first, last) 1-based k-slice *completed* this step, or None if this
+        # step completes none. `openings = end//w - start//w` is the number of
+        # k-slices this step finishes — consecutive steps' [start//w, end//w)
+        # windows partition [0, k_slices) exactly, with no gap and no overlap
+        # (start_{i+1} = end_i, so last_i = end_i//w - 1 = start_{i+1}//w =
+        # first_{i+1} - 1) — so the label's range must be *this same* window,
+        # not the block merely *touched* by the step's last tile
+        # (`(end_tile - 1) // tiles_per_ks`), which straddles into whichever
+        # later step actually finishes it: that block would then be named by
+        # two consecutive steps' labels while its bytes were only ever
+        # charged to the second, undercounting this step's own label by
+        # exactly the bytes of the one block it doesn't yet own.
         ks_opened: list[tuple[int, int] | None] = []
         for open_tile, end_tile in tile_ranges:
             openings = end_tile // tiles_per_ks - open_tile // tiles_per_ks
             a_bytes_step.append(result.dram_activation_read_bytes * openings / k_slices)
             if openings:
                 first_g = open_tile // tiles_per_ks + 1
-                last_g = (end_tile - 1) // tiles_per_ks + 1
+                last_g = end_tile // tiles_per_ks
                 ks_opened.append((first_g, last_g))
             else:
                 ks_opened.append(None)
