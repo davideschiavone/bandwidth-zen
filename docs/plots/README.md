@@ -148,6 +148,13 @@ Grid lines are capped at roughly 40 per axis; past that a coarser stride draws i
 caption says the real count and stride — never a silent truncation. Not rendered for `--encoder`:
 a network's per-operation trace has no single A/B tile grid to draw (D42's own documented limit).
 
+**The same `A(:,g)`/`B(row,col)`/`C(:,col)` notation now appears in the ordinary hover too**, on
+both this page and the static timeline — not just the geometry panel's own caption. Hovering an
+`A k-slice`/`B tile`/result-store bar names its exact tile-grid position, and when one step opens
+several k-slices at once (routine whenever a step's real tiles exceed one k-slice's width — the
+label reads "A k-slices 1-7/125" rather than naming only the first, per the byte total it always
+correctly charged).
+
 ## Reading the roofline
 
 Solid roof = datasheet, which is what `--ideal` reports. Dashed roof = the same machine after the

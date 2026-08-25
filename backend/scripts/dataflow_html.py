@@ -98,8 +98,8 @@ TEMPLATE = """<!doctype html>
   .geo-rect {{ fill: var(--box); stroke: var(--grid); stroke-width: 1.5; }}
   .geo-grid {{ stroke: var(--grid); stroke-width: 1; }}
   .geo-label {{ font-size: 11px; fill: var(--ink-2); }}
-  .geo-highlight {{ fill-opacity: 0.3; stroke: var(--surface); stroke-width: 1.5; }}
-  .geo-boundary {{ stroke: var(--ink-3); stroke-width: 1.2; }}
+  .geo-highlight {{ fill-opacity: 0.55; }}
+  .geo-boundary {{ stroke: var(--ink-3); stroke-width: 0.6; }}
   #geocaption {{
     background: #17171a; color: #fff; border-radius: 7px; padding: 10px 14px;
     margin-top: 10px; font-size: 12px; line-height: 1.55; max-width: 480px;
@@ -389,11 +389,22 @@ function drawGeometry(events) {{
   // coarse stride above — a highlighted cell must never sit unbounded by any
   // visible line just because its own boundary fell off the capped grid, and
   // a multi-row highlight (a coalesced step crossing a k-slice boundary) must
-  // read as distinct rows, not one jagged, unexplained blob.
+  // read as distinct rows, not one jagged, unexplained blob. Deduplicated:
+  // two touched rows share one edge, and drawing it twice (once per row)
+  // piles thin, near-identical lines on top of each other when rows are only
+  // a pixel or two tall — the exact failure mode that made a real highlight
+  // read as a washed-out sliver instead of a visible block.
+  const drawnBoundaries = new Set();
   function rowBoundary(x1, y, x2) {{
+    const key = "row:" + y;
+    if (drawnBoundaries.has(key)) return;
+    drawnBoundaries.add(key);
     geoSvg.appendChild(el("line", {{class: "geo-boundary", x1, x2, y1: y, y2: y}}));
   }}
   function colBoundary(x, y1, y2) {{
+    const key = "col:" + x + ":" + y1 + ":" + y2;
+    if (drawnBoundaries.has(key)) return;
+    drawnBoundaries.add(key);
     geoSvg.appendChild(el("line", {{class: "geo-boundary", x1: x, x2: x, y1, y2}}));
   }}
   aRows.forEach(kRow => {{
@@ -470,12 +481,10 @@ function geoCaptionHtml(aRows, bSegs, cSegs, strideK, strideN) {{
     const cols = s.nEnd - s.nStart === 1 ? `${{s.nStart}}` : `${{s.nStart}}..${{s.nEnd - 1}}`;
     parts.push(`B(${{s.kRow}},${{cols}})`);
   }});
-  if (cSegs.length) {{
-    const cols = cSegs.map(s => (
-      s.nEnd - s.nStart === 1 ? `${{s.nStart}}` : `${{s.nStart}}..${{s.nEnd - 1}}`
-    ));
-    parts.push("C(:," + cols.join("; ") + ")");
-  }}
+  cSegs.forEach(s => {{
+    const cols = s.nEnd - s.nStart === 1 ? `${{s.nStart}}` : `${{s.nStart}}..${{s.nEnd - 1}}`;
+    parts.push(`C(:,${{cols}})`);
+  }});
   const active = parts.length
     ? `<div class="geo-active">active: ${{parts.join(" &middot; ")}}</div>`
     : `<div class="geo-active geo-static">nothing in flight</div>`;

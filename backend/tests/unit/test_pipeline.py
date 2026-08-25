@@ -407,6 +407,32 @@ def test_span_tile_ranges_partition_the_real_tiles_without_gaps_or_overlap() -> 
     assert k_slice_indices == list(range(16))
 
 
+def test_a_label_names_every_k_slice_a_step_opens_not_just_the_first() -> None:
+    """D48: 1000x1000x2000 fp16 on A100 tiles to 125 k-slices x 63 n-tiles per
+    slice = 7875 tiles over 19 waves, 432 (one full wave) tiles per drawn step.
+
+    432 tiles is almost 7 k-slices' worth (432 / 63 ~= 6.86): one step opens
+    *several* k-slices at once, not one. The label used to name only the
+    first (``open_tile // tiles_per_ks``), even though the byte total already
+    (correctly) charged every k-slice the step actually opens — a step
+    spanning k-slices 1 through 7 read as "A k-slice 1/125", silently
+    dropping slices 2-7. It must now name the whole span it opens.
+    """
+    trace, _report = _trace(_spec(1000, 1000, 2000, "fp16"), "a100_80gb", max_steps=64)
+    a_spans = [s for s in trace.spans if s.stage is Stage.LOAD_A]
+
+    assert a_spans[0].label == "A k-slices 1-7/125 (1000x16) — staged once, feed their tiles"
+    assert a_spans[1].label == "A k-slices 7-14/125 (1000x16) — staged once, feed their tiles"
+    # The label's range must agree with tile_start/tile_end via tiles_per_ks —
+    # never a separate, potentially-diverging computation.
+    for span in a_spans:
+        assert span.tile_start is not None and span.tile_end is not None
+        assert span.tiles_per_ks is not None
+        first = span.tile_start // span.tiles_per_ks + 1
+        last = (span.tile_end - 1) // span.tiles_per_ks + 1
+        assert f"A k-slices {first}-{last}/" in span.label or first == last
+
+
 def test_a_tile_step_is_a_wave_not_a_single_tile() -> None:
     """The bars must not show a 4-core chip working one tile at a time (D30).
 

@@ -566,6 +566,62 @@ def write_html(panels: list[Panel], command: str, out: Path) -> None:
     print(f"wrote {out}")
 
 
+def _tile_segments(tile_start: int, tile_end: int, tiles_per_ks: int) -> list[tuple[int, int, int]]:
+    """Split a global ``[tile_start, tile_end)`` tile range into per-k-slice-row
+    segments ``(k_row, n_start, n_end)`` — the same decomposition the
+    animation's geometry panel does in JS (D48's ``geoSegments``), so the
+    hover and the panel never name a tile differently.
+    """
+    segments: list[tuple[int, int, int]] = []
+    t = tile_start
+    while t < tile_end:
+        k_row = t // tiles_per_ks
+        row_end = (k_row + 1) * tiles_per_ks
+        seg_end = min(tile_end, row_end)
+        segments.append((k_row, t - k_row * tiles_per_ks, seg_end - k_row * tiles_per_ks))
+        t = seg_end
+    return segments
+
+
+def _format_index_ranges(nums: list[int]) -> str:
+    """Collapse consecutive integers into ``start..end`` — a whole-A ramp
+    lights every one of e.g. 256 k-slices at once, and spelling out all 256
+    would swamp the hover (D48)."""
+    if not nums:
+        return ""
+    ordered = sorted(nums)
+    parts: list[str] = []
+    start = prev = ordered[0]
+    for v in ordered[1:]:
+        if v == prev + 1:
+            prev = v
+            continue
+        parts.append(str(start) if start == prev else f"{start}..{prev}")
+        start = prev = v
+    parts.append(str(start) if start == prev else f"{start}..{prev}")
+    return ",".join(parts)
+
+
+def _index_notation(span: Span) -> str:
+    """``A(:,g)``/``B(row,col)``/``C(:,col)`` — the same tile-grid vocabulary
+    the geometry panel's caption uses (D48). Empty for a network's
+    per-operation trace, which has no tile grid to index into (D42), and for
+    the kernel dispatch span, which is not a tile at all.
+    """
+    if span.tile_start is None or span.tile_end is None or span.tiles_per_ks is None:
+        return ""
+    segments = _tile_segments(span.tile_start, span.tile_end, span.tiles_per_ks)
+    if span.stage is Stage.LOAD_A:
+        return "A(:," + _format_index_ranges([k_row for k_row, _n0, _n1 in segments]) + ")"
+    if span.stage is Stage.STORE:
+        cells = [f"{n0}" if n1 - n0 == 1 else f"{n0}..{n1 - 1}" for _k, n0, n1 in segments]
+        return "C(:," + "); C(:,".join(cells) + ")"
+    cells = [
+        f"{k_row},{n0}" if n1 - n0 == 1 else f"{k_row},{n0}..{n1 - 1}" for k_row, n0, n1 in segments
+    ]
+    return "B(" + "); B(".join(cells) + ")"
+
+
 def _tip(span: Span) -> str:
     """A span's own numbers, for the hover.
 
@@ -578,8 +634,15 @@ def _tip(span: Span) -> str:
     activation bar fell through to the SRAM branch and hovered as
     ``HOLD — elementwise on chip … holding 0 B`` — the one lane whose operations
     and rate the reader most needs, reported as a buffer occupancy of nothing.
+
+    **The index line (D48)** names the same ``A(:,g)``/``B(row,col)`` position
+    the geometry panel highlights, straight off ``Span.tile_start``/
+    ``tile_end``/``tiles_per_ks`` — no re-derivation, just the tooltip finally
+    saying what the label's own bytes and k-slice count already implied.
     """
     when = f"{format_time(span.start_s)} + {format_time(span.duration_s)}"
+    idx = _index_notation(span)
+    idx_line = f"\n{idx}" if idx else ""
     if span.lane is Lane.DRAM:
         kind = {
             Stage.STORE: "STORE — result C written back",
@@ -605,7 +668,7 @@ def _tip(span: Span) -> str:
             else ""
         )
         return (
-            f"{kind}\n{span.label}\n{when}\n"
+            f"{kind}\n{span.label}{idx_line}\n{when}\n"
             f"{format_bytes(span.bytes_moved)} @ {format_bandwidth(span.rate_bytes_per_s)}"
             f"{note}"
         )
@@ -617,12 +680,12 @@ def _tip(span: Span) -> str:
             else "DISPATCH — kernel launch"
         )
         return (
-            f"{kind}\n{span.label}\n{when}\n"
+            f"{kind}\n{span.label}{idx_line}\n{when}\n"
             f"{format_quantity(span.flops, 'OP')} @ "
             f"{format_quantity(span.rate_flops_per_s, 'OP/s')}"
         )
     return (
-        f"HOLD — {span.op_type or 'tile'} on chip\n{span.label}\n{when}\n"
+        f"HOLD — {span.op_type or 'tile'} on chip\n{span.label}{idx_line}\n{when}\n"
         f"holding {format_bytes(span.resident_bytes)}"
     )
 

@@ -1850,3 +1850,46 @@ just a syntax check: no runtime errors, and each generated caption inspected by 
 confirming `stream`'s LOAD_A intentionally falls back to B's own label (no k-slice structure to
 name under a per-tile re-fetch, D31), which is pre-existing behavior, not a regression. Extended
 `test_a_is_staged_once_per_k_slice_in_the_trace` with the new label-size assertion.
+
+### D48 addendum 2 — highlight legibility, and the shared hover learns tile-grid notation (2026-08-25)
+
+User feedback on a real, non-toy shape (`1000,1000,2000` on `a100_80gb`, 125 k-slices, 63 n-tiles
+per slice — 432 real tiles per step against those 63): the highlight was barely visible, and the
+timeline/animation hover still had no `A(i,j)`/`B(i,j)` notation despite the geometry panel's own
+caption already using it.
+
+**Highlight legibility — root cause was a stroke thicker than the cell it outlined.** The previous
+fix (D48 addendum 1) gave each highlight segment a `var(--surface)` border to separate stacked rows.
+For this shape one k-slice row is `kPx/125 ≈ 1.6` viewBox units tall — the `1.5`-unit stroke was
+*thicker than the fill it bordered*, visually replacing the orange with a washed-out pale sliver.
+Worse, drawing a full top+bottom boundary line for *every* individual touched row (rather than once
+per shared edge between adjacent rows) piled near-identical grey lines on top of each other, reading
+as a dense cluster of hairlines rather than a highlighted block. Fixed: removed the highlight's own
+stroke entirely (opacity raised to 0.55 to compensate), and deduplicated boundary lines so two
+touched rows share one edge instead of drawing it twice.
+
+**The shared hover (`_tip`) gets `A(:,g)`/`B(row,col)`/`C(:,col)` notation.** `Span` gained
+`tiles_per_ks` alongside D48's `tile_start`/`tile_end` — B's own geometry (`ceil(N/cols)`), true
+under every `a_strategy`, hoisted out of the stage-only branch in `_tile_trace` so every span
+carries it, not just A's. `plot_pipeline.py` gained `_tile_segments`/`_format_index_ranges`/
+`_index_notation` (Python ports of the geometry panel's own `geoSegments`/`formatIndexRanges` JS —
+same decomposition, so the hover and the panel never name a tile differently), spliced into `_tip`
+right after `span.label`.
+
+**This surfaced a real, pre-existing labeling gap, not just a missing feature.** Whenever a step's
+real-tile window exceeds `tiles_per_ks` — the common case, not an edge case (432 tiles/step here
+against 63/k-slice) — a single step opens *several* k-slices, but the label named only the first
+(`ks_opened` was a single int). The byte total already (correctly) charged every k-slice opened;
+only the text lied by omission — "A k-slice 1/125" when the step actually opened slices 1 through
+7. `ks_opened` is now `(first, last)` per step, and the label reads "A k-slices 1-7/125 … feed
+their tiles" when they differ, the unchanged singular form when they don't. Also fixed a leftover
+in the geometry panel's own JS caption: C's notation still used the pre-fix joined-string pattern
+(`C(:,0..1; 0..1)`) after B's had already been split into one `B(row,col)` per segment — corrected
+to match B's `C(:,0..1) · C(:,0..1)`.
+
+Verified via the same six-combination jsdom sweep as addendum 1, now also inspecting the geocaption
+text at each scrub point for every combination: no runtime errors, no more raw multi-value strings
+inside one paren pair. New golden test
+`test_a_label_names_every_k_slice_a_step_opens_not_just_the_first` (`tests/unit/test_pipeline.py`)
+pins both the exact multi-slice label text and that it agrees with `tile_start`/`tile_end` via
+`tiles_per_ks` — never a second, potentially-diverging computation.

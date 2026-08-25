@@ -145,6 +145,13 @@ class Span:
     tile_end)`` this step covers — the same numbering ``deploy.py``'s
     ``KSLICE``/``tile()`` macros use. ``None`` for a network's per-operation
     trace, which has no tile grid to index into (D48)."""
+    tiles_per_ks: int | None = None
+    """A lone matmul only: ``ceil(N/cols)``, the width of one k-slice row in
+    B's tile grid — divides ``tile_start``/``tile_end`` into a
+    (k-slice-row, n-tile-column) position, ``A(:,g)``/``B(row,col)``. Same
+    value for every span of one trace; carried per-span so a caller with just
+    a ``Span`` (D48's shared hover text, ``plot_pipeline.py``'s ``_tip``) can
+    derive the index without importing the deployment's own geometry."""
 
     @property
     def duration_s(self) -> float:
@@ -400,8 +407,15 @@ def _tile_trace(
     # count, not waves * units (the array's theoretical capacity): when tiles
     # doesn't divide evenly into units, the last wave leaves some array slots
     # idle, and an idle slot is not a tile any span should claim (D46).
+    # `tiles_per_ks` is B's own geometry — ceil(N/cols) — true under every
+    # a_strategy, not just stage/whole, so it is hoisted here rather than
+    # nested in the stage-only branch below, letting every span (not only A's)
+    # carry it for the ``A(:,g)``/``B(row,col)`` hover notation (D48).
     tile_ranges: list[tuple[int, int]] | None = None
+    tiles_per_ks: int | None = None
     if dims is not None:
+        rows, cols = dims
+        tiles_per_ks = max(1, math.ceil(attrs.n / cols))
         tile_ranges = [
             (math.floor(i * per_step * units), min(tiles, math.floor((i + 1) * per_step * units)))
             for i in range(steps)
@@ -417,15 +431,26 @@ def _tile_trace(
     ramp_s = 0.0
     if dims is not None and a_strategy is not AStrategy.STREAM:
         assert tile_ranges is not None
-        rows, cols = dims
-        tiles_per_ks = max(1, math.ceil(attrs.n / cols))
+        assert tiles_per_ks is not None
         k_slices = max(1, math.ceil(attrs.k / rows))
         a_bytes_step: list[float] = []
-        ks_opened: list[int] = []
+        # (first, last) 1-based k-slice opened this step, or None if this step
+        # opens none. A step's real tile window can span several k-slices at
+        # once (whenever per-step tiles exceed tiles_per_ks, the common case —
+        # not an edge case), and the label must name the whole span it opens,
+        # not just the first: naming only the first here silently dropped the
+        # rest, contradicted by the byte total below, which already (and
+        # correctly) charges every k-slice this step actually opens.
+        ks_opened: list[tuple[int, int] | None] = []
         for open_tile, end_tile in tile_ranges:
             openings = end_tile // tiles_per_ks - open_tile // tiles_per_ks
             a_bytes_step.append(result.dram_activation_read_bytes * openings / k_slices)
-            ks_opened.append(open_tile // tiles_per_ks + 1 if openings else 0)
+            if openings:
+                first_g = open_tile // tiles_per_ks + 1
+                last_g = (end_tile - 1) // tiles_per_ks + 1
+                ks_opened.append((first_g, last_g))
+            else:
+                ks_opened.append(None)
         if a_strategy is AStrategy.WHOLE:
             # Same total bytes as stage (D33) — only the timing changes: every
             # k-slice ramps in before wave 0 instead of landing at the wave that
@@ -435,14 +460,14 @@ def _tile_trace(
             ramp_s = sum(a_bytes_step) * scale * steps
             load_a = [0.0] * steps
             activation_bytes = [0.0] * steps
-            ks_opened = [0] * steps
+            ks_opened = [None] * steps
         else:
             load_a = [b * scale * steps for b in a_bytes_step]
             activation_bytes = a_bytes_step
     else:
         load_a = [result.dram_activation_read_bytes * scale] * steps
         activation_bytes = [result.dram_activation_read_bytes / steps] * steps
-        ks_opened = [0] * steps
+        ks_opened = [None] * steps
         k_slices = 1
     tiles_here = in_flight * per_step
     # Two spaces separate the bar text from the qualifier: `_short` in the plot
@@ -460,20 +485,23 @@ def _tile_trace(
         label, qualifier = f"{tiles_here:.0f} B tiles {shape}", ""
     tail = f"  {qualifier}" if qualifier else ""
     labels = [f"{label} [{i + 1}/{steps}]{tail}" for i in range(steps)]
+
     # The k-slice openings' A bars carry their own names under stage; the other
     # steps have no A traffic at all under D33, so nothing else needs one. Under
     # stream or whole there is no per-step opening to name — stream falls back
     # to the B labels (D31's per-tile share), whole's A traffic is a single ramp
     # named separately below.
+    def _stage_label(opened: tuple[int, int] | None) -> str:
+        if opened is None:
+            return ""
+        first, last = opened
+        size = f"({attrs.m}x{rows})"
+        if first == last:
+            return f"A k-slice {first}/{k_slices} {size} — staged once, feeds its tiles"
+        return f"A k-slices {first}-{last}/{k_slices} {size} — staged once, feed their tiles"
+
     activation_labels = (
-        [
-            f"A k-slice {g}/{k_slices} ({attrs.m}x{rows}) — staged once, feeds its tiles"
-            if g
-            else ""
-            for g in ks_opened
-        ]
-        if a_strategy is AStrategy.STAGE
-        else None
+        [_stage_label(g) for g in ks_opened] if a_strategy is AStrategy.STAGE else None
     )
 
     spans = _pipelined_tiles(
@@ -498,6 +526,7 @@ def _tile_trace(
         depth_override=(dataflow.a_prefetch_depth if dataflow is not None else None),
         b_on_demand=(dataflow is not None and dataflow.b_dataflow is BDataflow.ON_DEMAND),
         tile_ranges=tile_ranges,
+        tiles_per_ks=tiles_per_ks,
     )
     if a_strategy is AStrategy.WHOLE and ramp_s > 0:
         # Every k-slice staged before wave 0: one span for the whole ramp, and
@@ -517,6 +546,7 @@ def _tile_trace(
             a_fetch_mode=AStrategy.WHOLE.value,
             tile_start=0,
             tile_end=tiles,
+            tiles_per_ks=tiles_per_ks,
         )
         spans = [
             ramp,
@@ -655,6 +685,7 @@ def _pipelined_tiles(
     depth_override: int | None = None,
     b_on_demand: bool = False,
     tile_ranges: list[tuple[int, int]] | None = None,
+    tiles_per_ks: int | None = None,
 ) -> list[Span]:
     """Software-pipeline the tiles of ONE operation, per the constraints above.
 
@@ -783,6 +814,7 @@ def _pipelined_tiles(
                     bytes_moved=bytes_per_step[i],
                     tile_start=tile_start,
                     tile_end=tile_end,
+                    tiles_per_ks=tiles_per_ks,
                 )
             )
         if a_loads[i] > 0:
@@ -800,6 +832,7 @@ def _pipelined_tiles(
                     a_fetch_mode=a_fetch_mode,
                     tile_start=tile_start,
                     tile_end=tile_end,
+                    tiles_per_ks=tiles_per_ks,
                 )
             )
         # A buffer is occupied from the moment its fetch begins until its result
@@ -820,6 +853,7 @@ def _pipelined_tiles(
                 resident_bytes=resident_per_step[i],
                 tile_start=tile_start,
                 tile_end=tile_end,
+                tiles_per_ks=tiles_per_ks,
             )
         )
         if executes[i] > 0:
@@ -836,6 +870,7 @@ def _pipelined_tiles(
                     flops=flops_per_step[i],
                     tile_start=tile_start,
                     tile_end=tile_end,
+                    tiles_per_ks=tiles_per_ks,
                 )
             )
         if stores[i] > 0:
@@ -852,6 +887,7 @@ def _pipelined_tiles(
                     bytes_moved=stored_per_step[i],
                     tile_start=tile_start,
                     tile_end=tile_end,
+                    tiles_per_ks=tiles_per_ks,
                 )
             )
     return spans
