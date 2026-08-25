@@ -354,8 +354,12 @@ function drawGeometry(events) {{
 
   const scale = geoAxisScale();
   const mPx = scale(GEO.m), nPx = scale(GEO.n), kPx = scale(GEO.k);
-  const aX = 0, aY = kPx + GEO_GAP;
-  const bX = kPx + GEO_GAP, bY = 0;
+  // B sits at the very top with nothing above it, so — unlike A and C, which
+  // have the gap between B and A/C to put a label in — it needs its own top
+  // margin, or its label draws off the top of the viewBox entirely (D48).
+  const TOP_MARGIN = 16;
+  const aX = 0, aY = TOP_MARGIN + kPx + GEO_GAP;
+  const bX = kPx + GEO_GAP, bY = TOP_MARGIN;
   const cX = bX, cY = aY;
   geoSvg.setAttribute("viewBox", `0 0 ${{bX + nPx + 10}} ${{aY + mPx + 16}}`);
 

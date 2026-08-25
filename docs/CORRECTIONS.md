@@ -1920,3 +1920,22 @@ the same jsdom sweep as addendum 2, scanning every 25 scrub-ticks across `--a-st
 stage/stream/whole and Metis `--b-dataflow on-demand`: no runtime errors, and never more than one
 `C(:,...)` entry active at once in any case. A/B are unaffected — their row index is real
 information, not an artifact of the segmentation.
+
+### D48 addendum 4 — B's own size label was drawing off the top of the panel (2026-08-25)
+
+User report on `matmul 1000,2000,3000` (`a100_80gb`): A and C's size labels ("A 1000 x 3000",
+"C 1000 x 2000") were visible, B's was not.
+
+**Root cause**: A's and C's labels sit in the gap between B and A/C (`y = aY - 5`/`cY - 5`, both
+comfortably positive), but B sits at the very top of the diagram with nothing above it
+(`bY = 0`), so its own label at `y = bY - 5 = -5` drew *above* the viewBox's top edge — off-canvas,
+never rendered, not merely small or faint. Confirmed directly: the SVG held all three `<text>`
+elements, but B's had a negative `y`.
+
+**Fix**: added a small `TOP_MARGIN` (16 units) above B, shifting every other y-coordinate down by
+the same amount so the whole diagram's relative geometry is unchanged — B's label now draws at
+`y = 11`, comfortably inside the panel, the same way A's and C's already did.
+
+Verified across the reported shape and two others already used as regression cases (`4,4,32`, the
+hand-countable example, and `4096,4096,4096`, the equal-dimension case): all three labels render
+with a positive `y` in every case.
