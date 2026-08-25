@@ -321,6 +321,9 @@ def test_a_is_staged_once_per_k_slice_in_the_trace() -> None:
         op.dram_activation_read_bytes, rel=1e-9
     )
     assert all("A k-slice" in s.label for s in a_spans)
+    # D48: the label names the tile's own size (M rows x array rows), not just
+    # its position — 8192-cubed on Metis's 512x512 array is "8192x512".
+    assert all("(8192x512)" in s.label for s in a_spans)
 
     # The non-matmul path is untouched: a network's activations still stream
     # (inter-op reuse, no k-slice staging to draw).

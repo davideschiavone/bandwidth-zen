@@ -1817,3 +1817,36 @@ asserting the new `Deployment` geometry fields. The generated pages were also ex
 in a headless DOM (jsdom) — not just syntax-checked — confirming no runtime errors and sane caption
 output across the hand-countable, coalesced, and network cases, since a rendered SVG can't be
 eyeballed headlessly otherwise.
+
+### D48 addendum — two follow-up fixes from user review (2026-08-25)
+
+User feedback on the shipped panel, tested across `--a-strategy`/`--b-dataflow`:
+
+1. **The highlight looked "off grid."** A coalesced step's B highlight often spans more than one
+   k-slice row (e.g. `4096,4096,4096` on `a100_80gb`: `tiles_per_ks = 256 < units = 432`, so even a
+   *single* wave's 432 arrays routinely cross a k-slice boundary) — correct, but the two segments'
+   edges fell between the coarse, stride-capped grid lines with nothing marking where they actually
+   were, reading as a jagged, unexplained blob rather than "two rows, each partially filled."
+   Fixed by drawing explicit boundary lines at the *exact* edges of whatever is currently
+   highlighted, regardless of the display stride, and giving each highlight segment a
+   `var(--surface)` border so adjacent segments read as distinct cells with a visible seam instead
+   of one merged shape. A second bug surfaced while testing `--a-strategy whole`: the WHOLE ramp
+   legitimately lights every one of 256 k-slices at once, and the caption spelled out all 256
+   indices verbatim (`A(:,0,1,2,...,255)`) — added `formatIndexRanges`, collapsing consecutive
+   indices into `start..end` (`A(:,0..255)`), reused for every operand's caption text.
+
+2. **The dark info box "still refers to tiles without sizes."** B's label already carried its own
+   size (`"B tile 16x16 [...]"`), but A's k-slice label did not — `"A k-slice 1/125"` said which
+   slice, never how big one is. This tooltip is shared verbatim between the timeline and the
+   animation (`plot_pipeline.py`'s `_tip`, which only echoes `Span.label`), so the fix belongs in
+   `_tile_trace` (`analysis/pipeline.py`) where the label is built: both the per-k-slice `stage`
+   label and the `whole` ramp's label now name A's tile size — `"A k-slice 1/256 (4096x16) —
+   staged once..."` and `"A staged whole  256 k-slices before wave 0 (4096x16 each)"` — using
+   `attrs.m`/`rows`, already in scope, no new plumbing.
+
+Verified across all six strategy combinations (`--a-strategy stage/stream/whole`,
+`--b-dataflow write-ahead/on-demand/persistent`) via a jsdom harness driving real playback, not
+just a syntax check: no runtime errors, and each generated caption inspected by hand — including
+confirming `stream`'s LOAD_A intentionally falls back to B's own label (no k-slice structure to
+name under a per-tile re-fetch, D31), which is pre-existing behavior, not a regression. Extended
+`test_a_is_staged_once_per_k_slice_in_the_trace` with the new label-size assertion.

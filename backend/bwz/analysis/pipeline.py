@@ -466,7 +466,12 @@ def _tile_trace(
     # to the B labels (D31's per-tile share), whole's A traffic is a single ramp
     # named separately below.
     activation_labels = (
-        [f"A k-slice {g}/{k_slices} — staged once, feeds its tiles" if g else "" for g in ks_opened]
+        [
+            f"A k-slice {g}/{k_slices} ({attrs.m}x{rows}) — staged once, feeds its tiles"
+            if g
+            else ""
+            for g in ks_opened
+        ]
         if a_strategy is AStrategy.STAGE
         else None
     )
@@ -502,7 +507,7 @@ def _tile_trace(
         ramp = Span(
             Lane.DRAM,
             Stage.LOAD_A,
-            f"A staged whole  {k_slices} k-slices before wave 0",
+            f"A staged whole  {k_slices} k-slices before wave 0 ({attrs.m}x{rows} each)",
             0.0,
             ramp_s,
             -1,

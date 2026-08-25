@@ -98,7 +98,8 @@ TEMPLATE = """<!doctype html>
   .geo-rect {{ fill: var(--box); stroke: var(--grid); stroke-width: 1.5; }}
   .geo-grid {{ stroke: var(--grid); stroke-width: 1; }}
   .geo-label {{ font-size: 11px; fill: var(--ink-2); }}
-  .geo-highlight {{ fill-opacity: 0.3; stroke-width: 2; }}
+  .geo-highlight {{ fill-opacity: 0.3; stroke: var(--surface); stroke-width: 1.5; }}
+  .geo-boundary {{ stroke: var(--ink-3); stroke-width: 1.2; }}
   #geocaption {{
     background: #17171a; color: #fff; border-radius: 7px; padding: 10px 14px;
     margin-top: 10px; font-size: 12px; line-height: 1.55; max-width: 480px;
@@ -384,30 +385,68 @@ function drawGeometry(events) {{
     else if (f.stage === "exec") bSegs.push(...segs);
     else if (f.stage === "store") cSegs.push(...segs);
   }});
+  // Boundary lines at the highlight's own real edges, regardless of the
+  // coarse stride above — a highlighted cell must never sit unbounded by any
+  // visible line just because its own boundary fell off the capped grid, and
+  // a multi-row highlight (a coalesced step crossing a k-slice boundary) must
+  // read as distinct rows, not one jagged, unexplained blob.
+  function rowBoundary(x1, y, x2) {{
+    geoSvg.appendChild(el("line", {{class: "geo-boundary", x1, x2, y1: y, y2: y}}));
+  }}
+  function colBoundary(x, y1, y2) {{
+    geoSvg.appendChild(el("line", {{class: "geo-boundary", x1: x, x2: x, y1, y2}}));
+  }}
   aRows.forEach(kRow => {{
+    const x0 = aX + (kRow / GEO.k_slices) * kPx, x1 = aX + ((kRow + 1) / GEO.k_slices) * kPx;
+    colBoundary(x0, aY, aY + mPx);
+    colBoundary(x1, aY, aY + mPx);
     geoSvg.appendChild(el("rect", {{
-      class: "geo-highlight", x: aX + (kRow / GEO.k_slices) * kPx, y: aY,
-      width: kPx / GEO.k_slices, height: mPx,
-      style: "fill:" + COLOUR.dram + ";stroke:" + COLOUR.dram,
+      class: "geo-highlight", x: x0, y: aY, width: x1 - x0, height: mPx,
+      style: "fill:" + COLOUR.dram,
     }}));
   }});
   bSegs.forEach(s => {{
+    const x0 = bX + (s.nStart / GEO.tiles_per_ks) * nPx;
+    const x1 = bX + (s.nEnd / GEO.tiles_per_ks) * nPx;
+    const y0 = bY + (s.kRow / GEO.k_slices) * kPx;
+    const y1 = bY + ((s.kRow + 1) / GEO.k_slices) * kPx;
+    rowBoundary(bX, y0, bX + nPx);
+    rowBoundary(bX, y1, bX + nPx);
+    colBoundary(x0, y0, y1);
+    colBoundary(x1, y0, y1);
     geoSvg.appendChild(el("rect", {{
-      class: "geo-highlight",
-      x: bX + (s.nStart / GEO.tiles_per_ks) * nPx, y: bY + (s.kRow / GEO.k_slices) * kPx,
-      width: ((s.nEnd - s.nStart) / GEO.tiles_per_ks) * nPx, height: kPx / GEO.k_slices,
-      style: "fill:" + COLOUR.core + ";stroke:" + COLOUR.core,
+      class: "geo-highlight", x: x0, y: y0, width: x1 - x0, height: y1 - y0,
+      style: "fill:" + COLOUR.core,
     }}));
   }});
   cSegs.forEach(s => {{
+    const x0 = cX + (s.nStart / GEO.tiles_per_ks) * nPx;
+    const x1 = cX + (s.nEnd / GEO.tiles_per_ks) * nPx;
+    colBoundary(x0, cY, cY + mPx);
+    colBoundary(x1, cY, cY + mPx);
     geoSvg.appendChild(el("rect", {{
-      class: "geo-highlight", x: cX + (s.nStart / GEO.tiles_per_ks) * nPx, y: cY,
-      width: ((s.nEnd - s.nStart) / GEO.tiles_per_ks) * nPx, height: mPx,
-      style: "fill:" + COLOUR.dram + ";stroke:" + COLOUR.dram,
+      class: "geo-highlight", x: x0, y: cY, width: x1 - x0, height: mPx,
+      style: "fill:" + COLOUR.dram,
     }}));
   }});
 
   geoCaption.innerHTML = geoCaptionHtml(aRows, bSegs, cSegs, strideK, strideN);
+}}
+
+function formatIndexRanges(nums) {{
+  // Collapse consecutive integers into "start..end" so a whole-A ramp (every
+  // k-slice at once, e.g. --a-strategy whole) reads as one span instead of
+  // every one of 256 indices spelled out.
+  const sorted = [...nums].sort((a, b) => a - b);
+  const parts = [];
+  let start = sorted[0], prev = sorted[0];
+  for (let i = 1; i <= sorted.length; i++) {{
+    const v = sorted[i];
+    if (v === prev + 1) {{ prev = v; continue; }}
+    parts.push(start === prev ? `${{start}}` : `${{start}}..${{prev}}`);
+    start = prev = v;
+  }}
+  return parts.join(",");
 }}
 
 function geoCaptionHtml(aRows, bSegs, cSegs, strideK, strideN) {{
@@ -425,7 +464,7 @@ function geoCaptionHtml(aRows, bSegs, cSegs, strideK, strideN) {{
     `tiles &middot; B(0,0) &hellip; B(${{g.k_slices - 1}},${{g.tiles_per_ks - 1}})${{gridNote}}`;
   const parts = [];
   if (aRows.size) {{
-    parts.push("A(:," + [...aRows].sort((a, b) => a - b).join(",") + ")");
+    parts.push("A(:," + formatIndexRanges(aRows) + ")");
   }}
   bSegs.forEach(s => {{
     const cols = s.nEnd - s.nStart === 1 ? `${{s.nStart}}` : `${{s.nStart}}..${{s.nEnd - 1}}`;
