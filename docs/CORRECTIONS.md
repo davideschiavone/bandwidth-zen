@@ -1979,3 +1979,46 @@ a_spans[0].label == "...1-6/125..."` raised on `"...1-7/125..."` — and passes 
 across `--a-strategy stage/stream/whole` and Metis `--b-dataflow on-demand` via the same jsdom
 sweep: no runtime errors, and the label/index/bytes triple now agrees in every hover checked by
 hand, including the `whole`-strategy ramp (still correctly `A(:,0..187)`, all 188 slices at once).
+
+### D48 addendum 6 — A's per-k-slice bytes were a fleet-wide average, not the true per-slice cost (2026-08-25)
+
+User caught it by hand a second time, this time in the physics itself, not just the label: for
+`matmul 1000,2000,3000` on `a100_80gb`, a hover named 3 full k-slices (1-3/188) and charged 95.7 kB
+— but `1000 x 16 x 2 B = 32 kB` per slice, and 3 of them is 96 kB (93.75 KiB), not 95.7 kB.
+
+**Root cause**: `ceil(3000/16) = 188` k-slices of 16 rows would need `188 x 16 = 3008` rows of K,
+but K is only 3000 — the *last* k-slice is narrower (8 rows, not 16). `_tile_trace` charged every
+step `result.dram_activation_read_bytes * openings / k_slices` — a **uniform fleet-wide average**
+(`6 000 000 B / 188 ≈ 31.9 kB` per slice) applied to however many slices a step's `openings` count
+said it finished, regardless of which *specific* slices those were. That average silently
+under-charges the 187 full-width slices and over-charges the one ragged slice — small in total
+(the sum across all steps is still exactly right, since the average telescopes to the true total),
+but wrong for any *individual* step, and it's individual steps the hover names.
+
+**Fix**: replaced the uniform average with an exact per-slice weight. `bytes_per_element =
+result.dram_activation_read_bytes / (attrs.m * attrs.k)` (dtype-agnostic — works out to 2 for fp16,
+1 for int8, etc., without a lookup table), and slice `g`'s true width is `min(rows, attrs.k - g *
+rows)` — `rows` for every slice except the last, whatever remains for that one. A step's charge is
+now the sum of its own specific slices' true byte counts, computed directly from the `(first, last)`
+window addendum 5 already derived (correctly) for the label — one source of truth for both, not two
+formulas that can drift apart the way the label and the old byte average just did.
+
+Verified: `matmul 1000,2000,3000` on `a100_80gb` — the first LOAD_A event (k-slices 1-3, all
+full-width) now charges exactly `96 000 B` (`93.75 KiB`, matching the user's own hand calculation
+exactly); the *last* event (k-slices 187-188, the ragged pair) charges `48 000 B` = one full slice
+(`32 000 B`) plus the narrow 8-row slice (`16 000 B`). The trace-wide total is unchanged and still
+exact: `sum(bytes_moved) == 6 000 000 B == op.dram_activation_read_bytes`. Re-verified a
+well-fitting shape (`8192,8192,8192` on Metis, `512 | 8192` evenly) is bit-for-bit unaffected: every
+one of its 16 k-slices still charges exactly `8192 x 512 x 1 B = 32 768 B`, since the exact and
+uniform-average formulas coincide when nothing is ragged. New golden test
+`test_a_k_slice_bytes_are_exact_not_a_fleet_wide_average` (`tests/unit/test_pipeline.py`) pins both
+exact byte counts by hand; confirmed it fails against the pre-fix code
+(`95744.68... != 96000.0`) before the change and passes after.
+
+**Aside, not acted on**: `format_bytes` (`units.py`) is deliberately decimal/SI (`kB = 1000 B`),
+documented as "the datasheet convention" — matching how chip vendors publish GB/s and TB/s figures
+throughout this tool. The apparent "93.75 vs 95.7" gap the user first saw was *two* things at once:
+this real byte-accounting bug (now fixed), and simply computing by hand in binary KiB
+(`96 000 / 1024 = 93.75`) against a tool that displays decimal kB (`96 000 / 1000 = 96.0`) — once
+the underlying byte count is exact, both conventions agree it's `96 000` bytes; they just print it
+differently. Not a bug, and not changed.

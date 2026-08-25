@@ -446,15 +446,29 @@ def _tile_trace(
         # two consecutive steps' labels while its bytes were only ever
         # charged to the second, undercounting this step's own label by
         # exactly the bytes of the one block it doesn't yet own.
+        # Per-slice byte weight, not a uniform total/k_slices average: K need
+        # not divide evenly by rows (188 slices of 16 rows is 3008, not a
+        # 3000-wide K), so the *last* slice is narrower than the rest. A
+        # uniform average charges every slice the same ~31.9 kB regardless,
+        # silently under-charging the 187 full-width slices and over-charging
+        # the ragged last one — small in total, but a step naming three full
+        # k-slices must charge exactly 3 x (1000 rows x 16 cols), not three
+        # shares of a fleet-wide average.
+        bytes_per_element = result.dram_activation_read_bytes / (attrs.m * attrs.k)
         ks_opened: list[tuple[int, int] | None] = []
         for open_tile, end_tile in tile_ranges:
-            openings = end_tile // tiles_per_ks - open_tile // tiles_per_ks
-            a_bytes_step.append(result.dram_activation_read_bytes * openings / k_slices)
-            if openings:
-                first_g = open_tile // tiles_per_ks + 1
-                last_g = end_tile // tiles_per_ks
-                ks_opened.append((first_g, last_g))
+            first_g0 = open_tile // tiles_per_ks
+            last_g0 = end_tile // tiles_per_ks - 1
+            if last_g0 >= first_g0:
+                a_bytes_step.append(
+                    sum(
+                        attrs.m * min(rows, attrs.k - g * rows) * bytes_per_element
+                        for g in range(first_g0, last_g0 + 1)
+                    )
+                )
+                ks_opened.append((first_g0 + 1, last_g0 + 1))
             else:
+                a_bytes_step.append(0.0)
                 ks_opened.append(None)
         if a_strategy is AStrategy.WHOLE:
             # Same total bytes as stage (D33) — only the timing changes: every

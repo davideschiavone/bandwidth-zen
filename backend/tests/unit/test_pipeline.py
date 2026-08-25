@@ -457,6 +457,31 @@ def test_a_label_names_every_k_slice_a_step_opens_not_just_the_first() -> None:
         assert span.bytes_moved == pytest.approx(slice_count * bytes_per_slice, rel=1e-9)
 
 
+def test_a_k_slice_bytes_are_exact_not_a_fleet_wide_average() -> None:
+    """D48: 1000x2000x3000 fp16 on A100 tiles K to ceil(3000/16) = 188
+    k-slices of 16 rows — except the last, which is only 3000 - 187*16 = 8
+    rows (188*16 = 3008 != 3000, so K does not divide evenly).
+
+    A uniform total/188 average would charge every slice ~31.9 kB regardless
+    — under-charging the 187 full-width slices and over-charging the ragged
+    last one. A step naming three full k-slices (1-3) must charge exactly
+    3 x 1000 x 16 x 2 B = 96 000 B, not a fraction of the fleet-wide average;
+    the step naming the ragged tail (187-188) must charge the true, smaller
+    sum: one full slice (32 000 B) plus one 8-row slice (16 000 B) = 48 000 B.
+    """
+    trace, report = _trace(_spec(1000, 2000, 3000, "fp16"), "a100_80gb", max_steps=64)
+    op = report.phases[0].ops[0]
+    a_spans = [s for s in trace.spans if s.stage is Stage.LOAD_A]
+
+    assert a_spans[0].label == "A k-slices 1-3/188 (1000x16) — staged once, feed their tiles"
+    assert a_spans[0].bytes_moved == pytest.approx(96_000.0, rel=1e-9)
+    assert a_spans[-1].label == "A k-slices 187-188/188 (1000x16) — staged once, feed their tiles"
+    assert a_spans[-1].bytes_moved == pytest.approx(48_000.0, rel=1e-9)
+    assert sum(s.bytes_moved for s in a_spans) == pytest.approx(
+        op.dram_activation_read_bytes, rel=1e-9
+    )
+
+
 def test_a_tile_step_is_a_wave_not_a_single_tile() -> None:
     """The bars must not show a 4-core chip working one tile at a time (D30).
 
