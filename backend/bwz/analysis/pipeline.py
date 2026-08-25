@@ -400,7 +400,12 @@ def _tile_trace(
         rows, cols = dims
         tiles_per_ks = max(1, math.ceil(attrs.n / cols))
         k_slices = max(1, math.ceil(attrs.k / rows))
-        total_tiles = waves * units
+        # The real tile count, not waves * units (the array's full theoretical
+        # capacity): when tiles doesn't divide evenly into units, the last wave
+        # leaves some array slots idle rather than holding a real tile, and an
+        # idle slot opens no k-slice. Capping at `tiles` here is what makes
+        # `open_tile`/`end_tile` below count occupied tiles, not empty ones.
+        total_tiles = tiles
         a_bytes_step: list[float] = []
         ks_opened: list[int] = []
         for i in range(steps):

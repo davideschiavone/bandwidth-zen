@@ -341,6 +341,30 @@ def test_a_is_staged_once_per_k_slice_in_the_trace() -> None:
     assert not any(s.a_fetch_mode == "stage" for s in trace_net.spans)
 
 
+def test_a_load_bytes_do_not_inflate_when_the_last_wave_is_underfull() -> None:
+    """D46: a 1x1x2 matmul is 1 real tile on A100's 432-array tensor core.
+
+    Before D46, the k-slice-opening count was capped at ``waves * units`` — the
+    array's full theoretical capacity, 432 slots here — instead of the real
+    tile count (1). Every idle slot in that lone, mostly-empty wave was counted
+    as if it, too, opened a fresh A k-slice, so the single LOAD_A span carried
+    ``4 B x 432 = 1728 B`` instead of A's true 4 B (``1x2x2 B`` at fp16). That
+    inflated byte count fed straight into the span's *duration* too, since
+    duration is bytes times a bytes-to-seconds rate: the trace's DRAM busy time
+    came out near 288x the report's own ``t_dram``.
+    """
+    trace, report = _trace(_spec(1, 1, 2, "fp16"), "a100_80gb", max_steps=64)
+    op = report.phases[0].ops[0]
+    a_spans = [s for s in trace.spans if s.stage is Stage.LOAD_A]
+
+    assert len(a_spans) == 1, "one real tile opens exactly one k-slice"
+    assert a_spans[0].bytes_moved == pytest.approx(4.0, rel=1e-9)
+    assert a_spans[0].bytes_moved == pytest.approx(op.dram_activation_read_bytes, rel=1e-9)
+
+    dram_busy_s = sum(s.duration_s for s in trace.spans if s.lane is Lane.DRAM)
+    assert dram_busy_s == pytest.approx(op.t_dram_s, rel=1e-6)
+
+
 def test_a_tile_step_is_a_wave_not_a_single_tile() -> None:
     """The bars must not show a 4-core chip working one tile at a time (D30).
 

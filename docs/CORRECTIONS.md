@@ -1696,3 +1696,38 @@ Verified unchanged: `bwz encoder-layer --chip a100_80gb --ideal` still prints 66
 Verified new behaviour: `--dmodel 32` alone gives `ffn=128` (4x32, 8,192 FFN params); `--dmodel 32
 --ffn 64` gives `ffn=64`, the explicit value, not 128. `plot_pipeline.py --encoder --dmodel 32`
 mirrors the same `ffn=128` in its generated timeline title and pseudo-C.
+
+## D46 — A's k-slice byte share no longer inflates on an underfull wave (2026-08-21)
+
+Found while explaining the `--animate` output for `matmul 1,1,2 --chip a100_80gb`: the DRAM lane's
+lone `LOAD_A` event showed A staged at 1.73 kB, but the report's own numbers say operand A is 4 B
+in total (`1x2` at fp16), staged once, crossing DRAM exactly once (D33).
+
+**Root cause**, in `analysis/pipeline.py`'s `_tile_trace`: the per-step count of "how many k-slices
+opened this step" was computed against `total_tiles = waves * units` — the array's full theoretical
+capacity (432 tensor-core slots on A100, one wave) — not the real tile count (`tile_count`, 1 tile
+here). Every idle slot in that mostly-empty wave was counted as if it, too, opened a fresh A
+k-slice, so the byte share came out `4 B x 432 = 1728 B`. This is not merely a cosmetic label:
+`load_a`'s *duration* is that byte count times a bytes-to-seconds rate (`scale`), so the inflated
+bytes inflated the span's time too — the trace's DRAM busy time came out ~288x the report's own
+`t_dram` (848 ps drawn against a true 2.94 ps), which is exactly the "extra 848 ps of pipeline
+fill/drain" the report printed for that shape. Not unique to this pathological small case either:
+any matmul whose tile count doesn't divide evenly into the array count leaves its last wave
+partially empty, and the old formula counted every empty slot in that wave as an opening — just
+imperceptible when the real tile count dwarfs the array count, dramatic when it doesn't (M=1 is
+this repo's own standing tail-effect example, CLAUDE.md's sanity checks).
+
+**The fix:** cap `total_tiles` at the real `tiles` count instead of `waves * units`, so the
+`open_tile`/`end_tile` window used to count k-slice openings tracks occupied tiles, not theoretical
+array capacity. One line in `_tile_trace`; every other formula downstream (`a_bytes_step`, `load_a`,
+`ks_opened`) already divided by `k_slices` and multiplied by the real op's `dram_activation_read_bytes`
+correctly — only the occupancy count feeding those was wrong.
+
+Added `test_a_load_bytes_do_not_inflate_when_the_last_wave_is_underfull`
+(`tests/unit/test_pipeline.py`) as the golden regression: `matmul 1,1,2` on `a100_80gb` now reports
+exactly 1 `LOAD_A` span carrying A's true 4 B, and the trace's total DRAM busy time matches the
+report's `t_dram` to within `1e-6` relative — confirmed to fail against the pre-fix code
+(`1728.0 == 4.0` assertion failure) before the one-line change, and to pass after. Re-verified the
+large multi-wave case (`4096,4096,4096` on `a100_80gb`) is unaffected: DRAM busy still matches
+`t_dram` exactly, as it did before — that shape's tile count already divided evenly into the array
+count, so `waves * units` and `tiles` coincided there and the bug never showed.
