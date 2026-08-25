@@ -2035,3 +2035,18 @@ start, so a wave's simultaneous `load_b`/`load_a` starting together (double buff
 not two. Pauses playback if running; stays at the trace's end once no boundary remains ahead. No
 new data — pure client-side navigation over the same `start_s`/`end_s` values play/scrub already
 use.
+
+## D50 — the tile-address notation gets its own explanation in the page (2026-08-25)
+
+User question: `432 B tiles ... B(0,0..124); B(1,0..124); B(2,0..124); B(3,0..56)` reads as only 4
+tiles named, not 432 — because nothing in the page ever explained that a comma-range names *every*
+tile in a row, or that B's addressing is row-major with `tiles_per_ks` tiles per row (so 432
+consecutive tiles span only 4 rows, not 432). The math was already right (D48/its addenda); only
+the page never said what the notation itself means.
+
+Added a paragraph to both pages' existing hint text (`dataflow_html.py`'s and
+`timeline_html.py`'s — both share `_tip`'s hover text, so both need it): `B(row,col)`/`C(:,col)`
+number tiles row-major within B's tile grid, `A(:,g)` has no column at all (A is 1-D, one k-slice
+wide, the whole M height), and a comma-range like `0..124` names every tile in that row, not one —
+worked through the reported example by hand (`125 + 125 + 125 + 57 = 432`) so a reader can verify
+it themselves rather than take it on faith.

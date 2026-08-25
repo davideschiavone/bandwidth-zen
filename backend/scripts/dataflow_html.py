@@ -140,7 +140,15 @@ different engines never glow together, because operations run in strict sequence
 when double buffering means more than one statement is truly concurrent (D41). Below, A/B/C's own
 shapes (schematic, not to scale, D48): A is cut only along K into k-slices — the whole M height
 reads one staged slice, never tiled along M — while B genuinely has a 2-D tile grid, and C mirrors
-B's column cuts. The lit cell tracks whichever operand the current instant actually touches.</p>
+B's column cuts. The lit cell tracks whichever operand the current instant actually touches.
+<b>Reading a tile address:</b> <code>B(row,col)</code> and <code>C(:,col)</code> number tiles
+row-major within B's grid — <code>row</code> is the k-slice, <code>col</code> the n-tile inside it,
+0-indexed, up to <code>tiles_per_ks - 1</code> per row (the geometry panel's own caption states
+this width). A comma-range like <code>0..124</code> is not one tile — it names *every* tile in that
+row from column 0 through 124 inclusive, compacted so a wave of hundreds of tiles reads as a few
+ranges instead of being spelled out one by one: <code>B(0,0..124); B(1,0..124); B(2,0..124);
+B(3,0..56)</code> is <code>125 + 125 + 125 + 57 = 432</code> tiles, not 4. <code>A(:,g)</code> has
+no column at all — A is 1-D, one k-slice wide, the whole M height (never tiled along M, above).</p>
 
 <div id="controls">
   <button id="playBtn">Play</button>

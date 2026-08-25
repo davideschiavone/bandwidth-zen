@@ -115,7 +115,12 @@ TEMPLATE = """<!doctype html>
 <b>drag</b> pans · <b>double-click</b> resets · <b>hover</b> a bar for its own numbers.
 On the DRAM row, solid bars are <b>operand B</b> (the tile the array holds), hatched bars are
 <b>operand A</b> (streaming through it), and hollow bars are the result written back.
-Grey rows are declared by the chip and unused by this model.{hint}</p>
+Grey rows are declared by the chip and unused by this model. <b>Reading a tile address:</b>
+<code>B(row,col)</code>/<code>C(:,col)</code> number tiles row-major within B's tile grid — row is
+the k-slice, col the n-tile inside it, 0-indexed. A comma-range like <code>0..124</code> is not one
+tile — it names every tile in that row from column 0 through 124, compacted so hundreds of tiles
+read as a few ranges rather than being spelled out one by one. <code>A(:,g)</code> has no column at
+all: A is 1-D, one k-slice wide, the whole M height (never tiled along M).{hint}</p>
 <div id="wrap"><svg id="chart"></svg><div id="tip"></div></div>
 
 <h2 class="section">Roofline — where this workload sits</h2>
