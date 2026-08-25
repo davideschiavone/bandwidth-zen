@@ -602,6 +602,24 @@ def _format_index_ranges(nums: list[int]) -> str:
     return ",".join(parts)
 
 
+def _merge_column_ranges(ranges: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Merge overlapping/touching half-open ``[n0, n1)`` ranges.
+
+    C has no k-slice-row dimension — a result tile is the full M height x one
+    n-tile's width, so several k-slice-row segments touching the *same*
+    columns (the common case: a wave's tiles span many rows, each covering
+    most or all of one row's columns) must read as one C column range, not
+    one repeated per row it happened to come from.
+    """
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(ranges):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
 def _index_notation(span: Span) -> str:
     """``A(:,g)``/``B(row,col)``/``C(:,col)`` — the same tile-grid vocabulary
     the geometry panel's caption uses (D48). Empty for a network's
@@ -614,7 +632,8 @@ def _index_notation(span: Span) -> str:
     if span.stage is Stage.LOAD_A:
         return "A(:," + _format_index_ranges([k_row for k_row, _n0, _n1 in segments]) + ")"
     if span.stage is Stage.STORE:
-        cells = [f"{n0}" if n1 - n0 == 1 else f"{n0}..{n1 - 1}" for _k, n0, n1 in segments]
+        merged = _merge_column_ranges([(n0, n1) for _k, n0, n1 in segments])
+        cells = [f"{n0}" if n1 - n0 == 1 else f"{n0}..{n1 - 1}" for n0, n1 in merged]
         return "C(:," + "); C(:,".join(cells) + ")"
     cells = [
         f"{k_row},{n0}" if n1 - n0 == 1 else f"{k_row},{n0}..{n1 - 1}" for k_row, n0, n1 in segments

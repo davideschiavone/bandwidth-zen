@@ -1893,3 +1893,30 @@ inside one paren pair. New golden test
 `test_a_label_names_every_k_slice_a_step_opens_not_just_the_first` (`tests/unit/test_pipeline.py`)
 pins both the exact multi-slice label text and that it agrees with `tile_start`/`tile_end` via
 `tiles_per_ks` — never a second, potentially-diverging computation.
+
+### D48 addendum 3 — C's index notation had no k-slice-row dimension to repeat (2026-08-25)
+
+User question on a real hover: `STORE — result C written back` for a 432-tile wave (`1000,1000,2000`
+on `a100_80gb`) listed `C(:,0..62); C(:,0..62); C(:,0..62); C(:,0..62); C(:,0..62); C(:,0..62);
+C(:,0..53)` — the same column range named six times, plus a subset of it once more.
+
+**Root cause**: addendum 2's `_index_notation`/`geoCaptionHtml` built C's notation by reusing the
+same per-k-slice-row segmentation that is *correct* for B (B genuinely has a 2-D grid, row and
+column both real), but wrong for C — a result tile is the full M height x one n-tile's width, with
+no k-slice-row dimension at all. Several of a wave's tiles landing on the same C columns from
+*different* k-slice rows read as "6 things happening" when there is one C region receiving 6
+partial-sum contributions.
+
+**Fix**: added `_merge_column_ranges` (`plot_pipeline.py`) / `mergeColumnRanges` (`dataflow_html.py`
+— same merge-overlapping-intervals logic in both, keeping the hover and the geometry panel
+consistent) that collapses C's touched columns into their union before formatting or drawing,
+instead of one entry/rect per underlying row segment. `0..53 ⊂ 0..62`, so the true answer is the
+single range `C(:,0..62)` — also fixes a real (if minor) rendering defect: the geometry panel used
+to stack up to 7 identical semi-transparent rects at the same position, alpha-blending into a
+darker patch that implied emphasis nothing in the model actually assigns there.
+
+Verified directly (`_index_notation` on the exact reported span now returns `"C(:,0..62)"`) and via
+the same jsdom sweep as addendum 2, scanning every 25 scrub-ticks across `--a-strategy`
+stage/stream/whole and Metis `--b-dataflow on-demand`: no runtime errors, and never more than one
+`C(:,...)` entry active at once in any case. A/B are unaffected — their row index is real
+information, not an artifact of the segmentation.

@@ -333,6 +333,21 @@ function geoSegments(f) {{
   return segments;
 }}
 
+function mergeColumnRanges(segs) {{
+  // C has no k-slice-row dimension — merge overlapping/touching [nStart,
+  // nEnd) ranges from different rows into one, since a result tile is the
+  // full M height x one n-tile's width, not one per k-slice row it
+  // happened to come from (D48).
+  const sorted = segs.map(s => [s.nStart, s.nEnd]).sort((a, b) => a[0] - b[0]);
+  const merged = [];
+  sorted.forEach(([start, end]) => {{
+    const last = merged[merged.length - 1];
+    if (last && start <= last[1]) last[1] = Math.max(last[1], end);
+    else merged.push([start, end]);
+  }});
+  return merged;
+}}
+
 function drawGeometry(events) {{
   if (!GEO) return;
   while (geoSvg.firstChild) geoSvg.removeChild(geoSvg.firstChild);
@@ -430,9 +445,14 @@ function drawGeometry(events) {{
       style: "fill:" + COLOUR.core,
     }}));
   }});
-  cSegs.forEach(s => {{
-    const x0 = cX + (s.nStart / GEO.tiles_per_ks) * nPx;
-    const x1 = cX + (s.nEnd / GEO.tiles_per_ks) * nPx;
+  // C has no k-slice-row dimension: several segments from different rows
+  // routinely land on the same columns (a wave's tiles span many rows, most
+  // covering all or most of one row's width), and must draw/read as one C
+  // column range, not once per row it happened to come from.
+  const cRanges = mergeColumnRanges(cSegs);
+  cRanges.forEach(([n0, n1]) => {{
+    const x0 = cX + (n0 / GEO.tiles_per_ks) * nPx;
+    const x1 = cX + (n1 / GEO.tiles_per_ks) * nPx;
     colBoundary(x0, cY, cY + mPx);
     colBoundary(x1, cY, cY + mPx);
     geoSvg.appendChild(el("rect", {{
@@ -441,7 +461,7 @@ function drawGeometry(events) {{
     }}));
   }});
 
-  geoCaption.innerHTML = geoCaptionHtml(aRows, bSegs, cSegs, strideK, strideN);
+  geoCaption.innerHTML = geoCaptionHtml(aRows, bSegs, cRanges, strideK, strideN);
 }}
 
 function formatIndexRanges(nums) {{
@@ -460,7 +480,7 @@ function formatIndexRanges(nums) {{
   return parts.join(",");
 }}
 
-function geoCaptionHtml(aRows, bSegs, cSegs, strideK, strideN) {{
+function geoCaptionHtml(aRows, bSegs, cRanges, strideK, strideN) {{
   const g = GEO;
   const gridNote =
     strideK > 1 || strideN > 1
@@ -481,8 +501,8 @@ function geoCaptionHtml(aRows, bSegs, cSegs, strideK, strideN) {{
     const cols = s.nEnd - s.nStart === 1 ? `${{s.nStart}}` : `${{s.nStart}}..${{s.nEnd - 1}}`;
     parts.push(`B(${{s.kRow}},${{cols}})`);
   }});
-  cSegs.forEach(s => {{
-    const cols = s.nEnd - s.nStart === 1 ? `${{s.nStart}}` : `${{s.nStart}}..${{s.nEnd - 1}}`;
+  cRanges.forEach(([n0, n1]) => {{
+    const cols = n1 - n0 === 1 ? `${{n0}}` : `${{n0}}..${{n1 - 1}}`;
     parts.push(`C(:,${{cols}})`);
   }});
   const active = parts.length
