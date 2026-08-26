@@ -87,12 +87,21 @@ def matmul_tiled(A, B, tile_k=16, tile_n=16, units=UNITS):
             #   term M/(M+rows) is that array's pipeline fill and drain (D24).
             #
             #   REAL A100 TENSOR CORES are not weight-stationary systolic
-            #   arrays. They execute matrix-matrix MMA instructions -- on
-            #   Ampere m16n8k16, i.e. 16 rows of A per instruction, 2048 MACs
-            #   over ~8 cycles at that same 256 MACs/cycle -- and they hold
+            #   arrays. They execute matrix-matrix MMA instructions -- for
+            #   .f16 on Ampere the shapes are m8n8k4, m16n8k8 and m16n8k16
+            #   [1], so up to 16 rows of A per instruction (m16n8k16 is 2048
+            #   MACs, ~8 cycles at that same 256 MACs/cycle) -- and they hold
             #   NOTHING stationary; both operands come from registers every
-            #   instruction. The repo says so itself: "the array stores no
-            #   weights: both operands are re-read per instruction" (D30).
+            #   instruction. NVIDIA describes 3rd-gen (Ampere) tensor cores as
+            #   having "a larger base matrix size" than Volta/Turing [2]. The
+            #   repo says as much itself: "the array stores no weights: both
+            #   operands are re-read per instruction" (D30).
+            #
+            #   [1] PTX ISA, 9.7.15 "Warp Level Matrix Multiply-Accumulate
+            #       Instructions" (see 9.7.15.5.8 for m16n8k16 fragments):
+            #       https://docs.nvidia.com/cuda/parallel-thread-execution/index.html
+            #   [2] CUDA Ampere Tuning Guide, Tensor Cores:
+            #       https://docs.nvidia.com/cuda/ampere-tuning-guide/index.html
             #
             # Same arithmetic, same MACs/cycle, different micro-architecture.
             # `demo_m_streaming` below illustrates the MODEL's abstraction and
