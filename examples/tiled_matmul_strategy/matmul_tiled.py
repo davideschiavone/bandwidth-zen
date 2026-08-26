@@ -75,9 +75,41 @@ def matmul_tiled(A, B, tile_k=16, tile_n=16, units=UNITS):
             #                                            core's own tile
             C_tile = C[:, n_start:n_end]  # M x tile_n
 
+            # NOT a (M x tile_k) @ (tile_k x tile_n) matmul in one shot -- a
+            # 16x16 array cannot do that, and does not try to. The array holds
+            # B_tile STATIONARY and streams A's M rows past it, one row per
+            # step: each step is a (1 x tile_k) @ (tile_k x tile_n) vector-
+            # matrix product, repeated M times. That is what the model's own
+            # pseudo-C means by
+            #     for (m = 0; m < M; ++m) mac(u, &A[m][KSLICE(w, u)]);
+            # and why M "streams; it never tiles" -- M is a time dimension
+            # here, not a spatial one, so it never bounds the array size.
+            # `demo_m_streaming` below proves the two forms agree; this line
+            # batches the M steps into one numpy call only because doing 1000
+            # separate 1x16 products per tile in Python would be unusably slow.
             C_tile += A_tile @ B_tile
 
     return C
+
+
+def demo_m_streaming(A_tile, B_tile):
+    """What one core actually does to one tile, spelled out step by step.
+
+    B_tile (tile_k x tile_n) sits stationary in the array. A's rows go past
+    it one at a time -- each step a (1 x tile_k) @ (tile_k x tile_n) vector-
+    matrix product, which is the widest thing a tile_k x tile_n array can do
+    in one step. M steps later the whole M x tile_n result exists.
+
+    Returns the same thing `A_tile @ B_tile` returns -- that is the point.
+    """
+    M, _tile_k = A_tile.shape
+    _tile_k2, tile_n = B_tile.shape
+    out = np.zeros((M, tile_n), dtype=A_tile.dtype)
+
+    for m in range(M):  # TIME, not space: one row per step through the array
+        a_row = A_tile[m, :]            # 1 x tile_k -- this step's operand
+        out[m, :] = a_row @ B_tile      # 1 x tile_n -- this step's result
+    return out
 
 
 def main():
@@ -134,6 +166,22 @@ def main():
             f"  wave {wave:2d}: k-slices {first_k_slice}..{last_k_slice} "
             f"({len(k_slices_seen_in_this_wave)} of them) -- {fullness}"
         )
+
+    # The array never sees a (M x tile_k) @ (tile_k x tile_n) matmul -- it
+    # does M separate (1 x tile_k) @ (tile_k x tile_n) steps. Prove the two
+    # forms agree on one tile, so the batched `A_tile @ B_tile` inside the
+    # loop above is understood as shorthand for the M-step stream, not as a
+    # claim that a 16x16 array swallows a 1000-row operand whole.
+    one_A_tile = A[:, 0:tile_k]              # M x tile_k
+    one_B_tile = B[0:tile_k, 0:tile_n]       # tile_k x tile_n
+    streamed = demo_m_streaming(one_A_tile, one_B_tile)
+    batched = one_A_tile @ one_B_tile
+    print(
+        f"\nOne tile, {M} streaming steps of "
+        f"(1 x {tile_k}) @ ({tile_k} x {tile_n}) vs one batched "
+        f"({M} x {tile_k}) @ ({tile_k} x {tile_n}): "
+        f"{'identical' if np.array_equal(streamed, batched) else 'DIFFER'}"
+    )
 
     C_tiled = matmul_tiled(A, B, tile_k, tile_n)
     C_golden = A @ B
