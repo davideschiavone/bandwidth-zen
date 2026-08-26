@@ -88,12 +88,13 @@ def matmul_tiled_imc(A, B, tile_k=TILE_K, tile_n=TILE_N, units=UNITS, weight_set
             B_tile = B[k_start:k_end, n_start:n_end]  # now resident in the array
             C_tile = C[:, n_start:n_end]
 
-            # Same shorthand as the A100 script (see `demo_m_streaming`
-            # there): the array does NOT swallow a (M x tile_k) operand
-            # whole. B_tile sits resident and A's M rows stream past it, one
-            # (1 x tile_k) @ (tile_k x tile_n) step at a time -- here with an
-            # extra inner cost the A100 does not pay, since Metis is
-            # bit-serial at int8 and spends SUB_CYCLES=8 cycles per operand.
+            # Same shorthand as the A100 script: M is spread over time, not
+            # swallowed whole. Unlike the A100 -- where "B held stationary"
+            # is the model's abstraction rather than what tensor cores do --
+            # here the resident picture is literally right: the weight sets
+            # ARE the storage, B_tile really does sit in the array, and A's
+            # rows stream past it. Metis also pays an inner cost the A100
+            # does not: it is bit-serial at int8, SUB_CYCLES=8 per operand.
             C_tile += A_tile @ B_tile
 
     return C, rewrites

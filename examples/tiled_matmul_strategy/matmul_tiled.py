@@ -75,32 +75,50 @@ def matmul_tiled(A, B, tile_k=16, tile_n=16, units=UNITS):
             #                                            core's own tile
             C_tile = C[:, n_start:n_end]  # M x tile_n
 
-            # NOT a (M x tile_k) @ (tile_k x tile_n) matmul in one shot -- a
-            # 16x16 array cannot do that, and does not try to. The array holds
-            # B_tile STATIONARY and streams A's M rows past it, one row per
-            # step: each step is a (1 x tile_k) @ (tile_k x tile_n) vector-
-            # matrix product, repeated M times. That is what the model's own
-            # pseudo-C means by
-            #     for (m = 0; m < M; ++m) mac(u, &A[m][KSLICE(w, u)]);
-            # and why M "streams; it never tiles" -- M is a time dimension
-            # here, not a spatial one, so it never bounds the array size.
-            # `demo_m_streaming` below proves the two forms agree; this line
-            # batches the M steps into one numpy call only because doing 1000
-            # separate 1x16 products per tile in Python would be unusably slow.
+            # This is not one giant (M x tile_k) @ (tile_k x tile_n) op on
+            # the hardware -- M is spread over time either way. But be
+            # careful about HOW, because the model and the silicon differ:
+            #
+            #   THE MODEL (bwz, analysis/tiling.py) treats every matrix
+            #   engine as a weight-stationary systolic array: B_tile resident,
+            #   A's M rows streaming past one row per cycle. One row against a
+            #   16x16 tile is 1*16*16 = 256 MACs/cycle, which is exactly the
+            #   a100 profile's `ops_per_cycle_per_unit: 256`. Its utilisation
+            #   term M/(M+rows) is that array's pipeline fill and drain (D24).
+            #
+            #   REAL A100 TENSOR CORES are not weight-stationary systolic
+            #   arrays. They execute matrix-matrix MMA instructions -- on
+            #   Ampere m16n8k16, i.e. 16 rows of A per instruction, 2048 MACs
+            #   over ~8 cycles at that same 256 MACs/cycle -- and they hold
+            #   NOTHING stationary; both operands come from registers every
+            #   instruction. The repo says so itself: "the array stores no
+            #   weights: both operands are re-read per instruction" (D30).
+            #
+            # Same arithmetic, same MACs/cycle, different micro-architecture.
+            # `demo_m_streaming` below illustrates the MODEL's abstraction and
+            # proves it gives identical numbers -- it is not a claim about how
+            # NVIDIA silicon issues work. Metis, whose weight sets really are
+            # resident, is the one of the two chips the stationary picture
+            # genuinely fits.
             C_tile += A_tile @ B_tile
 
     return C
 
 
 def demo_m_streaming(A_tile, B_tile):
-    """What one core actually does to one tile, spelled out step by step.
+    """The MODEL's weight-stationary abstraction, spelled out step by step.
 
-    B_tile (tile_k x tile_n) sits stationary in the array. A's rows go past
-    it one at a time -- each step a (1 x tile_k) @ (tile_k x tile_n) vector-
-    matrix product, which is the widest thing a tile_k x tile_n array can do
-    in one step. M steps later the whole M x tile_n result exists.
+    Not a description of A100 silicon -- see the long comment in
+    `matmul_tiled`. Real Ampere tensor cores issue m16n8k16 MMA
+    instructions (16 rows of A at a time, both operands re-read from
+    registers, nothing held resident). This is what bwz's cost model
+    assumes instead: B_tile resident, A's rows past it one per cycle, each
+    step a (1 x tile_k) @ (tile_k x tile_n) product -- 256 MACs/cycle for a
+    16x16 tile, matching the profile, and giving the M/(M+rows) fill/drain
+    term the utilisation model applies.
 
-    Returns the same thing `A_tile @ B_tile` returns -- that is the point.
+    Returns the same thing `A_tile @ B_tile` returns -- that is the point:
+    the two differ in timing structure, never in arithmetic.
     """
     M, _tile_k = A_tile.shape
     _tile_k2, tile_n = B_tile.shape
@@ -167,11 +185,12 @@ def main():
             f"({len(k_slices_seen_in_this_wave)} of them) -- {fullness}"
         )
 
-    # The array never sees a (M x tile_k) @ (tile_k x tile_n) matmul -- it
-    # does M separate (1 x tile_k) @ (tile_k x tile_n) steps. Prove the two
-    # forms agree on one tile, so the batched `A_tile @ B_tile` inside the
-    # loop above is understood as shorthand for the M-step stream, not as a
-    # claim that a 16x16 array swallows a 1000-row operand whole.
+    # Show the model's per-row streaming form gives identical numbers to the
+    # batched one, so the `A_tile @ B_tile` in the loop above is understood
+    # as shorthand for however M is spread over time -- not as a claim that
+    # a 16x16 array swallows a 1000-row operand in one step. (Real A100
+    # tensor cores take 16 rows per MMA instruction, not 1; see the comment
+    # in matmul_tiled. The totals are the same either way.)
     one_A_tile = A[:, 0:tile_k]              # M x tile_k
     one_B_tile = B[0:tile_k, 0:tile_n]       # tile_k x tile_n
     streamed = demo_m_streaming(one_A_tile, one_B_tile)
