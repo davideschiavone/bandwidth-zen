@@ -254,6 +254,8 @@ function activeAt(t) {{
 const codepane = document.getElementById("codepane");
 const codeLineEls = Array.from(codepane.querySelectorAll(".codeline"));
 let lastHotLines = new Set();
+let lastScrollAt = -Infinity;
+const SCROLL_COOLDOWN_MS = 700;
 
 function updateCodeHighlight(events) {{
   // Every event already carries its real lane. Try a lane-specific tag first
@@ -279,12 +281,33 @@ function updateCodeHighlight(events) {{
   const changed =
     hotLines.size !== lastHotLines.size || [...hotLines].some(l => !lastHotLines.has(l));
   if (changed && hotLines.size) {{
-    const firstEl = codeLineEls[Math.min(...hotLines)];
-    if (firstEl) {{
-      const paneBox = codepane.getBoundingClientRect();
-      const lineBox = firstEl.getBoundingClientRect();
-      if (lineBox.top < paneBox.top || lineBox.bottom > paneBox.bottom) {{
-        firstEl.scrollIntoView({{block: "center", behavior: "smooth"}});
+    const paneBox = codepane.getBoundingClientRect();
+    // Scroll only when NOTHING hot is on screen. Checking just the first
+    // (topmost) hot line instead would yank the pane whenever the prefetch
+    // block lit up while the exec/store block was already visible — and
+    // during playback the hot set alternates between those two blocks
+    // constantly, which is exactly what made the pane dance up and down.
+    const anyHotVisible = [...hotLines].some(l => {{
+      const el = codeLineEls[l];
+      if (!el) return false;
+      const b = el.getBoundingClientRect();
+      return b.bottom > paneBox.top && b.top < paneBox.bottom;
+    }});
+    // Even then, rate-limit: two hot blocks further apart than the pane is
+    // tall can never both be visible, so without a cooldown they would take
+    // turns scrolling each other off screen for the whole run.
+    const now = performance.now();
+    if (!anyHotVisible && now - lastScrollAt > SCROLL_COOLDOWN_MS) {{
+      const target = codeLineEls[Math.min(...hotLines)];
+      if (target) {{
+        // Move the pane's own scrollTop rather than calling scrollIntoView,
+        // which walks every scrollable ancestor and drags the whole page
+        // along with it.
+        const lineBox = target.getBoundingClientRect();
+        const delta =
+          (lineBox.top + lineBox.height / 2) - (paneBox.top + paneBox.height / 2);
+        codepane.scrollTop += delta;
+        lastScrollAt = now;
       }}
     }}
   }}
