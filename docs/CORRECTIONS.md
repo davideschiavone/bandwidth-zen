@@ -2094,6 +2094,26 @@ bit-serial chips keep the crossbar branch untouched; the change lands exactly on
 no-dtype path is test-only, and the tests that used it to model Metis/chip_a now pass the dtype and
 exercise the branch those chips really run.
 
+**Verified per chip, not argued.** Different chips genuinely have different rules, so which ones
+moved was measured (`bwz matmul -M 16 -N 4096 -K 4096 --ideal`, shape utilisation, D52 reverted vs
+applied):
+
+| chip | dtype | before | after | branch |
+|---|---|---:|---:|---|
+| `a100_80gb` | fp16 | 49.90% | **99.81%** | MMA — NVIDIA tensor core ([PTX ISA][ptx]) |
+| `h100_sxm` | fp16 | 49.65% | **99.30%** | MMA — NVIDIA tensor core |
+| `jetson_orin` | fp16 | 50.00% | **100.00%** | MMA — NVIDIA (Ampere) tensor core |
+| `mi300x` | fp16 | 49.90% | **99.81%** | MMA — AMD Matrix Core, MFMA ([AMD][mfma]) |
+| `chip_a` | int8 | 3.12% | 3.12% | crossbar — unchanged |
+| `chip_b` | int8 | 3.12% | 3.12% | crossbar — unchanged |
+| `metis_aipu` | int8 | 3.12% | 3.12% | crossbar — unchanged |
+
+The change is therefore **not NVIDIA-only**: it also moves AMD's MI300X, and that is correct rather
+than incidental — AMD Matrix Cores issue fixed-shape `MxNxK` MFMA instructions
+(`__builtin_amdgcn_mfma_CDFmt_MxNxKABFmt`, "`M`, `N` and `K` are matrix dimensions"), the same
+instruction-tile picture as NVIDIA's MMA, so the rule of multiples applies identically. No
+bit-serial chip moved by a single digit.
+
 **Effect** — worst in mid-M, which is where real decode batches sit:
 
 | M (rows=16) | before `m/(m+16)` | after `m/pad(m,16)` |
@@ -2118,3 +2138,4 @@ added.
 
 [ptx]: https://docs.nvidia.com/cuda/parallel-thread-execution/index.html
 [amp]: https://docs.nvidia.com/cuda/ampere-tuning-guide/index.html
+[mfma]: https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores/README.html

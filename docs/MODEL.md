@@ -335,7 +335,9 @@ dimension that carries real work, over `ceil(K/rows) · ceil(N/cols)` tiles. `pa
 
 **Which branch an array takes is physical (D34, D52).** An **MMA unit** — a tensor or matrix core,
 any unit whose dtype multiplier is ≥ 1 — issues fixed instruction tiles (Ampere `.f16`: `m8n8k4`,
-`m16n8k8`, `m16n8k16`; [PTX ISA §9.7.15][ptx]). M and N slice into *independent* output tiles that
+`m16n8k8`, `m16n8k16`; [PTX ISA §9.7.15][ptx]). This covers AMD as well as NVIDIA: CDNA Matrix
+Cores issue fixed-shape `MxNxK` [MFMA][mfma] instructions, so `mi300x` takes this branch for the
+same reason `a100_80gb` does. M and N slice into *independent* output tiles that
 different cores compute in parallel, so **M is a spatial dimension, not a time one**: there is no
 serial pipeline to fill, and every axis is plain padding. A **bit-serial crossbar** — multiplier
 below 1, such as the Metis D-IMC at INT8 (0.125) — is likewise combinational on M, but its
@@ -343,6 +345,7 @@ sub-cycle stream rides K with one sub-cycle row of fill: `K·s / (K_pad·s + s) 
 Neither branch has an M-serial pipeline; they differ only on K.
 
 [ptx]: https://docs.nvidia.com/cuda/parallel-thread-execution/index.html
+[mfma]: https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores/README.html
 
 | case | MMA unit | bit-serial crossbar |
 |---|---|---|
