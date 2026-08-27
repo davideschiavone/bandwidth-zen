@@ -76,12 +76,15 @@ def test_a100_10k_cube_matches_the_datasheet_by_hand() -> None:
     compulsory   = 3 x 10000^2 x 2 bytes = 6.000e8 bytes  (fp16, three operands)
     intensity    = 2.000e12 / 6.000e8    = 3333 OP/byte
     peak fp16    = 312.0e12 OP/s         (A100 datasheet, tensor core)
-    t_compute    = 2.000e12 / (312.0e12 x 0.9984 x 0.99914) = 6.42 ms
+    t_compute    = 2.000e12 / (312.0e12 x 1.0 x 0.99914) = 6.41 ms
 
-    The 0.9984 is the systolic tail on a 16x16 array at M=10000
-    (10000/10016), which --ideal does not remove because it is geometry.
-    An intensity of 3333 against a ridge point of 153 is compute-bound by
-    more than 20x, which no plausible calibration constant can flip.
+    There is NO shape loss here (D52): a tensor core issues fixed instruction
+    tiles, so every axis is rule-of-multiples padding, and 10000 = 625 x 16 is
+    an exact multiple on all three. A perfectly-shaped GEMM wastes no array.
+    (Before D52 this claimed a 0.9984 "systolic tail", 10000/10016 — a
+    pipeline fill an MMA unit does not have.) An intensity of 3333 against a
+    ridge point of 153 is compute-bound by more than 20x, which no plausible
+    calibration constant can flip.
 
     The 0.99914 is wave quantisation across the 432 tensor cores (D30):
     ``ceil(10000/16)^2 = 625^2 = 390 625`` tiles over 432 arrays is 905 waves,
@@ -93,7 +96,7 @@ def test_a100_10k_cube_matches_the_datasheet_by_hand() -> None:
         _spec(10_000, 10_000, 10_000), idealised(load_chip("a100_80gb")), _deployment()
     )
     op = _only_op(report)
-    tail, waves = 10_000 / 10_016, 390_625 / (905 * 432)
+    tail, waves = 1.0, 390_625 / (905 * 432)
 
     assert op.flops == pytest.approx(2.0e12)
     assert op.arithmetic_intensity == pytest.approx(3333.3, rel=1e-3)
@@ -104,14 +107,19 @@ def test_a100_10k_cube_matches_the_datasheet_by_hand() -> None:
 
 
 def test_m_equals_one_reproduces_the_tail_effect() -> None:
-    """A single row on a 16-row array wastes 15 of them: 1/(1+16) = 5.88%.
+    """A single row on a 16-row array wastes 15 of them: 1/16 = 6.25%.
 
     This is the sanity check CLAUDE.md names for the utilisation model, and the
     reason a matmul is a family rather than a hand-costed custom op — a CustomOp
     carries no shape, so this number would silently come back as 100%.
 
+    The loss is *area*: an m16n8k16 instruction tile is issued whether or not
+    its 16 M-rows are occupied, so one row of work pays for sixteen. Before D52
+    this asserted 1/17, a rows-deep pipeline fill that an MMA unit does not
+    have — note the prose above always said "wastes 15 of them", which is 1/16.
+
     Since D30 the chip-level figure also carries wave quantisation, so the pure
-    ``1/17`` is asserted where it lives — on the array — and the chip's value is
+    ``1/16`` is asserted where it lives — on the array — and the chip's value is
     that times the 390 625-tile wave occupancy. Keeping both on the page is the
     point: the first is geometry of one array, the second is how many arrays the
     work could reach.
@@ -119,8 +127,8 @@ def test_m_equals_one_reproduces_the_tail_effect() -> None:
     report = analyze(_spec(1, 10_000, 10_000), idealised(load_chip("a100_80gb")), _deployment())
     op = _only_op(report)
 
-    assert systolic_utilisation(1, 10_000, 10_000, 16, 16) == pytest.approx(1 / 17, rel=1e-6)
-    assert op.utilization == pytest.approx(1 / 17 * 390_625 / (905 * 432), rel=1e-6)
+    assert systolic_utilisation(1, 10_000, 10_000, 16, 16) == pytest.approx(1 / 16, rel=1e-6)
+    assert op.utilization == pytest.approx(1 / 16 * 390_625 / (905 * 432), rel=1e-6)
     assert op.arithmetic_intensity == pytest.approx(1.0, rel=1e-2)
     assert op.bound is Bound.DRAM_BW_BOUND
 

@@ -28,8 +28,9 @@ def test_batch_one_on_a_128x128_array_is_one_over_128() -> None:
     systolic array -> utilization approximately 1/128 from the tail effect. If
     your utilization model doesn't reproduce this, it isn't modelling the array."
 
-    The model gives ``M/(M+rows) = 1/129 = 0.00775`` against ``1/128 = 0.00781``:
-    the extra row is the pipeline drain, which is real.
+    The model gives ``M/padded(M, rows) = 1/128`` exactly (D52): one row of
+    work occupies one 128-row instruction tile and pays for all of it. Before
+    D52 it gave 1/129, treating the loss as a pipeline drain rather than area.
     """
     utilisation = systolic_utilisation(m=1, k=1024, n=1024, rows=128, cols=128)
     assert utilisation == pytest.approx(1 / 128, rel=0.01)
@@ -45,13 +46,16 @@ def test_batch_one_on_a_512x512_array_is_one_over_512() -> None:
 
 @pytest.mark.parametrize(
     ("m", "expected"),
-    [(1, 1 / 513), (128, 128 / 640), (512, 0.5), (2048, 0.8), (8192, 8192 / 8704)],
+    [(1, 1 / 512), (128, 0.25), (512, 1.0), (2048, 1.0), (8192, 1.0)],
 )
 def test_utilisation_rises_with_batch(m: int, expected: float) -> None:
-    """A 512-deep pipeline needs M >> 512 to amortise its fill and drain.
+    """M below one instruction tile wastes the rest of it; a multiple wastes none.
 
-    At M=512 — a 512-token prompt — the array is still only half busy. That is a
-    real architectural property of a deep array, not a modelling artefact.
+    The MMA branch (D52): M is a spatial dimension sliced into independent
+    512-row tiles, so the only M-side loss is the ragged last tile. M=1 pays
+    for a whole 512-row tile (1/512); M=512 and every multiple above it pays
+    for nothing. Before D52 this asserted a rows-deep pipeline fill that never
+    reached 1.0 even on a perfectly-shaped M — 0.5 at M=512, 0.8 at M=2048.
     """
     assert systolic_utilisation(m, 2560, 2560, 512, 512) == pytest.approx(expected, rel=1e-6)
 
@@ -66,7 +70,7 @@ def test_utilisation_never_exceeds_one() -> None:
 def test_ragged_dimensions_waste_the_array() -> None:
     """A 100-wide output on a 512-wide array uses 100/512 of it."""
     assert systolic_utilisation(m=100_000, k=512, n=100, rows=512, cols=512) == pytest.approx(
-        (100 / 512) * (100_000 / 100_512), rel=1e-6
+        (100 / 512) * (100_000 / 100_352), rel=1e-6
     )
 
 
@@ -83,13 +87,21 @@ def test_no_declared_geometry_means_no_tail_effect_claim() -> None:
 
 
 def test_chip_a_decode_projection_utilisation() -> None:
-    """Gemma-3-4B's Q projection at batch 1 on chip_a: 2560x2048 on a 512x512 array."""
+    """Gemma-3-4B's Q projection at batch 1 on chip_a: 2560x2048 on a 512x512 array.
+
+    Passes the dtype, as production does (``roofline.py`` has the only call
+    site and always supplies ``machine.dtype``): chip_a is bit-serial at int8,
+    so this exercises the crossbar branch it actually runs on. Still ~1/512 —
+    one active row of 512 — times the sub-cycle fill riding K.
+    """
     chip = load_chip("chip_a")
     unit = chip.compute_units[0]
     op = Operation(
         id="q", op_type=OpType.MATMUL, attrs=MatmulAttrs(m=1, n=2048, k=2560), outputs=()
     )
-    assert operation_utilisation(op, unit) == pytest.approx(1 / 513, rel=1e-6)
+    expected = (1 / 512) * (2560 / (padded(2560, 512) + 1))
+    assert operation_utilisation(op, unit, DType.INT8) == pytest.approx(expected, rel=1e-12)
+    assert operation_utilisation(op, unit, DType.INT8) == pytest.approx(1 / 512, rel=1e-3)
 
 
 def test_a_bit_serial_crossbar_has_no_m_serial_pipeline() -> None:
@@ -102,15 +114,18 @@ def test_a_bit_serial_crossbar_has_no_m_serial_pipeline() -> None:
         util = M/padded(M, 512) * K/(padded(K, 512) + 1) * N/padded(N, 512)
 
     An 8192-row stream therefore loses one row's fill, not 512: 8192/8193.
-    Without a dtype the conservative systolic tail (rows-deep M pipeline)
-    applies: 8192/8704.
+    Without a dtype there is no bit-serial multiplier to detect, so the MMA
+    branch applies and a perfectly-shaped 8192-cube loses nothing at all
+    (D52). Production never takes that path — ``roofline.py`` is the only
+    call site and always passes ``machine.dtype`` — so it is the INT8 line
+    below that describes what Metis actually reports.
     """
     unit = load_chip("metis_aipu").compute_units[0]
     op = Operation(
         id="mm", op_type=OpType.MATMUL, attrs=MatmulAttrs(m=8192, n=8192, k=8192), outputs=()
     )
     assert operation_utilisation(op, unit, DType.INT8) == pytest.approx(8192 / 8193, rel=1e-12)
-    assert operation_utilisation(op, unit) == pytest.approx(8192 / 8704, rel=1e-12)
+    assert operation_utilisation(op, unit) == pytest.approx(1.0, rel=1e-12)
 
     # The same chip at batch 1: the crossbar wastes area, not pipeline — the
     # M=1 GEMM still runs at ~1/513 of peak (the 1/512 area loss times the
@@ -152,18 +167,22 @@ def test_a_small_matmul_cannot_reach_all_of_metis() -> None:
     ceiling on this shape is a quarter of its 209.7 TOPS. Before D30 the engine
     multiplied one array's throughput by four and reported the whole chip busy.
 
-        shape utilisation  = (100/512)^2 x (100/612) = 0.6233%
+    Modelled on the crossbar branch Metis actually runs (fill_cycles=8 at
+    int8), not the MMA branch: M and N lose area, K carries the sub-cycle
+    fill.
+
+        shape utilisation  = (100/512)^2 x (100/513) = 0.7436%
         wave occupancy     = 1 tile / (1 wave x 4 arrays) = 25%
-        chip utilisation   = 0.1558%
+        chip utilisation   = 0.1859%
     """
     unit = load_chip("metis_aipu").compute_units[0]
     assert unit.count == 4
-    shape = systolic_utilisation(100, 100, 100, 512, 512)
-    chip = systolic_utilisation(100, 100, 100, 512, 512, units=unit.count)
+    shape = systolic_utilisation(100, 100, 100, 512, 512, fill_cycles=8)
+    chip = systolic_utilisation(100, 100, 100, 512, 512, units=unit.count, fill_cycles=8)
 
-    assert shape == pytest.approx(0.006233, rel=1e-3)
+    assert shape == pytest.approx(0.0074361, rel=1e-3)
     assert chip == pytest.approx(shape * 0.25, rel=1e-9)
-    assert chip == pytest.approx(0.0015583, rel=1e-3)
+    assert chip == pytest.approx(0.0018590, rel=1e-3)
 
 
 def test_metis_holds_sixteen_weight_tiles_and_runs_four() -> None:

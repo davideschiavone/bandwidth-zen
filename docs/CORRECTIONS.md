@@ -2060,3 +2060,61 @@ vocabulary the rest of the tool uses.
 Fixed in `dataflow_html.py`'s `drawGeometry`: the three rectangle labels now read "A M=1000 x
 K=3000", "B K=3000 x N=2000", "C M=1000 x N=2000" — naming the dimension inline rather than relying
 on the reader to remember which axis is which from position alone.
+
+## D52 — The M-tail was a systolic pipeline the tensor cores do not have (2026-08-27)
+
+User challenge, after I claimed in an example script that an NVIDIA tensor core streams one row of
+A at a time: *"is the Tensor Core from nvidia processing only 1 ROW of matrix A?"* It is not, and
+the claim was wrong — but the same wrong picture was baked into the cost model, which is the part
+that matters.
+
+**What real tensor cores do.** They issue fixed matrix-matrix instruction tiles — for `.f16` on
+Ampere the shapes are `m8n8k4`, `m16n8k8`, `m16n8k16` ([PTX ISA §9.7.15][ptx]), NVIDIA describing
+3rd-gen tensor cores as having "a larger base matrix size" ([Ampere Tuning Guide][amp]). M and N
+slice into *independent* output tiles dispatched to different cores in parallel; only K is a
+sequential accumulation. So **M is a spatial dimension**, and the only M-side loss is the ragged
+last tile — the rule of multiples, not a pipeline fill.
+
+**What the model charged instead.** `systolic_utilisation`'s non-bit-serial branch used
+`M/(M+rows)`, documented as "a weight-stationary array's pipeline fill and drain" (D24). D34 had
+already found this reading wrong for the Metis crossbar and split the function in two — and stated
+the principle outright: *"The 1/513 is area — one active row of 512 — not a pipeline drain, and
+conflating the two is the bug."* But D34's selector was the **dtype multiplier**, a proxy for "is
+it bit-serial", and a tensor core is neither bit-serial nor a systolic pump, so the proxy misrouted
+it to the pump branch. D52 finishes what D34 started.
+
+**Why no third branch** (the user rejected one, correctly). Every non-bit-serial unit in
+`profiles/chips/` is a 16×16 MMA core — A100, H100, Jetson Orin, MI300X. The repo ships **no**
+conventional systolic pump, so the pump branch had no chip to serve: making it the MMA branch adds
+nothing and removes a model of hardware that is not here. The two branches are now MMA (pad every
+axis) and bit-serial crossbar (pad M and N, sub-cycle fill on K), differing only on K.
+
+**Scope.** `roofline.py:224` is the only production call site and always passes `machine.dtype`, so
+bit-serial chips keep the crossbar branch untouched; the change lands exactly on the MMA chips. The
+no-dtype path is test-only, and the tests that used it to model Metis/chip_a now pass the dtype and
+exercise the branch those chips really run.
+
+**Effect** — worst in mid-M, which is where real decode batches sit:
+
+| M (rows=16) | before `m/(m+16)` | after `m/pad(m,16)` |
+|---:|---:|---:|
+| 1 | 0.059 | 0.063 |
+| 16 | 0.500 | **1.000** |
+| 128 | 0.889 | **1.000** |
+| 2048 | 0.992 | 1.000 |
+
+Llama-3-8B on H100 barely moves (prefill 44.7 → 44.4 ms, util 67.1% → 67.7%, still inside
+CLAUDE.md's 40–70% band; decode unchanged at 165 tok/s, being DRAM-bound). Both `M=1` sanity checks
+now hold *exactly* rather than approximately: 1/128 on a 128×128, 1/512 on a 512×512. The
+`bwz matmul` derivation line no longer says "systolic tail", which would now name the wrong
+mechanism. `docs/MODEL.md` §6.1 rewritten; goldens in `test_tiling.py` and `test_matmul_workload.py`
+updated, including one whose prose ("wastes 15 of them") had always described `1/16` while the
+formula returned `1/17`.
+
+**Not done, flagged only:** instruction-tile granularity is dtype-dependent on real hardware (INT8
+uses `m16n8k32`, so K quantises to 32, not 16), and `HardwareSpec.dataflow` is declared in every
+profile and read by nothing — it would be the honest selector if a genuine systolic array is ever
+added.
+
+[ptx]: https://docs.nvidia.com/cuda/parallel-thread-execution/index.html
+[amp]: https://docs.nvidia.com/cuda/ampere-tuning-guide/index.html

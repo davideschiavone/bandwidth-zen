@@ -321,33 +321,40 @@ the right and a fully resident workload leaves the chart entirely — which is w
 
 ## 6. Single-chip analysis (M3, `analysis/`)
 
-### 6.1 Shape utilisation — the systolic tail effect
+### 6.1 Shape utilisation — the rule of multiples
 
 ```
-systolic:  utilisation = [K / padded(K, rows)] · [N / padded(N, cols)] · [M / (M + rows)]
+MMA unit:  utilisation = [K / padded(K, rows)] · [N / padded(N, cols)] · [M / padded(M, rows)]
 crossbar:  utilisation = [K / (padded(K, rows) + 1)] · [N / padded(N, cols)] · [M / padded(M, rows)]
 ```
 
-A weight-stationary array holds a `rows × cols` weight tile and streams `M` activation rows
-through it. Each tile costs `M + rows` cycles — `M` to push the data, `rows` to fill and drain the
-pipeline — over `ceil(K/rows) · ceil(N/cols)` tiles. Dividing ideal cycles by actual gives the
-product above. `padded()` rounds the **dimension**, never the tile count, so the result is bounded
-by 1 (CLAUDE.md gotchas).
+An array processes fixed `rows × cols` tiles, so a dimension that is not a multiple of the tile is
+padded with zeros and the array computes them anyway. Utilisation is the fraction of each padded
+dimension that carries real work, over `ceil(K/rows) · ceil(N/cols)` tiles. `padded()` rounds the
+**dimension**, never the tile count, so the result is bounded by 1 (CLAUDE.md gotchas).
 
-**Which branch an array takes is physical (D34).** A conventional systolic pump streams M serially
-through a rows-deep pipeline, hence `M/(M+rows)`. A bit-serial crossbar — any unit whose declared
-dtype multiplier is below 1, such as the Metis D-IMC at INT8 (0.125) — is combinational: M enters
-in whole row-chunks in parallel, so the M side loses only area on ragged chunks, and the sub-cycle
-stream rides K with one sub-cycle row of fill: `K·s / (K_pad·s + s) = K/(K_pad + 1)`. The two
-branches agree at batch 1 (both give ≈1/513 on a 512×512) and differ on large-M streams, where the
-crossbar loses its sub-cycle fill only.
+**Which branch an array takes is physical (D34, D52).** An **MMA unit** — a tensor or matrix core,
+any unit whose dtype multiplier is ≥ 1 — issues fixed instruction tiles (Ampere `.f16`: `m8n8k4`,
+`m16n8k8`, `m16n8k16`; [PTX ISA §9.7.15][ptx]). M and N slice into *independent* output tiles that
+different cores compute in parallel, so **M is a spatial dimension, not a time one**: there is no
+serial pipeline to fill, and every axis is plain padding. A **bit-serial crossbar** — multiplier
+below 1, such as the Metis D-IMC at INT8 (0.125) — is likewise combinational on M, but its
+sub-cycle stream rides K with one sub-cycle row of fill: `K·s / (K_pad·s + s) = K/(K_pad + 1)`.
+Neither branch has an M-serial pipeline; they differ only on K.
 
-| case | systolic | bit-serial crossbar |
+[ptx]: https://docs.nvidia.com/cuda/parallel-thread-execution/index.html
+
+| case | MMA unit | bit-serial crossbar |
 |---|---|---|
-| M=1 on 128×128 (CLAUDE.md's check) | 1/129 ≈ **1/128** | ≈ 1/128 |
-| M=1 on 512×512 (chip_a, chip_b, Metis) | **1/513** | ≈ **1/513** |
-| M=512 on 512×512 | 0.50 | ≈ 1.0 |
-| M=2048 on 512×512 | 0.80 | ≈ 0.998 |
+| M=1 on 128×128 (CLAUDE.md's check) | **1/128** | ≈ 1/128 |
+| M=1 on 512×512 (chip_a, chip_b, Metis) | **1/512** | ≈ **1/513** |
+| M=512 on 512×512 | **1.0** | ≈ 1.0 |
+| M=2048 on 512×512 | **1.0** | ≈ 0.998 |
+
+Until D52 the MMA branch instead charged `M/(M+rows)`, a rows-deep pipeline fill borrowed from a
+conventional systolic pump. No chip in `profiles/chips/` is such a pump — every non-bit-serial unit
+is a 16×16 MMA core (A100, H100, Orin, MI300X) — so that term modelled hardware the project does
+not ship, and understated mid-M utilisation by up to 2× (M=16 read 50%, not 100%).
 
 This is the largest single correction the engine applies, and it is separate from — and
 multiplicative with — the achieved-throughput derating in `calibration.py`. See D14 for what it

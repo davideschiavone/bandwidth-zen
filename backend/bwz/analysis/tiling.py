@@ -129,8 +129,16 @@ def systolic_utilisation(
         m_efficiency = m / padded(m, rows)
         k_efficiency = k / (padded(k, rows) + 1)
     else:
-        # Conventional systolic pump: M streams through a rows-deep pipeline.
-        m_efficiency = m / (m + rows)
+        # MMA unit — a tensor/matrix core, not a systolic pump (D52). It
+        # issues fixed instruction tiles (Ampere .f16: m8n8k4, m16n8k8,
+        # m16n8k16 — PTX ISA 9.7.15), so M and N slice into INDEPENDENT
+        # output tiles dispatched to different cores in parallel. M is a
+        # spatial dimension here, not a time one: there is no M-serial
+        # pipeline to fill or drain, and the only M-side loss is the ragged
+        # last tile. All three axes are therefore rule-of-multiples padding,
+        # finishing what D34 started when it called the M=1 loss "area — one
+        # active row of 512 — not a pipeline drain".
+        m_efficiency = m / padded(m, rows)
         k_efficiency = k / padded(k, rows)
     tiles = (padded(k, rows) // rows) * (padded(n, cols) // cols) * max(independent, 1)
     return k_efficiency * n_efficiency * m_efficiency * wave_occupancy(tiles, units)
@@ -145,12 +153,14 @@ def operation_utilisation(op: Operation, unit: ComputeUnit, dtype: DType | None 
     two orders of magnitude, so their compute term never binds and refining it
     would be effort spent where it cannot matter.
 
-    *dtype* selects the pipeline model (D34): a dtype the unit bit-serialises
-    (multiplier < 1) marks the array as a combinational crossbar — no M-serial
-    pipeline, sub-cycle stream on K — while ``None`` (or a full-rate dtype)
-    keeps the conservative ``rows``-deep systolic tail. Both models reproduce
-    the batch-1 1/513-of-peak golden; they differ on large-M streams, where the
-    crossbar loses only its sub-cycle fill.
+    *dtype* selects the physical model (D34, D52): a dtype the unit
+    bit-serialises (multiplier < 1) marks the array as a combinational
+    crossbar — area-only on M, sub-cycle stream on K — while ``None`` (or a
+    full-rate dtype) marks it an MMA unit, which pads on every axis because
+    it issues fixed instruction tiles and has no serial pipeline at all.
+    Neither model has an M-serial pipeline any more; both reproduce the
+    batch-1 ~1/rows golden, and they differ only in whether K carries a
+    sub-cycle fill.
     """
     if unit.systolic_dims is None:
         return 1.0

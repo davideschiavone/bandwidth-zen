@@ -709,7 +709,7 @@ def matmul(
         "shape utilisation",
         f"{op.utilization:.2%}",
         (
-            f"systolic tail on a {dims[0]}x{dims[1]} array — geometry, not a derating"
+            f"shape padded to the {dims[0]}x{dims[1]} tile — geometry, not a derating"
             if dims is not None
             else "profile declares no array geometry, so no tail effect is claimed"
         ),
