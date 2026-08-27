@@ -271,3 +271,68 @@ def test_split_k_buys_occupancy_and_pays_for_it_in_dram() -> None:
     assert split_dram - plain_dram == pytest.approx(split_reduction), (
         "the extra traffic is exactly the partials' round trip, nothing else"
     )
+
+
+@pytest.mark.parametrize(
+    "flow", [Dataflow.ROW_STATIONARY, Dataflow.INPUT_STATIONARY], ids=lambda d: d.value
+)
+def test_the_unshipped_dataflows_still_run_end_to_end(flow: Dataflow) -> None:
+    """``rs`` and ``is`` are implemented and nothing ships declaring them.
+
+    That combination is how a code path rots: it is reachable — a user can write
+    a profile — and no golden covers it. So one is written here, against a
+    profile forged from A100's, checking the properties that must hold for any
+    grid rather than numbers only these two produce: the report is feasible, A
+    still crosses DRAM exactly once, the DRAM lane still sums to ``t_dram``, and
+    the listing's constants still match the schedule (``deploy.check``).
+
+    ``rs`` additionally has to carry its own honesty label — no such machine has
+    been measured here, so its numbers are stated, not claimed (D53).
+    """
+    from bwz.analysis import analyze, build_trace, machine_model
+    from bwz.analysis.pipeline import Stage
+    from bwz.deploy import check as check_deployment
+    from bwz.deploy import deployment_of
+    from bwz.graph import GraphPhase, build_graph
+    from bwz.spec import DeploymentSpec, MatmulSpec, load_chip
+
+    base = load_chip("a100_80gb")
+    units = [
+        unit.model_copy(update={"dataflow": flow, "supported_dataflows": (flow,)})
+        if unit.systolic_dims is not None
+        else unit
+        for unit in base.compute_units
+    ]
+    chip = base.model_copy(update={"compute_units": units, "hypothetical": True})
+    deployment = DeploymentSpec.model_validate(
+        {"batch": 1, "input_tokens": 1, "output_tokens": 0, "phase": "prefill"}
+    )
+    spec = MatmulSpec.model_validate(
+        {"id": "t", "name": "t", "family": "matmul", "m": 1000, "n": 2000, "k": 3000}
+    )
+
+    report = analyze(spec, chip, deployment)
+    assert report.feasible, report.infeasibility
+    op = report.phases[0].ops[0]
+
+    graph = build_graph(spec, deployment, GraphPhase.STATIC)
+    machine = machine_model(chip, spec.operand_dtype)
+    trace = build_trace(
+        graph, report.phases[0], machine, double_buffered=report.memory.double_buffered
+    )
+    listing = deployment_of(
+        chip, machine, report.phases[0], trace, workload="t", operation=graph.ops[0]
+    )
+    check_deployment(listing, trace)
+
+    assert machine.stationarity is flow
+    assert sum(s.bytes_moved for s in trace.spans if s.stage is Stage.LOAD_A) == pytest.approx(
+        op.dram_activation_read_bytes, rel=1e-9
+    )
+    assert sum(s.duration_s for s in trace.spans if s.lane.value == "dram") == pytest.approx(
+        op.t_dram_s, rel=1e-9
+    )
+    assert op.dram_reduction_bytes == 0.0, "neither materialises partials without split-K"
+    assert (any("UNVALIDATED" in a for a in report.assumptions)) is (
+        flow is Dataflow.ROW_STATIONARY
+    )
