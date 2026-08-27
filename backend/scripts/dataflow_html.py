@@ -854,13 +854,29 @@ def render(
             "geometry": geometry,
         }
     )
-    banner = (
-        f"<b>a-strategy</b> {_escape(a_strategy)} &nbsp; · &nbsp; <b>b-dataflow</b> "
-        f"{_escape(b_dataflow)}"
-        if a_strategy is not None and b_dataflow is not None
-        else "<b>workload</b> a network graph — operations run in sequence (D5a), "
-        "no single A/B dataflow strategy to name"
-    )
+    # Stationarity first: it decides the whole decomposition the other two knobs
+    # then place events within, so a reader who sees "a-strategy stage" without
+    # it does not know what a staged group even is (D53).
+    parts: list[str] = []
+    if geometry is not None:
+        parts.append(
+            f"<b>stationarity</b> {_escape(str(geometry['stationarity']))} "
+            f"({_escape(str(geometry['resident']))} resident, "
+            f"{geometry['grid_rows']}x{geometry['grid_cols']} tiles "
+            f"{_escape(str(geometry['row_dim']))}x{_escape(str(geometry['col_dim']))}, "
+            f"sweeping {_escape(str(geometry['swept_dim']))})"
+        )
+        if int(str(geometry["splits"])) > 1:
+            parts.append(f"<b>split-K</b> {geometry['splits']}")
+    if a_strategy is not None and b_dataflow is not None:
+        parts.append(f"<b>a-strategy</b> {_escape(a_strategy)}")
+        parts.append(f"<b>b-dataflow</b> {_escape(b_dataflow)}")
+    elif not parts:
+        parts.append(
+            "<b>workload</b> a network graph — operations run in sequence (D5a), "
+            "no single A/B dataflow strategy to name"
+        )
+    banner = " &nbsp; · &nbsp; ".join(parts)
     notes_html = (
         "<ul>" + "".join(f"<li>{_escape(n)}</li>" for n in notes) + "</ul>" if notes else ""
     )

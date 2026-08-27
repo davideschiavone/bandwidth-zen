@@ -19,6 +19,7 @@ from bwz.graph import GraphPhase, build_graph
 from bwz.operators.base import cost_of
 from bwz.report import Report
 from bwz.spec import BDataflow, DeploymentSpec, DType, MatmulSpec, load_chip, load_model
+from bwz.spec.hardware_spec import Dataflow
 
 
 def _spec(m: int, n: int, k: int, dtype: str = "fp16") -> MatmulSpec:
@@ -85,15 +86,24 @@ def _trace(
 
 
 def test_tile_count_is_the_utilisation_decomposition() -> None:
-    """A 4096x4096 B on a 16x16 array is 256 x 256 = 65 536 tiles.
+    """Whatever the grid is, it is the one ``systolic_utilisation`` divides by.
 
-    The same product ``systolic_utilisation`` divides by, which is what keeps the
-    picture and the utilisation figure from telling different stories.
+    M=1, N=K=4096 on A100's 16x16 tile. Output-stationary — what the profile now
+    declares (D53) — grids the OUTPUT: ceil(1/16) x ceil(4096/16) = 1 x 256, each
+    tile sweeping all 4096 of K inside its own accumulator. Weight-stationary
+    grids B instead: 256 x 256 = 65 536 tiles, each a slice of the contraction
+    that later has to be summed. Both cover the same M*N*K MACs; they disagree
+    only about how the work is cut up, and this is the function that decides —
+    the same one the utilisation figure calls, which is what keeps the picture
+    and the number from telling different stories.
     """
-    machine = machine_model(load_chip("a100_80gb"), DType.FP16)
+    chip = load_chip("a100_80gb")
     graph = build_graph(_spec(1, 4096, 4096), _deployment(), GraphPhase.STATIC)
 
-    assert tile_count(graph.ops[0], machine) == 256 * 256
+    assert machine_model(chip, DType.FP16).stationarity is Dataflow.OUTPUT_STATIONARY
+    assert tile_count(graph.ops[0], machine_model(chip, DType.FP16)) == 1 * 256
+    weight_stationary = machine_model(chip, DType.FP16, stationarity=Dataflow.WEIGHT_STATIONARY)
+    assert tile_count(graph.ops[0], weight_stationary) == 256 * 256
 
 
 def test_lane_spans_sum_back_to_the_reported_terms() -> None:
@@ -407,76 +417,82 @@ def test_span_tile_ranges_partition_the_real_tiles_without_gaps_or_overlap() -> 
     assert k_slice_indices == list(range(16))
 
 
-def test_a_label_names_every_k_slice_a_step_opens_not_just_the_first() -> None:
-    """D48: 1000x1000x2000 fp16 on A100 tiles to 125 k-slices x 63 n-tiles per
-    slice = 7875 tiles over 19 waves, 432 (one full wave) tiles per drawn step.
+def test_a_label_names_every_band_a_step_opens_not_just_the_first() -> None:
+    """D48, in D53's vocabulary: 1000x1000x2000 fp16 on A100, now
+    output-stationary, grids the OUTPUT — ceil(1000/16) = 63 row-bands of M by
+    63 n-tiles = 3969 tiles over 10 waves, 432 (one full wave) per drawn step.
 
-    432 tiles is almost 7 k-slices' worth (432 / 63 ~= 6.86): one step opens
-    *several* k-slices at once, not one. The label used to name only the
-    first (``open_tile // tiles_per_ks``), even though the byte total already
-    (correctly) charged every k-slice the step actually opens — a step
-    spanning k-slices 1 through 7 read as "A k-slice 1/125", silently
-    dropping slices 2-6. It must now name the whole span it opens.
+    432 tiles is almost 7 bands' worth (432 / 63 ~= 6.86): one step opens
+    *several* bands at once, not one. The label used to name only the first
+    (``open_tile // grid.cols``), even though the byte total already
+    (correctly) charged every band the step actually opens — a step spanning
+    bands 1 through 7 read as "A row-band 1/63", silently dropping 2-6. It
+    must name the whole span it opens.
 
     D48's own first fix for this got the *count* wrong the other way — using
-    the block the step's *last tile merely touches*
-    (``(end_tile - 1) // tiles_per_ks``) rather than the block it *finishes*
-    (``end_tile // tiles_per_ks``) named ONE TOO MANY slices: step 0 read
-    "A k-slices 1-7/125" (7 slices) while its own ``bytes_moved`` (192 kB)
-    only ever charged 6 x 32 kB — the block a step's last tile lands in is
-    finished by whichever *later* step's own end crosses out of it, not by
-    this one, so this step must not claim it. Every assertion below is a
-    form of that one invariant: the label's slice *count* must equal
-    ``bytes_moved / (one slice's bytes)`` exactly, for every span, not just
-    a hand-checked pair.
+    the block the step's *last tile merely touches* (``(end_tile - 1) //
+    grid.cols``) rather than the block it *finishes* (``end_tile //
+    grid.cols``) named ONE TOO MANY: step 0 read "1-7/63" (7 bands) while its
+    own ``bytes_moved`` only ever charged 6 — the block a step's last tile
+    lands in is finished by whichever *later* step's own end crosses out of
+    it, not by this one, so this step must not claim it. Every assertion below
+    is a form of that one invariant: the label's band *count* must equal
+    ``bytes_moved / (one band's bytes)`` exactly, for every span, not just a
+    hand-checked pair.
+
+    That the bands are bands of M rather than slices of K is exactly what the
+    stationarity decides, and nothing else about the shape of this test moves
+    with it — which is the point of routing both through the grid.
     """
     trace, report = _trace(_spec(1000, 1000, 2000, "fp16"), "a100_80gb", max_steps=64)
     op = report.phases[0].ops[0]
     a_spans = [s for s in trace.spans if s.stage is Stage.LOAD_A]
-    k_slices = 125
-    bytes_per_slice = op.dram_activation_read_bytes / k_slices
+    bands = 63
+    # Every band is a full 16 rows here: 63 * 16 = 1008 != 1000, so the last is
+    # ragged and the fleet-wide average is NOT the right per-band weight. Only
+    # the full bands are checked against it; the ragged tail has its own test.
+    full_band_bytes = 16 * 2000 * 2.0
 
-    assert a_spans[0].label == "A k-slices 1-6/125 (1000x16) — staged once, feed their tiles"
-    assert a_spans[1].label == "A k-slices 7-13/125 (1000x16) — staged once, feed their tiles"
+    assert a_spans[0].label == "A row-bands 1-6/63 (16x2000) — staged once, feed their tiles"
+    assert a_spans[1].label == "A row-bands 7-13/63 (16x2000) — staged once, feed their tiles"
     assert sum(s.bytes_moved for s in a_spans) == pytest.approx(
         op.dram_activation_read_bytes, rel=1e-9
     )
-    for span in a_spans:
+    for span in a_spans[:-1]:
         assert span.tile_start is not None and span.tile_end is not None
         assert span.grid is not None
         first = span.tile_start // span.grid.cols + 1
         last = span.tile_end // span.grid.cols
+        assert span.grid.a_events == bands
         assert (
-            f"A k-slice {first}/" in span.label
+            f"A row-band {first}/" in span.label
             if first == last
-            else f"A k-slices {first}-{last}/" in span.label
+            else f"A row-bands {first}-{last}/" in span.label
         )
-        # The label's own slice count must reconcile with the bytes this
-        # exact span carries — the whole point being fixed here.
-        slice_count = last - first + 1
-        assert span.bytes_moved == pytest.approx(slice_count * bytes_per_slice, rel=1e-9)
+        # The label's own band count must reconcile with the bytes this exact
+        # span carries — the whole point being fixed here.
+        assert span.bytes_moved == pytest.approx((last - first + 1) * full_band_bytes, rel=1e-9)
 
 
-def test_a_k_slice_bytes_are_exact_not_a_fleet_wide_average() -> None:
-    """D48: 1000x2000x3000 fp16 on A100 tiles K to ceil(3000/16) = 188
-    k-slices of 16 rows — except the last, which is only 3000 - 187*16 = 8
-    rows (188*16 = 3008 != 3000, so K does not divide evenly).
+def test_a_band_bytes_are_exact_not_a_fleet_wide_average() -> None:
+    """D48: 1000x2000x3000 fp16 on A100, output-stationary, cuts M into
+    ceil(1000/16) = 63 row-bands of 16 rows — except the last, which is only
+    1000 - 62*16 = 8 rows (63*16 = 1008 != 1000, so M does not divide evenly).
 
-    A uniform total/188 average would charge every slice ~31.9 kB regardless
-    — under-charging the 187 full-width slices and over-charging the ragged
-    last one. A step naming three full k-slices (1-3) must charge exactly
-    3 x 1000 x 16 x 2 B = 96 000 B, not a fraction of the fleet-wide average;
-    the step naming the ragged tail (187-188) must charge the true, smaller
-    sum: one full slice (32 000 B) plus one 8-row slice (16 000 B) = 48 000 B.
+    A uniform total/63 average would charge every band ~95.2 kB regardless —
+    under-charging the 62 full-height bands and over-charging the ragged last
+    one. A step naming three full bands (1-3) must charge exactly
+    3 x 16 x 3000 x 2 B = 288 000 B, not a fraction of the fleet-wide average;
+    the step naming the ragged tail alone must charge 8 x 3000 x 2 = 48 000 B.
     """
     trace, report = _trace(_spec(1000, 2000, 3000, "fp16"), "a100_80gb", max_steps=64)
     op = report.phases[0].ops[0]
     a_spans = [s for s in trace.spans if s.stage is Stage.LOAD_A]
 
-    assert a_spans[0].label == "A k-slices 1-3/188 (1000x16) — staged once, feed their tiles"
-    assert a_spans[0].bytes_moved == pytest.approx(96_000.0, rel=1e-9)
-    assert a_spans[-1].label == "A k-slices 187-188/188 (1000x16) — staged once, feed their tiles"
-    assert a_spans[-1].bytes_moved == pytest.approx(48_000.0, rel=1e-9)
+    assert a_spans[0].label == "A row-bands 1-3/63 (16x3000) — staged once, feed their tiles"
+    assert a_spans[0].bytes_moved == pytest.approx(288_000.0, rel=1e-9)
+    assert a_spans[-1].label == "A row-band 63/63 (16x3000) — staged once, feeds its tiles"
+    assert a_spans[-1].bytes_moved == pytest.approx(48_000.0, rel=1e-9), "8 rows, not 16"
     assert sum(s.bytes_moved for s in a_spans) == pytest.approx(
         op.dram_activation_read_bytes, rel=1e-9
     )

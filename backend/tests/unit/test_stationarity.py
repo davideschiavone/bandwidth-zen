@@ -196,3 +196,78 @@ def test_a_chip_running_its_own_declared_dataflow_is_always_accepted() -> None:
     for chip_id in ("a100_80gb", "h100_sxm", "metis_aipu", "chip_a"):
         for unit in load_chip(chip_id).compute_units:
             assert refusal_reason(unit, unit.dataflow) is None, chip_id
+
+
+def test_the_mma_chips_default_to_the_cublas_dataflow() -> None:
+    """The flip D53 exists for: the four matrix-core profiles declare ``os``.
+
+    ``test_asking_a_chip_for_a_dataflow_it_cannot_run_is_refused_not_clamped``
+    is deliberately flip-agnostic — it asks for ``is``, which nothing declares.
+    This one is not: it pins the default, so a profile silently reverting to
+    ``ws`` would fail here rather than quietly re-introducing a decomposition
+    with an uncharged reduction in it.
+
+    Metis and the two hypothetical NPUs stay weight-stationary. Their weights
+    ARE their memory (D30), so an accumulator-resident dataflow is not a thing
+    they could run.
+    """
+    from bwz.spec import load_chip
+
+    for chip_id in ("a100_80gb", "h100_sxm", "jetson_orin", "mi300x"):
+        matrix_unit = load_chip(chip_id).compute_units[0]
+        assert matrix_unit.systolic_dims is not None, chip_id
+        assert matrix_unit.dataflow is Dataflow.OUTPUT_STATIONARY, chip_id
+        assert refusal_reason(matrix_unit, Dataflow.WEIGHT_STATIONARY) is not None, (
+            f"{chip_id} must not silently accept the decomposition it moved away from"
+        )
+
+    for chip_id in ("metis_aipu", "chip_a", "chip_b"):
+        arrays = [u for u in load_chip(chip_id).compute_units if u.systolic_dims is not None]
+        assert arrays, chip_id
+        assert all(u.dataflow is Dataflow.WEIGHT_STATIONARY for u in arrays), chip_id
+
+
+def test_split_k_buys_occupancy_and_pays_for_it_in_dram() -> None:
+    """The whole trade, end to end on the chip that can now run it.
+
+    512x512x4096 fp16 on A100: the output grid alone is 32x32 = 1024 tiles
+    against 432 tensor cores — 3 waves whose last is a third full, so wave
+    occupancy is 1024/(3*432) = 0.79. Cutting K in eight gives 8192 tiles and
+    19 waves at 0.998, but the eight partials of the whole 512x512 output have
+    to be written and read back: 8 x 512 x 512 x 2 B x 2 = 8.4 MB against the
+    4.7 MB the un-split GEMM moves in total. That is CUTLASS's second kernel,
+    and it is why split-K is the exception rather than the default (D53).
+    """
+    from bwz.analysis import analyze
+    from bwz.spec import DeploymentSpec, MatmulSpec, load_chip
+
+    spec = MatmulSpec.model_validate(
+        {"id": "t", "name": "t", "family": "matmul", "m": 512, "n": 512, "k": 4096}
+    )
+
+    def run(splits: int) -> tuple[float, float, float]:
+        deployment = DeploymentSpec.model_validate(
+            {
+                "batch": 1,
+                "input_tokens": 1,
+                "output_tokens": 0,
+                "phase": "prefill",
+                "split_k": splits,
+            }
+        )
+        report = analyze(spec, load_chip("a100_80gb"), deployment)
+        assert report.feasible, report.infeasibility
+        op = report.phases[0].ops[0]
+        return op.utilization, op.dram_reduction_bytes, op.dram_bytes
+
+    plain_util, plain_reduction, plain_dram = run(1)
+    split_util, split_reduction, split_dram = run(8)
+
+    assert plain_reduction == 0.0, "one kernel, nothing materialised"
+    assert plain_util == pytest.approx(1024 / (3 * 432), rel=1e-6)
+    assert split_util == pytest.approx(8192 / (19 * 432), rel=1e-6)
+    assert split_util > plain_util, "more tiles fill the chip better"
+    assert split_reduction == pytest.approx(8 * 512 * 512 * 2.0 * 2.0)
+    assert split_dram - plain_dram == pytest.approx(split_reduction), (
+        "the extra traffic is exactly the partials' round trip, nothing else"
+    )

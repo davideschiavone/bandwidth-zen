@@ -120,15 +120,24 @@ def test_m_equals_one_reproduces_the_tail_effect() -> None:
 
     Since D30 the chip-level figure also carries wave quantisation, so the pure
     ``1/16`` is asserted where it lives — on the array — and the chip's value is
-    that times the 390 625-tile wave occupancy. Keeping both on the page is the
-    point: the first is geometry of one array, the second is how many arrays the
-    work could reach.
+    that times the wave occupancy. Keeping both on the page is the point: the
+    first is geometry of one array, the second is how many arrays the work could
+    reach.
+
+    D53 moved only the second. A100 is now output-stationary, so the grid is the
+    OUTPUT's: ceil(1/16) x ceil(10000/16) = 1 x 625 tiles, each sweeping all of
+    K in its own accumulator. 625 tiles over 432 tensor cores is 2 waves whose
+    second is 193/432 full, so occupancy is 625/(2*432) = 0.723 and the chip
+    figure is 4.52%. Weight-stationary reported 390 625 tiles and an occupancy
+    of 0.999 — but every one of those tiles held a partial sum needing a
+    reduction the model never charged. Losing the higher number here is the
+    correct direction: the parallelism it claimed was not free.
     """
     report = analyze(_spec(1, 10_000, 10_000), idealised(load_chip("a100_80gb")), _deployment())
     op = _only_op(report)
 
     assert systolic_utilisation(1, 10_000, 10_000, 16, 16) == pytest.approx(1 / 16, rel=1e-6)
-    assert op.utilization == pytest.approx(1 / 16 * 390_625 / (905 * 432), rel=1e-6)
+    assert op.utilization == pytest.approx(1 / 16 * 625 / (2 * 432), rel=1e-6)
     assert op.arithmetic_intensity == pytest.approx(1.0, rel=1e-2)
     assert op.bound is Bound.DRAM_BW_BOUND
 

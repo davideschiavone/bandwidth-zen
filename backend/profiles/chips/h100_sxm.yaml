@@ -13,7 +13,12 @@ compute_units:
     dtype_multipliers: {fp16: 1.0, bf16: 1.0, fp8: 2.0, int8: 2.0, tf32: 0.5}
     structured_sparsity_speedup: 2.0
     systolic_dims: [16, 16]
-    dataflow: ws
+    dataflow: os                   # C accumulates in registers inside one output tile:
+                                   # CUTLASS's accumulators "typically occupy at least half a
+                                   # thread's total register budget", and split-K — the only
+                                   # shape needing a cross-core reduction — is the exception,
+                                   # for "too few threadblocks to efficiently occupy the
+                                   # entire GPU". docs/CORRECTIONS.md D53.
   - name: cuda_core
     count: 16896                   # 132 SMs x 128 FP32 lanes
     ops_per_cycle_per_unit: 1

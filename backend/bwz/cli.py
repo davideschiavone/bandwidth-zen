@@ -24,8 +24,9 @@ from bwz.analysis.compare import head_to_head, prefill_crossover
 from bwz.analysis.dataflow import plan_dataflow
 from bwz.analysis.pipeline import Lane, PipelineTrace, build_trace
 from bwz.analysis.roofline import compute_dtype
+from bwz.analysis.stationarity import grid_for
 from bwz.graph import build_graph
-from bwz.graph.ops import GraphPhase
+from bwz.graph.ops import GraphPhase, MatmulAttrs
 from bwz.kernels import encoder_layer_kernel, matmul_kernel
 from bwz.operators.base import cost_of
 from bwz.report import Bound, Report
@@ -46,6 +47,7 @@ from bwz.spec import (
     load_model,
 )
 from bwz.spec.deployment import AStrategy, AttentionImpl, BDataflow, DeploymentSpec, Phase
+from bwz.spec.hardware_spec import Dataflow
 from bwz.spec.loaders import AnyModelSpec
 from bwz.units import format_bandwidth, format_bytes, format_quantity, format_time
 
@@ -267,6 +269,8 @@ def _dataflow_options(
     a_residency_tiles: int | None,
     a_prefetch_depth: int | None,
     iterations: int,
+    stationarity: Dataflow | None = None,
+    split_k: int = 1,
 ) -> dict[str, object]:
     """The single-matmul dataflow fields, as a fragment to merge into a
     ``DeploymentSpec`` dict. Shared by ``matmul`` and ``run`` so the two
@@ -278,7 +282,24 @@ def _dataflow_options(
         "a_residency_tiles": a_residency_tiles,
         "a_prefetch_depth": a_prefetch_depth,
         "iterations": iterations,
+        "stationarity": stationarity,
+        "split_k": split_k,
     }
+
+
+STATIONARITY_HELP = (
+    "Which operand stays resident, deciding the whole decomposition (D53): "
+    "os (C in the accumulator, K swept inside the tile — what cuBLAS does), "
+    "ws (B held, M streams past), is (A held, N streams past), rs (Eyeriss "
+    "row-stationary, unvalidated). Default: the chip's own. A chip that cannot "
+    "run the one you ask for is REFUSED, not clamped."
+)
+SPLIT_K_HELP = (
+    "Cut the contraction into this many independent pieces when the output grid "
+    "alone cannot fill the chip. Only os has anything left to split; it costs "
+    "CUTLASS's second kernel — the partials' DRAM round trip, the adds on the "
+    "vector unit, one more dispatch (D53)."
+)
 
 
 @app.command()
@@ -304,6 +325,12 @@ def run(
     phase: Phase = typer.Option(Phase.BOTH, "--phase", rich_help_panel=PANEL_DEPLOYMENT),
     attention: AttentionImpl = typer.Option(
         AttentionImpl.FLASH2, "--attention", rich_help_panel=PANEL_DEPLOYMENT
+    ),
+    stationarity: Dataflow | None = typer.Option(
+        None, "--stationarity", help=STATIONARITY_HELP, rich_help_panel=PANEL_DATAFLOW_INERT
+    ),
+    split_k: int = typer.Option(
+        1, "--split-k", help=SPLIT_K_HELP, rich_help_panel=PANEL_DATAFLOW_INERT
     ),
     a_strategy: AStrategy = typer.Option(
         AStrategy.STAGE,
@@ -373,7 +400,13 @@ def run(
                 "attention_impl": attention,
                 "precision": {"weights": weights, "activations": weights, "kv_cache": weights},
                 **_dataflow_options(
-                    a_strategy, b_dataflow, a_residency_tiles, a_prefetch_depth, iterations
+                    a_strategy,
+                    b_dataflow,
+                    a_residency_tiles,
+                    a_prefetch_depth,
+                    iterations,
+                    stationarity,
+                    split_k,
                 ),
             }
         )
@@ -543,6 +576,10 @@ def matmul(
         "widening accumulator",
         rich_help_panel=PANEL_PRECISION,
     ),
+    stationarity: Dataflow | None = typer.Option(
+        None, "--stationarity", help=STATIONARITY_HELP, rich_help_panel=PANEL_DATAFLOW
+    ),
+    split_k: int = typer.Option(1, "--split-k", help=SPLIT_K_HELP, rich_help_panel=PANEL_DATAFLOW),
     a_strategy: AStrategy = typer.Option(
         AStrategy.STAGE,
         "--a-strategy",
@@ -622,7 +659,13 @@ def matmul(
                 "output_tokens": 0,
                 "phase": Phase.PREFILL,
                 **_dataflow_options(
-                    a_strategy, b_dataflow, a_residency_tiles, a_prefetch_depth, iterations
+                    a_strategy,
+                    b_dataflow,
+                    a_residency_tiles,
+                    a_prefetch_depth,
+                    iterations,
+                    stationarity,
+                    split_k,
                 ),
             }
         )
@@ -641,7 +684,14 @@ def matmul(
             console.print(f"  • {reason}")
         raise typer.Exit(code=2)
 
-    machine = machine_model(_chip_for(chip, ideal), spec.operand_dtype)
+    # Same stationarity and split-K the report was built with, or the table
+    # would name a decomposition the numbers beside it do not come from (D53).
+    machine = machine_model(
+        _chip_for(chip, ideal),
+        spec.operand_dtype,
+        stationarity=stationarity,
+        k_partitions=split_k,
+    )
     summary = report.summary
     assert summary is not None
     op = report.phases[0].ops[0]
@@ -705,6 +755,30 @@ def matmul(
         "effective OP/s / effective bytes/s — above it the chip is compute-bound",
     )
     dims = machine.unit.systolic_dims
+    # The decomposition, on the face of the table rather than only in the
+    # assumptions drawer: the tile count, the wave occupancy and any reduction
+    # all follow from it, so a reader checking the utilisation below needs to
+    # see which grid it was computed against (D53).
+    grid = grid_for(machine.stationarity, MatmulAttrs(m=m, n=n, k=k), *(dims or (0, 0)))
+    if dims is not None:
+        table.add_row(
+            "stationarity",
+            machine.stationarity.value,
+            f"{grid.resident.value} resident, {grid.rows:,} x {grid.cols:,} tiles "
+            f"({grid.row_dim.value} x {grid.col_dim.value}) each sweeping {grid.swept_dim.value}"
+            + (
+                f" — {machine.unit.name}'s own"
+                if stationarity is None
+                else " — requested with --stationarity"
+            ),
+        )
+        if grid.materialises_partials:
+            table.add_row(
+                "split-K",
+                f"{grid.k_partitions}",
+                "CUTLASS's two kernels: partials out to DRAM and back, summed on "
+                f"{machine.vector_unit.name}",
+            )
     table.add_row(
         "shape utilisation",
         f"{op.utilization:.2%}",

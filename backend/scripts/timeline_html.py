@@ -105,22 +105,28 @@ TEMPLATE = """<!doctype html>
                 font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
                 font-size: 11.5px; line-height: 1.5; }}
   footer {{ margin-top: 22px; font-size: 11px; color: var(--ink-3); }}
+  .banner {{ margin: 0 0 14px; padding: 7px 10px; border: 1px solid var(--rule);
+             border-radius: 5px; font-size: 12px; color: var(--ink-2);
+             background: var(--surface); }}
+  .banner b {{ color: var(--ink); }}
   code {{ font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }}
 </style>
 
 <h1>{title}</h1>
 <p class="sub">{subtitle}</p>
+{banner}
 {boxes}
 <p class="hint">Rows are hardware resources, not steps. <b>Wheel</b> zooms about the cursor ·
 <b>drag</b> pans · <b>double-click</b> resets · <b>hover</b> a bar for its own numbers.
 On the DRAM row, solid bars are <b>operand B</b> (the tile the array holds), hatched bars are
 <b>operand A</b> (streaming through it), and hollow bars are the result written back.
 Grey rows are declared by the chip and unused by this model. <b>Reading a tile address:</b>
-<code>B(row,col)</code>/<code>C(:,col)</code> number tiles row-major within B's tile grid — row is
-the k-slice, col the n-tile inside it, 0-indexed. A comma-range like <code>0..124</code> is not one
-tile — it names every tile in that row from column 0 through 124, compacted so hundreds of tiles
-read as a few ranges rather than being spelled out one by one. <code>A(:,g)</code> has no column at
-all: A is 1-D, one k-slice wide, the whole M height (never tiled along M).{hint}</p>
+<code>Operand(row,col)</code> numbers tiles row-major within the tile grid the banner above names,
+0-indexed; <code>:</code> in either position means that dimension is swept in full rather than cut,
+so <code>C(:,col)</code> is one column band of C over the whole of M (D53). A comma-range like
+<code>0..124</code> is not one tile — it names every tile in that row from column 0 through 124,
+compacted so hundreds of tiles read as a few ranges rather than being spelled out one by
+one.{hint}</p>
 <div id="wrap"><svg id="chart"></svg><div id="tip"></div></div>
 
 <h2 class="section">Roofline — where this workload sits</h2>
@@ -471,8 +477,15 @@ def render(
     total_s: float,
     deployments: list[dict[str, str]] | None = None,
     hint: str = "",
+    banner: str = "",
 ) -> str:
-    """Build the page. Pure: returns text, writes nothing."""
+    """Build the page. Pure: returns text, writes nothing.
+
+    *banner* is the decomposition the timeline below is of — the stationarity,
+    its grid, and any split-K (D53). Without it a reader has no way to know
+    what ``B(row,col)`` on a bar's hover is indexing into; empty for a workload
+    with no single tile grid to name, and the strip is then not drawn.
+    """
     parts: list[str] = []
     band: str | None = None
     for box in boxes:
@@ -519,6 +532,7 @@ def render(
         explanations=ops_html,
         deployments=deploy_html,
         hint=hint,
+        banner=f'<p class="banner">{banner}</p>' if banner else "",
     )
 
 

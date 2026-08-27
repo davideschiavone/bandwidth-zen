@@ -170,6 +170,54 @@ COMMANDS = [
         "on-demand",
     ],
     ["compare", "--chips", "chip_a,chip_b", "--models", "gemma3_4b"],
+    # D53's two knobs, on both commands that take them: --stationarity naming
+    # the chip's own (never a refusal, so exit code 0 stays meaningful) and
+    # --split-k, which only os has anything to split but which every command
+    # must accept and account for.
+    [
+        "matmul",
+        "-M",
+        "512",
+        "-N",
+        "512",
+        "-K",
+        "4096",
+        "--chip",
+        "a100_80gb",
+        "--stationarity",
+        "os",
+        "--split-k",
+        "4",
+        "--ideal",
+    ],
+    [
+        "matmul",
+        "-M",
+        "512",
+        "-N",
+        "512",
+        "-K",
+        "4096",
+        "--chip",
+        "metis_aipu",
+        "-d",
+        "int8",
+        "--stationarity",
+        "ws",
+    ],
+    [
+        "run",
+        "-m",
+        "llama3_8b",
+        "-c",
+        "a100_80gb",
+        "--input-tokens",
+        "64",
+        "--output-tokens",
+        "4",
+        "--split-k",
+        "2",
+    ],
 ]
 
 

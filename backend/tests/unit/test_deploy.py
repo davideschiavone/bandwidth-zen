@@ -122,27 +122,36 @@ def test_an_imc_array_gets_weight_sets_and_a_write_and_a_tensor_core_does_not() 
     assert a100.resident_tiles == a100.units, "no weight residency: capacity is just the arrays"
 
 
-def test_an_mma_unit_issues_instruction_tiles_and_a_resident_array_streams_m() -> None:
-    """D52: the loop nest must not narrate what the cost model denies.
+def test_an_mma_unit_issues_instruction_tiles_and_a_resident_array_streams() -> None:
+    """D52/D53: the loop nest must not narrate what the cost model denies.
 
-    A tensor core holds nothing stationary and issues fixed instruction tiles,
-    so M quantises into ``ceil(M/ROWS)`` of them — the same padding the
-    utilisation term applies. Printing ``for (m = 0; m < M; ++m)`` past a
-    "held by the array" tile would contradict both D52 and D30's "the array
-    stores no weights". Metis genuinely is resident, so it keeps the stream.
+    Two independent facts meet in this listing, and the test pins both.
 
-    M=1000 on A100's 16-row tile is ceil(1000/16) = 63 instruction tiles.
+    *Which dimension is swept* is the STATIONARITY's (D53). A100 declares
+    output-stationary, so C's accumulator is what stays put and each tile
+    sweeps K — ceil(3000/16) = 188 instruction tiles of it — while M and N
+    index the grid. Metis is weight-stationary: B stays put and M is what
+    streams past it.
+
+    *How the swept dimension is walked* is the UNIT's (D52). A tensor core
+    holds nothing and issues fixed instruction tiles, so the sweep quantises
+    into whole tiles; Metis's in-memory array genuinely holds a weight tile and
+    streams elements past it. Printing ``for (m = 0; m < M; ++m)`` past a
+    "held by the array" tile on a tensor core would contradict D52 and D30's
+    "the array stores no weights" in the same breath.
     """
     _c, _m, _g, _t, a100 = _run("a100_80gb", 1000, 2000, 3000, dtype="fp16")
     _c2, _m2, _g2, _t2, metis = _run("metis_aipu", 1000, 2000, 3000)
 
-    assert "#define MTILES       63" in a100.code, "ceil(1000/16)"
-    assert "for (int mt = 0; mt < MTILES; ++mt)" in a100.code
-    assert "mma(u, &A[mt * ROWS]" in a100.code
+    assert "#define KTILES       188" in a100.code, "ceil(3000/16): K is what os sweeps"
+    assert "for (int kt = 0; kt < KTILES; ++kt)" in a100.code
+    assert "mma(u, &A[GROUP(w, u)][kt * ROWS], &B[kt * ROWS][COL(w, u)]);" in a100.code
+    assert "accumulates in the tile's own accumulator" in a100.code
     assert "held by the array" not in a100.code
-    assert "M streams past it" not in a100.code
+    assert "no reduction to pay for" in a100.code
 
-    assert "MTILES" not in metis.code
+    assert "KTILES" not in metis.code
+    assert "#define GRID_ROWS    6 " in metis.code, "ceil(3000/512): ws grids K"
     assert "for (int m = 0; m < 1000; ++m)" in metis.code
     assert "held by the array" in metis.code
 

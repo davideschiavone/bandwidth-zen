@@ -60,7 +60,7 @@ import bwz
 from bwz.analysis import analyze, idealised, machine_model
 from bwz.analysis.dataflow import DataflowPlan, plan_dataflow
 from bwz.analysis.pipeline import Lane, PipelineTrace, Span, Stage, build_trace
-from bwz.analysis.roofline import MATRIX_OP_TYPES, compute_dtype
+from bwz.analysis.roofline import MATRIX_OP_TYPES, MachineModel, compute_dtype
 from bwz.analysis.stationarity import Dim, TileGrid
 from bwz.deploy import check as check_deployment
 from bwz.deploy import deployment_of
@@ -80,6 +80,7 @@ from bwz.spec import (
     load_chip,
     load_model,
 )
+from bwz.spec.hardware_spec import Dataflow
 from bwz.units import format_bandwidth, format_bytes, format_quantity, format_time
 
 # Chip identity, used only where two machines share one chart: the band rules on
@@ -111,6 +112,10 @@ class Workload:
     ``analysis.dataflow.plan_dataflow``, the same plan that decided the bytes this
     trace draws — so the deployment listing cannot render a strategy the schedule
     above it did not actually run."""
+    machine: MachineModel | None = None
+    """The machine this workload was analysed with, carrying the effective
+    stationarity and split-K (D53). ``None`` where the defaults were used and a
+    freshly derived model is identical."""
 
 
 @dataclass(frozen=True)
@@ -124,6 +129,16 @@ class Panel:
     chip: HardwareSpec
     dtype: DType
     work: Workload
+
+    @property
+    def machine(self) -> MachineModel:
+        """The machine the workload was analysed with.
+
+        Deriving a fresh one here would silently drop the stationarity and
+        split-K the run actually used, and the listing would then describe a
+        decomposition the timeline above it is not of (D53).
+        """
+        return self.work.machine or machine_model(self.chip, self.dtype)
 
     @property
     def colour(self) -> str:
@@ -480,7 +495,7 @@ def _deployments(panels: list[Panel]) -> list[dict[str, str]]:
         dataflow = work.dataflow
         listing = deployment_of(
             panel.chip,
-            machine_model(panel.chip, panel.dtype),
+            panel.machine,
             work.phase,
             work.trace,
             workload=f"{work.name} at {panel.dtype.value}",
@@ -494,6 +509,36 @@ def _deployments(panels: list[Panel]) -> list[dict[str, str]]:
         check_deployment(listing, work.trace)
         out.append({"title": listing.title, "code": listing.code})
     return out
+
+
+def _stationarity_banner(panels: list[Panel]) -> str:
+    """The decomposition the timeline is of, for the page's banner strip (D53).
+
+    Empty for a workload with no single tile grid — a network's operations run
+    in sequence (D5a) and have no one grid between them — and for a comparison
+    whose chips disagree, where one line could only be wrong about one of them;
+    each chip's own listing states its grid in that case.
+    """
+    grids = {
+        panel.work.trace.spans[0].grid
+        for panel in panels
+        if panel.work.trace.spans and panel.work.trace.spans[0].grid is not None
+    }
+    if len(grids) != 1:
+        return ""
+    grid = next(iter(grids))
+    banner = (
+        f"<b>stationarity</b> {grid.stationarity.value} — {grid.resident.value} stays resident, "
+        f"in a {grid.rows:,} x {grid.cols:,} tile grid "
+        f"({grid.row_dim.value} x {grid.col_dim.value}) whose tiles each sweep "
+        f"{grid.swept_dim.value}. Tile addresses on the bars below index into it."
+    )
+    if grid.k_partitions > 1:
+        banner += (
+            f" <b>split-K</b> {grid.k_partitions}: the contraction is cut that many ways and "
+            f"summed by a second kernel, drawn at the end of the DRAM and vector rows."
+        )
+    return banner
 
 
 def write_html(panels: list[Panel], command: str, out: Path) -> None:
@@ -515,6 +560,7 @@ def write_html(panels: list[Panel], command: str, out: Path) -> None:
             f"<br><code>$ {command}</code>"
         ),
         boxes=_boxes(panels),
+        banner=_stationarity_banner(panels),
         rows=[
             {
                 "title": row.title,
@@ -700,24 +746,28 @@ def _tip(span: Span) -> str:
     idx = _index_notation(span)
     idx_line = f"\n{idx}" if idx else ""
     if span.lane is Lane.DRAM:
+        # "band" rather than "k-slice": what one A staging event covers follows
+        # the grid, and is a slice of K only under weight-stationary (D53).
+        band = span.grid.group_name if span.grid is not None else "k-slice"
         kind = {
             Stage.STORE: "STORE — result C written back",
-            Stage.LOAD: "LOAD — operand B, the tile the array holds",
+            Stage.LOAD: "LOAD — operand B",
+            Stage.REDUCE: "REDUCE — split-K partials out and back, between the two kernels (D53)",
             Stage.LOAD_A: {
-                "stage": "STAGE — operand A: k-slice staging, read once in total (D33)",
-                "whole": "STAGE — operand A: whole-A ramp, every k-slice before wave 0 (D33)",
+                "stage": f"STAGE — operand A: {band} staging, read once in total (D33)",
+                "whole": f"STAGE — operand A: whole-A ramp, every {band} before wave 0 (D33)",
                 "stream": "STREAM — operand A, re-fetched per tile (D31)",
             }.get(span.a_fetch_mode, "LOAD — operands in"),
         }.get(span.stage, "LOAD — operands in")
         note = (
             {
                 "stage": (
-                    "\nThis bar is one whole k-slice: every tile of the group reads this"
+                    f"\nThis bar is one whole {band}: every tile of the group reads this"
                     " staging, and A crosses DRAM exactly once"
                 ),
                 "whole": (
-                    "\nEvery k-slice of A lands before the first tile computes — the same"
-                    " total bytes as staging per k-slice, ramped upfront instead"
+                    f"\nEvery {band} of A lands before the first tile computes — the same"
+                    f" total bytes as staging per {band}, ramped upfront instead"
                 ),
             }.get(span.a_fetch_mode, "")
             if span.stage is Stage.LOAD_A
@@ -730,6 +780,15 @@ def _tip(span: Span) -> str:
         )
     if span.lane in (Lane.CORE, Lane.VECTOR):
         engine = "array" if span.lane is Lane.CORE else "vector unit"
+        if span.stage is Stage.REDUCE:
+            return (
+                f"REDUCE — CUTLASS's second kernel, on the {engine} (D27/D53)\n"
+                f"{span.label}\n{when}\n"
+                f"{format_quantity(span.flops, 'OP')} @ "
+                f"{format_quantity(span.rate_flops_per_s, 'OP/s')}\n"
+                "Not new arithmetic — 2*M*N*K already counts these adds; they have "
+                "merely left the matrix engine's accumulator"
+            )
         kind = (
             f"EXEC — {span.op_type} on the {engine}"
             if span.stage is Stage.EXEC
@@ -752,9 +811,13 @@ _ANIMATION_STAGE = {
     Stage.HOLD: "hold",
     Stage.EXEC: "exec",
     Stage.STORE: "store",
+    Stage.REDUCE: "reduce",
 }
 """Kernel dispatch (Stage.DISPATCH) is fixed overhead, not a DRAM/SRAM/compute
-transaction, so it has nothing to animate and is left out of the map."""
+transaction, so it has nothing to animate and is left out of the map.
+``Stage.REDUCE`` is split-K's second kernel (D53) — a real DRAM round trip and
+real vector arithmetic, so it plays back like any other event; the listing's own
+``reduce`` tag lights the block it comes from."""
 
 
 def _flow_spans(trace: PipelineTrace) -> list[dict[str, object]]:
@@ -806,7 +869,7 @@ def write_animation_html(panel: Panel, command: str, out: Path) -> None:
     assert work.phase is not None, "every --animate workload carries its phase"
     listing = deployment_of(
         panel.chip,
-        machine_model(panel.chip, panel.dtype),
+        panel.machine,
         work.phase,
         work.trace,
         workload=f"{work.name} at {panel.dtype.value}",
@@ -1008,6 +1071,8 @@ def build_matmul(
     a_residency_tiles: int | None = None,
     a_prefetch_depth: int | None = None,
     iterations: int = 1,
+    stationarity: Dataflow | None = None,
+    split_k: int = 1,
 ) -> Workload:
     spec = matmul_kernel(m, n, k, a_dtype=dtype, b_dtype=dtype)
     deployment = DeploymentSpec.model_validate(
@@ -1020,12 +1085,18 @@ def build_matmul(
             "a_residency_tiles": a_residency_tiles,
             "a_prefetch_depth": a_prefetch_depth,
             "iterations": iterations,
+            "stationarity": stationarity,
+            "split_k": split_k,
         }
     )
     report = analyze(spec, chip, deployment)
     if not report.feasible:
         raise SystemExit(f"bwz: infeasible on {chip.id}: {report.infeasibility[0]}")
-    machine = machine_model(chip, spec.operand_dtype)
+    # Same decomposition the report was built with, or the picture would draw a
+    # different grid than the numbers it illustrates (D53).
+    machine = machine_model(
+        chip, spec.operand_dtype, stationarity=stationarity, k_partitions=split_k
+    )
     graph = build_graph(spec, deployment, GraphPhase.STATIC)
     # The same plan_dataflow call analyze() made internally to charge the bytes
     # above: recomputed rather than threaded out, because it is pure — same
@@ -1058,6 +1129,7 @@ def build_matmul(
         phase=report.phases[0],
         operation=graph.ops[0],
         dataflow=dataflow,
+        machine=machine,
     )
 
 
@@ -1293,6 +1365,23 @@ def _build_parser() -> argparse.ArgumentParser:
         "dataflow strategy — only with the default matmul workload (docs/CLI.md §2.5)"
     )
     dataflow.add_argument(
+        "--stationarity",
+        choices=[d.value for d in Dataflow],
+        default=None,
+        help="Which operand stays resident, deciding the whole decomposition (D53): "
+        "os (C in the accumulator, K swept inside the tile), ws (B held, M streams "
+        "past), is (A held, N streams past), rs (Eyeriss, unvalidated). Default: the "
+        "chip's own. One the chip cannot run is refused, not clamped",
+    )
+    dataflow.add_argument(
+        "--split-k",
+        type=int,
+        default=None,
+        help="Cut the contraction into this many independent pieces (os only). Costs "
+        "CUTLASS's second kernel: the partials' DRAM round trip, the adds on the "
+        "vector unit, one more dispatch (D53)",
+    )
+    dataflow.add_argument(
         "--a-strategy",
         choices=[s.value for s in AStrategy],
         default=None,
@@ -1391,6 +1480,8 @@ def _reject_flags_for_the_wrong_workload(
 
     if args.model or args.encoder:
         bad = given(
+            stationarity=args.stationarity,
+            split_k=args.split_k,
             a_strategy=args.a_strategy,
             b_dataflow=args.b_dataflow,
             a_residency_tiles=args.a_residency_tiles,
@@ -1408,6 +1499,7 @@ def _reject_flags_for_the_wrong_workload(
         args.a_strategy = args.a_strategy or AStrategy.STAGE.value
         args.b_dataflow = args.b_dataflow or BDataflow.WRITE_AHEAD.value
         args.iterations = 1 if args.iterations is None else args.iterations
+        args.split_k = 1 if args.split_k is None else args.split_k
 
     if args.animate and args.model:
         parser.error(
@@ -1463,6 +1555,8 @@ def main() -> None:
                 a_residency_tiles=args.a_residency_tiles,
                 a_prefetch_depth=args.a_prefetch_depth,
                 iterations=args.iterations,
+                stationarity=Dataflow(args.stationarity) if args.stationarity else None,
+                split_k=args.split_k,
             )
         ]
 
