@@ -2178,3 +2178,140 @@ cross-core reduction the model does not cost. A real cuBLAS GEMM instead tiles t
 `ceil(M/rows) · ceil(N/cols)` and keeps K sequential inside each tile, needing no reduction.
 Changing that moves tile counts, wave occupancy and every trace built on them, so it is a separate
 question from making the listing honest about the tiling the model actually performs.
+
+## D53 — Dataflow stationarity becomes a real, per-chip, selectable strategy (2026-08-27)
+
+D52's closing paragraph named what was still wrong: `tile_count` was
+`ceil(K/rows) · ceil(N/cols)`, one unit per (k-slice, n-tile), M streaming past a resident B tile.
+That is **weight-stationary split-K**, and it is the wrong shape for every matrix core. cuBLAS and
+CUTLASS accumulate K **in registers inside one output tile** — the accumulator elements *"typically
+occupy at least half a thread's total register budget"* — so nothing crosses cores. Split-K is the
+documented *exception*, used when *"there are too few threadblocks to efficiently occupy the entire
+GPU"*, and it costs **two kernels**: *"partitionedK GEMM, and batched reduction"*. So the engine was
+always split-K, the wrong shape in the common case, and never charged the reduction it implied.
+
+`Dataflow` had declared `ws`/`os`/`rs` since M1 and its docstring promised *"v1 honours the
+profile's declaration"*. Nothing read the field.
+
+### The abstraction
+
+One place decides the decomposition: `analysis/stationarity.py`, whose `grid_for(stationarity,
+attrs, rows, cols, k_partitions)` returns a frozen `TileGrid`. For a matmul the operands map as
+**input = A, weight = B, output = C**.
+
+| stationarity | resident | parallel grid | swept per tile | partials cross cores | partials reach DRAM |
+|---|---|---|---|---|---|
+| `os` output-stationary | C (accumulator) | `ceil(M/rows) × ceil(N/cols)` | K | no | no |
+| `os` + `--split-k p` | C | that grid, `× p` | K/p | yes | **yes** |
+| `ws` weight-stationary | B tile | `ceil(K/rows) × ceil(N/cols)` | M | yes | no |
+| `is` input-stationary | A tile | `ceil(M/rows) × ceil(K/rows)` | N | yes | no |
+| `rs` row-stationary | one A row per PE | `ceil(M/rows) × ceil(N/cols)` | K, spread spatially | local to the array | no |
+
+The grid carries the matmul's own extents and the array's, so it can answer every question the
+trace, the listing and both renderers used to answer for themselves: how many tiles there are,
+which of M/N/K each axis is, which one a tile sweeps, where one flat tile index sits (`decode`),
+how many A staging events there are and how big each is (`a_events`, `a_event_elements`).
+
+**What is invariant is not the k-slice.** D33's "A is staged once per k-slice" is a special case of
+"the tiles of one grid **row** all read the same slice of A" — which holds under every
+stationarity, because A's dimensions are M and K and the grid's column axis is never one of those
+except under `is`, where a row's tiles between them read the row's band exactly once anyway. So A
+crosses DRAM exactly once under every grid, in `a_events` pieces; what changes is whether a piece
+is a slice of K (`ws`) or a band of M rows (`os`). Same for the hover notation: an operand's index
+along a dimension is the row number if the grid carries it on rows, the column range if on columns,
+and `:` if the tiles sweep it. That one rule replaced every hardcoded `A(:,g)`/`B(row,col)`/`C(:,col)`
+in `plot_pipeline.py` and in the animation's geometry-panel JS.
+
+`rs` is implemented and **explicitly unvalidated**: defined for GEMM after Eyeriss (Chen/Emer/Sze,
+ISCA 2016) as one A row per PE with K spread across the array's own columns, so partial sums reduce
+inside the array. No shipped profile declares it, and `report.assumptions` says its numbers are
+unvalidated rather than pretending otherwise.
+
+### Refusing, not clamping
+
+`ComputeUnit.supported_dataflows` defaults to `(dataflow,)` — the honest default, since a tensor
+core has no weight storage (D30) and an in-memory array's weights *are* its memory. A request
+outside the set returns `Report(feasible=False)` naming the field, the request and the chip's real
+capability. This is a deliberate departure from `plan_dataflow`'s clamp convention: `stage`/`stream`/
+`whole` are orderings of the same work, so falling back still answers the question asked, while a
+stationarity is a different decomposition and substituting one would report a number for hardware
+the caller never asked about.
+
+### The reduction, and where this diverges from the approved plan
+
+The plan proposed charging a DRAM round trip wherever `needs_reduction` — including `ws`, with the
+spilled portion discounted by on-chip capacity. **That is not implemented, on purpose**, and the
+reasoning is worth recording because it cuts against a plan the user had already approved.
+
+Two things turned out to be true.
+
+**The additions are not new arithmetic.** Accumulating K products into one output is `K − 1`
+additions however the contraction is cut: `(K/p − 1)·p + (p − 1) = K − 1` for every `p`. `2·M·N·K`
+already counts them (CLAUDE.md #5). What split-K changes is *where* they run — `(p−1)·M·N` of them
+leave the matrix engine's accumulator for the vector unit, 16× slower on A100 (D27). So the cost is
+the relocation, not the count, and that is what `partial_sums` is charged as: vector time on top,
+double-counting only the same adds at the matrix rate, 1/16 of what it adds.
+
+**Only split-K materialises the partials.** Under a K-on-grid grid the same unit comes back to the
+same output cell on a later wave, so the partials meet in an accumulator, and D5a gives this model
+no on-chip bandwidth term to charge that against. What it costs is *capacity* — the whole `M×N`
+output is live under a K-outer walk — and where that does not fit, a real compiler re-blocks the
+output and re-reads A and B rather than spilling C. Those re-reads are exactly the traffic
+`docs/MODEL.md` §6.2 already declines to model: *"DRAM traffic is compulsory traffic… so a DRAM-bound
+latency here is a lower bound."* Charging a C spill while that stands would price one horn of the
+dilemma and not the other. On Metis at 8192-cubed it would have added ~8.5 GB against the GEMM's
+own 201 MB — a 40× move on a chip nobody has measured, decided by a loop order the model does not
+even claim to choose. So `TileGrid.materialises_partials` is `k_partitions > 1` alone, and every
+K-on-grid grid gets an assumption naming its accumulator working set and stating that neither its
+spill nor the re-reads that avoid it are charged.
+
+Split-K itself is charged in full, because CUTLASS genuinely runs two kernels and its partials
+genuinely live in global memory between them: `p · M · N · acc_bytes` written and read back on
+`OpResult.dram_reduction_bytes` (kept out of `dram_read_bytes`/`dram_write_bytes`, which are the
+*operands'* traffic, so the three still sum to `dram_bytes`), `(p−1)·M·N` adds on the vector unit as
+`t_reduce_s`, and one extra dispatch. The trace draws it as its own `Stage.REDUCE` spans after the
+tile schedule ends, and `deploy.py` prints it as a second listing block.
+
+### What moved
+
+| check | before (`ws`) | after (`os`) |
+|---|---|---|
+| A100, M=1, N=K=10000, tiles | 390 625 | 625 |
+| … wave occupancy over 432 cores | 0.99923 (905 waves) | 0.7234 (2 waves) |
+| … chip utilisation | 6.24% | 4.52% |
+| A100, 1000×2000×3000, tiles | 23 500 | 7 875 |
+| … waves | 55 | 19 |
+| Llama-3-8B prefill on H100, util | 67.65% | 67.26% |
+| … decode t_compute | 375 µs | 641 µs |
+| … TPOT | 6.04 ms (165.4 tok/s) | unchanged |
+
+**Utilisation gets *worse* on the flip, and that is correct.** Total MMA instructions are identical
+— the same `M·N·K` MACs, only quantised differently — so `os` reports slightly lower utilisation
+while being the more accurate model *and* avoiding a reduction the old model never charged. The
+parallelism `ws` claimed was not free; it was 390 625 partial sums.
+
+`--split-k` now does something on these chips. At 512×512×4096 on A100 it takes wave occupancy from
+0.79 (1024 tiles, 3 waves) to 0.998 (8192 tiles, 19 waves) and charges 8.4 MB of partials against
+the 4.7 MB the un-split GEMM moves in total. Exposing that trade is the point of the flag.
+
+The array-level goldens are untouched: `systolic_utilisation(1, …, 16, 16)` is still exactly `1/16`,
+and CLAUDE.md's `M=1 → ≈1/rows` check is a statement about one array's geometry, which no
+stationarity changes. INT8 remains exactly 2× FP16.
+
+### Vocabulary that changed
+
+`NTILES_PER_KS` → `TILES_PER_GROUP` and `KSLICE(w, u)` → `GROUP(w, u)` / `COL(w, u)` in the listing;
+`Span.tiles_per_ks` → `Span.grid`; `pipeline.ntiles_per_kslice` → `tiles_per_a_event`;
+`DataflowPlan.k_slices`/`ntiles_per_ks` → `a_events`/`tiles_per_a_event`;
+`Deployment.k_slices`/`tiles_per_ks` → `Deployment.grid`. `deploy.py`'s `is_mma` became
+`issues_instruction_tiles`, which is what it always meant: whether the *swept* dimension is walked
+in whole instruction tiles (D52) or element by element — a question about the unit, now cleanly
+separate from which dimension is swept, which is a question about the stationarity.
+
+**Not done, flagged only:** instruction-tile granularity is still dtype-independent (D52's own open
+item); the loop *order* within a grid is not modelled, so the accumulator working set quoted in the
+assumptions is the K-outer worst case; and auto-selecting the best stationarity or split-K factor
+remains M8 work — the flags select, they do not search.
+
+[cutlass]: https://github.com/NVIDIA/cutlass/blob/main/media/docs/cpp/efficient_gemm.md
+[eyeriss]: https://people.csail.mit.edu/emer/papers/2016.06.isca.eyeriss_architecture.pdf

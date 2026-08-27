@@ -104,8 +104,11 @@ schedule by hand rather than watching it play.
   "enters" it, because the byte/flop model has no event distinct from the arithmetic itself for that
   moment — and two engines never glow together, because operations run in strict sequence in this
   model (D5a/D43)
+- `--stationarity`/`--split-k` change the grid everything else is drawn against (D53): the banner
+  names the effective one, the geometry panel draws the resident operand's grid, and `--split-k`
+  adds a second kernel — a DRAM round trip and a vector-unit block — after the tile schedule ends
 - `--a-strategy` changes what you see directly — `stream` trickles many small hatched blocks,
-  `stage`/`whole` concentrate them at k-slice boundaries — because A's schedule already differs by
+  `stage`/`whole` concentrate them at grid-row boundaries — because A's schedule already differs by
   strategy (D33/D31)
 - `--b-dataflow on-demand` now shows a real gap between a load starting to move and the previous
   wave's compute station glow ending; `persistent` plays identically to `write-ahead`, and the page
@@ -139,24 +142,28 @@ which engine a given operation actually ran on rather than lighting both every t
 **A tile-geometry panel shows A/B/C's own shapes for a lone matmul (D48).** Below the flow diagram,
 three schematic rectangles — A (`M x K`), B (`K x N`), C (`M x N`) — in the classic GEMM layout, so
 the axes A and B share (K) and the axes B and C share (N) line up visually instead of reading as
-three unrelated boxes. **A is cut only along K**, into `k_slices` vertical stripes spanning the
-whole M height — M streams, it never tiles (D30/D33) — while **B genuinely has a 2-D tile grid**,
-`k_slices x tiles_per_ks`, and **C mirrors B's column cuts**. The lit cell tracks whichever operand
-the current instant actually touches: A lights on a `load_a` event (A being staged), B on `exec`
-(the tile in the array right now), C on `store` (the result landing) — a coalesced frame that
-covers many real tiles at once lights the true range it covers, never one fake single index. The
-dark info box states each operand's tile size as rows x cols and the whole index range (`A(:,0) …
-A(:,{k_slices-1})`, `B(0,0) … B({k_slices-1},{tiles_per_ks-1})`), updating live as playback moves.
+three unrelated boxes. **Which operand has the 2-D grid follows from the stationarity** (D53), not
+from a fixed assumption: the grid has a row axis and a column axis, every tile sweeps the third
+dimension in full, and an operand is cut along a dimension exactly when the grid carries it. Under
+`ws` that makes B the 2-D one, A a set of k-slice stripes and C a set of column bands; under `os`
+(what every matrix core now declares) C is the 2-D one, A is banded along M and B along N. The lit
+cell tracks whichever operand the current instant actually touches: A lights on a `load_a` event (A
+being staged), the **resident** operand on `exec` (the tile in the array right now), C on `store`
+(the result landing) — a coalesced frame that covers many real tiles at once lights the true range
+it covers, never one fake single index. The dark info box names the stationarity, each operand's
+tile size as rows x cols and the grid's own axes, updating live as playback moves.
 Grid lines are capped at roughly 40 per axis; past that a coarser stride draws instead, and the
 caption says the real count and stride — never a silent truncation. Not rendered for `--encoder`:
 a network's per-operation trace has no single A/B tile grid to draw (D42's own documented limit).
 
-**The same `A(:,g)`/`B(row,col)`/`C(:,col)` notation now appears in the ordinary hover too**, on
-both this page and the static timeline — not just the geometry panel's own caption. Hovering an
-`A k-slice`/`B tile`/result-store bar names its exact tile-grid position, and when one step opens
-several k-slices at once (routine whenever a step's real tiles exceed one k-slice's width — the
-label reads "A k-slices 1-7/125" rather than naming only the first, per the byte total it always
-correctly charged).
+**The same `Operand(row,col)` notation now appears in the ordinary hover too**, on both this page
+and the static timeline — not just the geometry panel's own caption. An index is the row number if
+the grid carries that dimension on its rows, the column range if on its columns, and `:` if the
+tiles sweep it — so the same rule prints `B(row,col)`/`C(:,col)` under `ws` and `C(row,col)`/
+`B(:,col)` under `os` without either being special-cased (D53). Hovering a staging or tile bar names
+its exact position, and when one step opens several bands at once (routine whenever a step's real
+tiles exceed one grid row's width) the label reads "A row-bands 1-6/63" rather than naming only the
+first, per the byte total it always correctly charged.
 
 ## Reading the roofline
 

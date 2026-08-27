@@ -759,7 +759,12 @@ def matmul(
     # assumptions drawer: the tile count, the wave occupancy and any reduction
     # all follow from it, so a reader checking the utilisation below needs to
     # see which grid it was computed against (D53).
-    grid = grid_for(machine.stationarity, MatmulAttrs(m=m, n=n, k=k), *(dims or (0, 0)))
+    grid = grid_for(
+        machine.stationarity,
+        MatmulAttrs(m=m, n=n, k=k),
+        *(dims or (0, 0)),
+        k_partitions=split_k,
+    )
     if dims is not None:
         table.add_row(
             "stationarity",

@@ -39,7 +39,8 @@ compute_units:                  # at least one
     structured_sparsity_speedup: 2.0    # default 1.0
     systolic_dims: [16, 16]             # optional; drives the M3 tail-effect model
     weight_sets: 1                      # array-sized weight tiles ONE unit holds; default 1
-    dataflow: ws                        # ws | os | rs, default ws
+    dataflow: os                        # ws | os | is | rs, default ws — this unit's NATIVE one
+    supported_dataflows: []             # every one it can run; [] means just its native one
 
 memory:                         # innermost first, level numbers ascending, no duplicates
   - {name: L1,   level: 1, capacity_bytes: 3.3792e+7, bandwidth_bytes_per_s: 1.3e+14, latency_ns: 30}
@@ -65,7 +66,19 @@ persistent weight store. Set it only for in-memory compute, where a weight canno
 it has been written into a bank: `metis_aipu` declares 4, so its 4 AI cores hold 16 tiles and run
 4 (`docs/CORRECTIONS.md` D30).
 
-**Enums.** `dataflow`: `ws | os | rs`. `topology`: `fully_connected | ring | mesh | fat_tree |
+**`dataflow` and `supported_dataflows`** decide the whole decomposition (`docs/CORRECTIONS.md`
+D53): which dimensions form the parallel tile grid, which one each tile sweeps, and whether partial
+sums are owed. `dataflow` is the unit's **native** one — `os` for every matrix core, because cuBLAS
+and CUTLASS accumulate K in registers inside one output tile; `ws` for in-memory compute, whose
+weights *are* its memory. `supported_dataflows` lists everything it can run, and an empty list
+means the native one alone, which is the honest default: a tensor core has no weight storage (D30)
+and an IMC array cannot hold accumulators instead of weights. The native dataflow must appear in a
+non-empty `supported_dataflows`, which **is** validated here. `DeploymentSpec.stationarity`
+(`--stationarity`) selects; a request outside the set returns `feasible: false` naming the field
+and the unit's real capability — refused, not clamped, because a clamp would answer a different
+question than the one asked.
+
+**Enums.** `dataflow`: `ws | os | is | rs`. `topology`: `fully_connected | ring | mesh | fat_tree |
 switched`. `supported_dtypes` and `dtype_multipliers` keys: `fp32 | tf32 | fp16 | bf16 | fp8 |
 int8 | int4`. **Not `int32`**: that is an accumulator width with no compute unit behind it (an
 int8 product accumulates in int32 *at the int8 rate*), so it is legal only as a matmul's
@@ -245,17 +258,26 @@ parallelism: {tp: 2, pp: 1, dp: 1, ep: 1, microbatches: 8}
 num_chips: 2
 optimize_for: latency      # latency | throughput | energy
 constraints: {max_latency_s: 0.05, max_power_w: 700, max_memory_bytes: 8.0e+10}
+stationarity: null          # ws | os | is | rs; null = the chip's own (D53)
+split_k: 1                  # cut the contraction into N pieces; os only, costs a second kernel
 a_strategy: stage           # stage | stream | whole — a lone matmul's A residency (D33/D36)
 b_dataflow: write-ahead     # write-ahead | on-demand | persistent — when B's array write lands
-a_residency_tiles: null     # power-of-2 divisor of NTILES_PER_KS; null = the whole k-slice
+a_residency_tiles: null     # power-of-2 divisor of TILES_PER_GROUP; null = the whole grid row
 a_prefetch_depth: null      # schedule-only; null = derived from double buffering, as today
 iterations: 1                # invocations this report represents; only persistent reads it
 ```
 
 **Validated here (intra-spec):** `tp x pp x dp x ep == num_chips`; decode requires
 `output_tokens > 0`; training has no phase split; `pp > 1` needs at least `pp` microbatches;
-`structured_2_4` implies ratio 0.5; `a_residency_tiles`, `a_prefetch_depth` and `iterations` are
-each `> 0` when set.
+`structured_2_4` implies ratio 0.5; `a_residency_tiles`, `a_prefetch_depth`, `iterations` and
+`split_k` are each `> 0` when set.
+
+**`stationarity` and `split_k` behave differently from the knobs below.** They are refused, not
+clamped, when the chip's matrix unit cannot run them (`feasible: false`, naming the field and the
+capability), because a stationarity is a different decomposition rather than a different ordering
+of the same work. `split_k` is meaningful only under `os` — `ws`/`is` already carry K on the grid —
+and is inert, not an error, elsewhere; `report.assumptions` says so. Unlike the knobs below they
+also apply to a network, since every matmul in it is decomposed the same way.
 
 **`a_strategy`, `b_dataflow` and `iterations` are single-matmul-only knobs** (`bwz matmul`,
 `scripts/plot_pipeline.py --matmul`): `analysis/schedule.py` reads them only when the graph is one

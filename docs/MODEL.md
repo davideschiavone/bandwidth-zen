@@ -363,14 +363,40 @@ This is the largest single correction the engine applies, and it is separate fro
 multiplicative with — the achieved-throughput derating in `calibration.py`. See D14 for what it
 does to the D8 conclusions.
 
+#### The tile grid — which dimensions are cut, and by what (D53)
+
+The three padding terms above describe how each dimension fits an array-sized tile, which is true
+whichever operand stays resident. **How many tiles there are** is not: that follows from the chip's
+**stationarity**, and `analysis/stationarity.py` is the single place that decides it. For a matmul
+the operands map as **input = A, weight = B, output = C**.
+
+| stationarity | resident | parallel grid | swept per tile | partials cross cores | partials reach DRAM |
+|---|---|---|---|---|---|
+| `os` output-stationary | C (accumulator) | `ceil(M/rows) × ceil(N/cols)` | K | no | no |
+| `os` + `--split-k p` | C | that grid, `× p` | K/p | yes | **yes** |
+| `ws` weight-stationary | B tile | `ceil(K/rows) × ceil(N/cols)` | M | yes | no |
+| `is` input-stationary | A tile | `ceil(M/rows) × ceil(K/rows)` | N | yes | no |
+| `rs` row-stationary | one A row per PE | `ceil(M/rows) × ceil(N/cols)` | K, spread spatially | local to the array | no |
+
+`os` is what cuBLAS and CUTLASS do — K accumulates in registers inside one output tile — and is
+what `a100_80gb`, `h100_sxm`, `jetson_orin` and `mi300x` declare. `metis_aipu`, `chip_a` and
+`chip_b` declare `ws`: their weights *are* their memory, so an accumulator-resident dataflow is not
+something they could run. `rs` is defined for completeness after Eyeriss (Chen/Emer/Sze, ISCA 2016)
+and no profile declares it, so its numbers are labelled unvalidated in `report.assumptions`.
+
+`DeploymentSpec.stationarity` (`--stationarity`) selects; a chip that cannot run the choice is
+**refused** with `feasible: false`, not clamped, because a clamp would silently answer a different
+question. **Every grid issues the same `M·N·K` MACs** — they differ only in quantisation loss,
+in which operand each staging event covers, and in whether partial sums are owed.
+
 #### Wave occupancy — how many of the chip's arrays the work can reach
 
-The three terms above describe **one** array. A chip declares `count` of them, and
-`peak_flops_per_s` multiplies by `count`, which assumes every array always has a tile. A fourth
-term charges the times it does not (D30):
+The terms above describe **one** array. A chip declares `count` of them, and `peak_flops_per_s`
+multiplies by `count`, which assumes every array always has a tile. A fourth term charges the times
+it does not (D30):
 
 ```
-tiles      = ceil(K/rows) · ceil(N/cols) · independent
+tiles      = grid.tiles · independent          [the grid above, per stationarity]
 waves      = ceil(tiles / units)
 occupancy  = tiles / (waves · units)
 ```
@@ -380,13 +406,38 @@ separate GEMMs that fill the arrays alongside each other.
 
 | case | tiles / units | occupancy |
 |---|---|---|
-| 100³ on Metis (4 AI cores) | 1 / 4 | **0.25** — one core works, three idle |
-| 100³ on A100 (432 tensor cores) | 49 / 432 | **0.113** |
-| 600³ on Metis | 4 / 4 | 1.00 |
-| 4096³ on A100 | 65536 / 432 | 0.998 |
+| 100³ on Metis, `ws` (4 AI cores) | 1 / 4 | **0.25** — one core works, three idle |
+| 100³ on A100, `os` (432 tensor cores) | 49 / 432 | **0.113** |
+| 600³ on Metis, `ws` | 4 / 4 | 1.00 |
+| 4096³ on A100, `os` | 65536 / 432 | 0.998 |
+| M=1, N=K=10000 on A100, `os` | 625 / 432 | **0.723** — 2 waves, the second 45% full |
+| the same under `ws` | 390625 / 432 | 0.999 — but 390 625 partial sums to reduce |
 
 Negligible on a large GEMM by construction and dominant on a small one, which is why the aggregate
-peak alone cannot compare two chips on anything small.
+peak alone cannot compare two chips on anything small. The last two rows are the one place where a
+*more* accurate decomposition reports a *lower* number: `ws` claimed parallelism that only existed
+because every tile held a partial sum needing a reduction the model never charged (D53).
+
+#### The reduction, when there is one
+
+Partial sums exist wherever K is cut across tiles. What they *cost* depends on whether they are
+**materialised**:
+
+- **Split-K under `os`** genuinely is two kernels — CUTLASS's *"partitionedK GEMM, and batched
+  reduction"* — so the partials go out to DRAM and come back. Charged in full: `p · M · N ·
+  acc_bytes` written and read (`OpResult.dram_reduction_bytes`, kept out of the operands' read/write
+  totals), `(p−1) · M · N` additions on the **vector** unit (`t_reduce_s`; a matrix engine does MAC
+  and nothing else, D27), and one extra dispatch.
+- **K on the grid itself** (`ws`, `is`) is not: the same unit revisits the same output cell on a
+  later wave, so the partials meet in an accumulator, and v1 has no on-chip bandwidth term to charge
+  that against (D5a). What it costs is *capacity*, and where the accumulator does not fit, a real
+  compiler re-blocks the output and re-reads A and B rather than spilling C — traffic §6.2 already
+  declines to model. `report.assumptions` names the working set and says the bound stays a lower
+  one.
+
+The additions are **not new arithmetic**: `(K/p − 1)·p + (p − 1) = K − 1` for every `p`, so `2·M·N·K`
+already counts them. What split-K changes is that `(p−1)·M·N` of them leave the matrix engine's
+accumulator for a unit 16× slower.
 
 ### 6.1a Weight residency in the array itself
 
@@ -404,7 +455,7 @@ assumptions drawer says so on every report.
 
 **The reloads still have a schedule (D33).** The sets are independently addressed, so the deploy
 listing writes each reload a full wave ahead of its compute — `(w + 1) % WEIGHT_SETS`, into the set
-freed three waves earlier — and the first wave's sets fill during the first A k-slice staging. The
+freed three waves earlier — and the first wave's sets fill during the first A staging event. The
 write therefore hides behind arithmetic rather than serialising in front of it; what the model
 cannot yet charge is the bus time of that write itself.
 
@@ -467,8 +518,8 @@ nodes would triple a decode step's fixed cost.
 
 **`a` is an inter-operation property, not an SRAM budget (D33).** A tensor some *other* operation
 reads can stay on chip between the two, and `a` measures that. A tensor no operation reads — the
-activation of a lone matmul, which is every matmul benchmark the figures show — cannot: the
-k-slice staging feeds it to all `ceil(N/COLS)` output tiles of its group and it is never touched
+activation of a lone matmul, which is every matmul benchmark the figures show — cannot: one
+staging event feeds it to every tile of its grid row and it is never touched
 again, so it is compulsory traffic read exactly once, `a = 0`. The report says so in its
 assumptions; `plan_memory` still computes the D15 fraction for multi-op graphs, and the two agree
 there.
@@ -479,29 +530,31 @@ D33 fixed the single-matmul roofline to charge A as compulsory traffic — one c
 `a_strategy` and `b_dataflow` (`bwz matmul --a-strategy`, `--b-dataflow`) generalise that fix into
 three named points each, one of which is D33's own default, so the defaults reproduce every
 existing number exactly. The two knobs are physically different and are kept apart rather than
-fused into one flag: A has reuse — every tile of a k-slice's group reads the same staged slice — so
-*how often* that slice is re-staged is a byte-amount question. B has none: within one pass every
+fused into one flag: A has reuse — every tile of one grid ROW reads the same staged slice, whatever
+that row is a slice *of* (D53) — so *how often* that slice is re-staged is a byte-amount question. B has none: within one pass every
 tile is fetched exactly once whatever the choice (D30), so the only thing left to choose is *when*
 the write lands relative to compute.
 
 ```
-A_traffic = |A| · NTILES_PER_KS / residency_tiles
+A_traffic = |A| · TILES_PER_GROUP / residency_tiles
 
-stage   residency_tiles = NTILES_PER_KS        (default) -> A_traffic = |A|,   one crossing
-whole   residency_tiles = NTILES_PER_KS        (same bytes as stage; only the timing ramps upfront)
-stream  residency_tiles = 1                    -> A_traffic = |A| · NTILES_PER_KS
+stage   residency_tiles = TILES_PER_GROUP      (default) -> A_traffic = |A|,   one crossing
+whole   residency_tiles = TILES_PER_GROUP      (same bytes as stage; only the timing ramps upfront)
+stream  residency_tiles = 1                    -> A_traffic = |A| · TILES_PER_GROUP
 ```
 
-`residency_tiles` is how many of a k-slice's `NTILES_PER_KS` output tiles one staging event serves
-before the next one is fetched. `stage` and `whole` serve the whole k-slice per event — A crosses
-DRAM exactly once, the D33 result — and differ only in *when* those events are scheduled: `stage`
-at each k-slice boundary (today's behaviour), `whole` all of them ramped in before wave 0. `stream`
-serves one tile per event — the honest picture for a machine whose GEMMs genuinely re-read operands
-— and re-reads A `NTILES_PER_KS` times. `--a-residency-tiles` overrides the default with any
-power-of-2 divisor of `NTILES_PER_KS`; a value that is not one is clamped down to the largest that
-is (CLAUDE.md #8), because there is no honest way to serve a fractional tile.
+`TILES_PER_GROUP` is the width of one grid row (`grid.cols`) — D33's `NTILES_PER_KS`, generalised
+by D53 to grids whose rows are bands of M rather than slices of K. `residency_tiles` is how many of
+those tiles one staging event serves before the next is fetched. `stage` and `whole` serve the
+whole row per event — A crosses DRAM exactly once, the D33 result — and differ only in *when* those
+events are scheduled: `stage` at each row boundary, `whole` all of them ramped in before wave 0.
+`stream` serves one tile per event — the honest picture for a machine whose GEMMs genuinely re-read
+operands — and re-reads A `TILES_PER_GROUP` times. `--a-residency-tiles` overrides the default with
+any power-of-2 divisor of it; a value that is not one is clamped down to the largest that is
+(CLAUDE.md #8), because there is no honest way to serve a fractional tile.
 
-Measured on Metis 8192³ INT8 (`NTILES_PER_KS = 16`, `|A| = 67.1 MB`):
+Measured on Metis 8192³ INT8, which is weight-stationary so a row is a k-slice
+(`TILES_PER_GROUP = 16`, `|A| = 67.1 MB`):
 
 | `a_strategy` | A bytes | A's DRAM time |
 |---|---|---|
@@ -552,9 +605,10 @@ resource is busy when — so the overlap can be *seen* rather than asserted. It 
 spans on each lane sum back to `t_dram`, `t_compute` and `t_fixed`, which is the property its tests
 assert.
 
-A matmul's steps are its real tiles. A weight-stationary array holds a `rows × cols` slice of `B`,
-so the schedule has `ceil(K/rows) · ceil(N/cols)` steps — the same product §6.1 divides by — and
-each loads `t_dram/tiles` and computes `t_compute/tiles`. Two resources, each serial in itself, and
+A matmul's steps are its real tiles, and which tiles those are follows from the stationarity
+(§6.1): `ceil(M/rows) · ceil(N/cols)` output tiles under `os`, `ceil(K/rows) · ceil(N/cols)` weight
+tiles under `ws`. Either way it is the same grid §6.1 divides by, and each step loads
+`t_dram/tiles` and computes `t_compute/tiles`. Two resources, each serial in itself, and
 a buffer depth:
 
 ```

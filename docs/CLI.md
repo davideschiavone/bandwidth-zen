@@ -75,9 +75,11 @@ so a batch of 128 is `-M 128`.
 | `--out` | result width — the **accumulator**. Defaults to the wider operand |
 | `--ideal` | set both efficiency de-ratings to 1.0: a datasheet ceiling, not a prediction |
 | `--pipeline` / `--no-pipeline` | lane occupancy table (default on) |
+| `--stationarity` | `os` \| `ws` \| `is` \| `rs` — which operand stays resident, §2.5a. Default: the chip's own |
+| `--split-k` | cut the contraction into N pieces (`os` only); costs CUTLASS's second kernel, §2.5a |
 | `--a-strategy` | `stage` (default, D33) \| `stream` (D31) \| `whole` — how A is loaded, §2.5 |
 | `--b-dataflow` | `write-ahead` (default, D33) \| `on-demand` \| `persistent` — when B's write lands |
-| `--a-residency-tiles` | override tiles served per A staging event; power-of-2 divisor of `NTILES_PER_KS` |
+| `--a-residency-tiles` | override tiles served per A staging event; power-of-2 divisor of `TILES_PER_GROUP` |
 | `--a-prefetch-depth` | override A's double-buffered staging depth (schedule-only) |
 | `--iterations` | invocations this report represents; only `persistent` reads it |
 | `--json` | the raw `Report` as JSON |
@@ -177,6 +179,80 @@ counts how many were occupied: `1.97 of 2` means both halves of the double buffe
 almost all the time. That is capacity, not bandwidth, which is the whole of what SRAM contributes
 in this model.
 
+### 2.5a Stationarity — `--stationarity`, `--split-k`
+
+**Which operand stays resident decides the whole decomposition** (D53): which dimensions form the
+parallel tile grid, which one each tile sweeps, and whether partial sums are owed. `--stationarity`
+selects it and defaults to the chip's own — `os` for every matrix core, what cuBLAS and CUTLASS do,
+and `ws` for the in-memory-compute profiles, whose weights *are* their memory.
+
+The effective choice is a table row, not just an assumptions line:
+
+```bash
+uv run bwz matmul -M 512 -N 512 -K 4096 -c a100_80gb --ideal --no-pipeline
+```
+
+```
+  stationarity                    os   C resident, 32 x 32 tiles (M x N) each
+                                       sweeping K — tensor_core's own
+  shape utilisation           79.01%   shape padded to the 16x16 tile —
+                                       geometry, not a derating
+  t_compute                  8.71 µs   operations / (effective peak x util)
+  latency                    8.71 µs
+  verdict              COMPUTE_BOUND
+```
+
+79% is wave occupancy, not padding: 32 × 32 = 1024 output tiles over 432 tensor cores is 3 waves
+whose last is a third full. **`--split-k` buys the missing occupancy and pays DRAM for it**, which
+is exactly the trade CUTLASS documents — split-K exists for when *"there are too few threadblocks
+to efficiently occupy the entire GPU"*, and it runs as two kernels:
+
+```bash
+uv run bwz matmul -M 512 -N 512 -K 4096 -c a100_80gb --ideal --no-pipeline --split-k 8
+```
+
+```
+  DRAM traffic               13.1 MB   reads + writes
+  stationarity                    os   C resident, 32 x 32 tiles (M x N) each
+                                       sweeping K — tensor_core's own
+  split-K                          8   CUTLASS's two kernels: partials out to
+                                       DRAM and back, summed on cuda_core
+  shape utilisation           99.81%   shape padded to the 16x16 tile —
+                                       geometry, not a derating
+  t_dram                     6.43 µs   traffic / effective bandwidth
+  t_compute                  6.99 µs   operations / (effective peak x util)
+  latency                    6.99 µs
+  verdict              COMPUTE_BOUND
+```
+
+Utilisation goes 79.01% → 99.81% and latency 8.71 → 6.99 µs, but DRAM traffic goes 4.72 → 13.1 MB:
+the extra 8.4 MB is eight full `512×512` partials written by the first kernel and read back by the
+second. Push the factor higher and `t_dram` overtakes `t_compute` — the flag lets you find where.
+
+**A chip that cannot run the choice is refused, not clamped** (CLAUDE.md #8). Unlike
+`--a-strategy`/`--b-dataflow`, which pick between orderings of the same work, a stationarity is a
+different decomposition, so a silent fallback would report a number for hardware you did not ask
+about:
+
+```bash
+uv run bwz matmul -M 512 -N 512 -K 4096 -c a100_80gb --stationarity ws
+```
+
+```
+Infeasible.
+  • stationarity='ws' is not supported by tensor_core, which declares os.
+tensor_core declares weight_sets=1, i.e. no weight residency at all: both
+operands are re-read per instruction (D30), so there is nothing for a weight to
+stay stationary in. Drop the flag to use the chip's own dataflow, or pick one it
+declares.
+```
+
+Exit code 2, the same as any other infeasible report. `rs` is implemented but no profile declares
+it; if one ever does, `report.assumptions` labels its numbers unvalidated.
+
+Both flags exist on `bwz run` and on `plot_pipeline.py` too, where the effective grid appears in the
+page banner and the animation's geometry panel draws the resident operand's grid.
+
 ### 2.5 Dataflow strategies — `--a-strategy`, `--b-dataflow`
 
 A is a byte-amount knob; B is a timing knob (`docs/MODEL.md` §6.3a, `docs/CORRECTIONS.md` D36).
@@ -198,7 +274,7 @@ uv run bwz matmul -M 8192 -N 8192 -K 8192 -c metis_aipu -d int8 --ideal \
   verdict               DRAM_BW_BOUND
 ```
 
-`stream` re-reads A once per tile instead of once per k-slice — `NTILES_PER_KS = 16` here, so A's
+`stream` re-reads A once per tile instead of once per grid row — `TILES_PER_GROUP = 16` here, so A's
 share of DRAM reads is 16× `stage`'s: 1.07 GB against 67.1 MB, and the assumptions drawer says so:
 
 ```
@@ -216,7 +292,7 @@ uv run bwz matmul -M 8192 -N 8192 -K 8192 -c metis_aipu -d int8 --ideal \
 
 ```
 a_strategy=whole requested but A (67.1 MB) does not fit the 54.5 MB
-scratchpad; fell back to stage — the same 67.1 MB total, staged per k-slice
+scratchpad; fell back to stage — the same 67.1 MB total, staged per grid row
 instead of ramped upfront.
 ```
 
@@ -246,7 +322,7 @@ invocation writes B in full, every later one reuses it, and the report — which
 invocation's numbers, not `N` of them — charges the amortised share `1/iterations` of that write.
 
 **The two escape hatches, each with a real effect.** `--a-residency-tiles` overrides how many of a
-k-slice's `NTILES_PER_KS` tiles one A staging serves, clamped down to the largest power-of-2 divisor
+grid row's `TILES_PER_GROUP` tiles one A staging serves, clamped down to the largest power-of-2 divisor
 when the requested value is not one:
 
 ```bash
@@ -255,7 +331,7 @@ uv run bwz matmul -M 8192 -N 8192 -K 8192 -c metis_aipu -d int8 --ideal \
 ```
 
 ```
-a_residency_tiles=5 is not a power-of-2 divisor of NTILES_PER_KS=16; clamped
+a_residency_tiles=5 is not a power-of-2 divisor of TILES_PER_GROUP=16; clamped
 to 4, the largest one that is.
 ```
 
