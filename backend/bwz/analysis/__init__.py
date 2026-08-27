@@ -31,7 +31,7 @@ from bwz.report import (
     config_hash,
 )
 from bwz.spec.deployment import AStrategy, BDataflow, DeploymentSpec
-from bwz.spec.hardware_spec import HardwareSpec
+from bwz.spec.hardware_spec import Dataflow, HardwareSpec
 from bwz.spec.loaders import AnyModelSpec
 from bwz.spec.model_spec import MatmulSpec, ModelFamily, TransformerSpec
 from bwz.units import format_bytes, format_quantity
@@ -403,10 +403,11 @@ def _assumptions(
             "instead (docs/CORRECTIONS.md D33)."
         )
         if dataflow is not None:
+            out.extend(_stationarity_assumptions(dataflow, machine))
             if dataflow.a_strategy is AStrategy.STREAM:
                 a_line = (
-                    f"A: streamed per tile (D31), {dataflow.ntiles_per_ks}x the staged total — "
-                    f"{format_bytes(dataflow.a_bytes)} would cross DRAM once under stage/whole, "
+                    f"A: streamed per tile (D31), {dataflow.tiles_per_a_event}x the staged total "
+                    f"— {format_bytes(dataflow.a_bytes)} would cross DRAM once under stage/whole, "
                     f"{format_bytes(dataflow.a_bytes * dataflow.a_bytes_multiplier)} crosses it "
                     f"under stream"
                 )
@@ -417,8 +418,9 @@ def _assumptions(
                 )
             else:
                 a_line = (
-                    f"A: staged {format_bytes(dataflow.a_bytes_per_event)} per k-slice "
-                    f"({dataflow.k_slices} k-slices) — crosses DRAM exactly once (D33)"
+                    f"A: staged {format_bytes(dataflow.a_bytes_per_event)} per "
+                    f"{dataflow.group_name} ({dataflow.a_events} {dataflow.group_name}s) — "
+                    f"crosses DRAM exactly once (D33)"
                 )
             if dataflow.b_dataflow is BDataflow.PERSISTENT:
                 b_line = (
@@ -489,6 +491,72 @@ def _assumptions(
             "land at M5. Treat this as a single-chip result."
         )
     return tuple(out)
+
+
+def _stationarity_assumptions(dataflow: DataflowPlan, machine: MachineModel) -> list[str]:
+    """What the decomposition is, who chose it, and what it costs (D53).
+
+    Every one of these is load-bearing: the tile count, the wave occupancy and
+    the reduction all follow from the stationarity, so a reader who cannot see
+    which one ran cannot check any of the three.
+    """
+    grid = dataflow.grid
+    if grid is None:
+        return [
+            f"stationarity={dataflow.stationarity.value} is declared but this profile gives no "
+            f"array geometry, so there is no tile grid to decompose against and no reduction to "
+            f"charge (D53)."
+        ]
+    chosen = (
+        f"asked for with stationarity={dataflow.stationarity.value!r}"
+        if dataflow.requested_stationarity is not None
+        else f"{machine.unit.name}'s own declared dataflow"
+    )
+    out = [
+        f"Stationarity {dataflow.stationarity.value} — {grid.resident.value} stays resident "
+        f"({chosen}). The parallel grid is {grid.rows} x {grid.cols} tiles "
+        f"({grid.row_dim.value} x {grid.col_dim.value}, cut by the "
+        f"{grid.tile_rows}x{grid.tile_cols} array), each sweeping {grid.swept_dim.value}; "
+        f"{grid.tiles:,} tiles in all. Every stationarity issues the same M*N*K MACs — what "
+        f"differs is the quantisation loss and whether partial sums must be reduced (D53)."
+    ]
+    if dataflow.stationarity is Dataflow.ROW_STATIONARY:
+        out.append(
+            "Row-stationary is defined for completeness, after Eyeriss (Chen/Emer/Sze, ISCA "
+            "2016): one A row per PE with the contraction spread across the array's own "
+            "columns. No shipped profile declares it and nothing here has been checked against "
+            "a measurement of such a machine, so its numbers are UNVALIDATED (D53)."
+        )
+    if grid.materialises_partials:
+        out.append(
+            f"split_k={grid.k_partitions}: the contraction is cut into {grid.k_partitions} "
+            f"independent pieces, so this runs as CUTLASS's two kernels — a partitionedK GEMM "
+            f"and a batched reduction. Charged: {grid.k_partitions} full M x N partials written "
+            f"and read back, {(grid.k_partitions - 1) * grid.m * grid.n:,.0f} additions on "
+            f"{machine.vector_unit.name} at "
+            f"{format_quantity(machine.effective_vector_flops_per_s, 'OP/s')}, and one extra "
+            f"dispatch. Those additions are not new arithmetic — 2*M*N*K already counts them — "
+            f"but they leave the matrix engine's accumulator for the vector unit, which is where "
+            f"their cost comes from (D27/D53)."
+        )
+    elif grid.needs_reduction:
+        if dataflow.split_k > 1:
+            out.append(
+                f"split_k={dataflow.split_k} was requested but {dataflow.stationarity.value} "
+                f"already carries K on the tile grid, so there is nothing left to split: the "
+                f"flag is inert here and costs nothing. It is an output-stationary knob (D53)."
+            )
+        out.append(
+            f"{dataflow.stationarity.value} carries K on the tile grid, so each tile computes a "
+            f"partial result and the same unit revisits the same output cell on a later wave. "
+            f"The partials are assumed to meet in an on-chip accumulator, which this machine "
+            f"model charges no bandwidth for (D5a). Its working set is the whole output — "
+            f"{grid.accumulator_elements:,} accumulators — and where that does not fit, a real "
+            f"compiler re-blocks and re-reads A and B rather than spilling C. Those re-reads are "
+            f"the traffic docs/MODEL.md 6.2 already declines to model, so this stays a lower "
+            f"bound (D53)."
+        )
+    return out
 
 
 def bound_of(report: Report, phase: GraphPhase) -> Bound | None:

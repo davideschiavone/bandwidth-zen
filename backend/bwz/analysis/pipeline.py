@@ -7,14 +7,16 @@ overlap can be *seen* rather than asserted. It invents no new cost: every span
 below is a slice of a quantity ``op_roofline`` already produced, and the spans on
 each lane sum back to it.
 
-**The matmul is the interesting case**, because its tiling is not a metaphor. A
-weight-stationary array holds a ``rows x cols`` slice of ``B`` and streams ``M``
-rows of ``A`` through it, so the schedule has
-
-    tiles = ceil(K/rows) * ceil(N/cols)
-
-steps, and that is the same tile count :func:`analysis.tiling.systolic_utilisation`
-divides by. Each step loads ``t_dram/tiles`` and computes ``t_compute/tiles``.
+**The matmul is the interesting case**, because its tiling is not a metaphor.
+Which tiles there are follows from the machine's stationarity (D53), and
+``analysis/stationarity.py`` is the one place that decides: a weight-stationary
+array holds a ``rows x cols`` slice of ``B`` and streams ``M`` past it, giving
+``ceil(K/rows) * ceil(N/cols)`` tiles; an output-stationary one holds ``C``'s
+accumulator and sweeps ``K`` inside each of ``ceil(M/rows) * ceil(N/cols)``. The
+schedule takes whichever grid it is handed — the same one
+:func:`analysis.tiling.systolic_utilisation` divides by, so the picture cannot
+disagree with the utilisation. Each step loads ``t_dram/tiles`` and computes
+``t_compute/tiles``.
 
 Two resources, each serial in itself: one DRAM channel, one array.
 
@@ -52,13 +54,13 @@ from enum import StrEnum
 from typing import TYPE_CHECKING
 
 from bwz.analysis.roofline import MATRIX_OP_TYPES, MachineModel
-from bwz.analysis.stationarity import TileGrid, grid_for
+from bwz.analysis.stationarity import Operand, TileGrid, grid_for
 from bwz.graph.ops import ComputeGraph, GraphPhase, MatmulAttrs, Operation
 from bwz.report import OpResult, PhaseResult
 from bwz.spec.deployment import AStrategy, BDataflow
 
 if TYPE_CHECKING:
-    # analysis.dataflow imports tile_count/ntiles_per_kslice from this module,
+    # analysis.dataflow imports tile_count/tiles_per_a_event from this module,
     # so importing DataflowPlan back at runtime would be circular. The type is
     # only ever used in annotations, which `from __future__ import annotations`
     # already defers, so a TYPE_CHECKING-only import is enough.
@@ -89,14 +91,16 @@ class Stage(StrEnum):
 
     DISPATCH = "Dis"
     LOAD = "Ld"
-    """Operand B, the stationary one the array holds."""
+    """Operand B. Stationary under ``ws``, streamed past a resident accumulator
+    under ``os`` — either way it is B's bytes that cross here (D53)."""
     LOAD_A = "LdA"
     """Operand A, the one that streams through the array. A separate stage
     because the two obey different residency fractions and spill at different
     times — capacity is granted to activations before weights (D15) — so one
     combined LOAD figure cannot say which operand crossed the bus. For a lone
-    matmul this stage is instead the k-slice staging: the operand enters per
-    k-slice, once each, and every tile of the group reads the staging (D33)."""
+    matmul this stage is instead the per-grid-row staging: the operand enters
+    once per row of the tile grid — a k-slice under ``ws``, a band of M rows
+    under ``os`` — and every tile of that row reads the staging (D33/D53)."""
     HOLD = "Hold"
     EXEC = "Ex"
     STORE = "St"
@@ -141,17 +145,19 @@ class Span:
     deliberately reproduces for a lone matmul."""
     tile_start: int | None = None
     tile_end: int | None = None
-    """A lone matmul only: the global, k-major tile-index range ``[tile_start,
+    """A lone matmul only: the global, row-major tile-index range ``[tile_start,
     tile_end)`` this step covers — the same numbering ``deploy.py``'s
-    ``KSLICE``/``tile()`` macros use. ``None`` for a network's per-operation
+    ``GROUP``/``tile()`` macros use. ``None`` for a network's per-operation
     trace, which has no tile grid to index into (D48)."""
-    tiles_per_ks: int | None = None
-    """A lone matmul only: ``ceil(N/cols)``, the width of one k-slice row in
-    B's tile grid — divides ``tile_start``/``tile_end`` into a
-    (k-slice-row, n-tile-column) position, ``A(:,g)``/``B(row,col)``. Same
-    value for every span of one trace; carried per-span so a caller with just
-    a ``Span`` (D48's shared hover text, ``plot_pipeline.py``'s ``_tip``) can
-    derive the index without importing the deployment's own geometry."""
+    grid: TileGrid | None = None
+    """A lone matmul only: the decomposition this trace was built from (D53).
+    ``grid.decode`` turns ``tile_start``/``tile_end`` into a (row, col) position
+    and ``grid.row_dim``/``col_dim`` say which of M/N/K each axis is, so a
+    caller holding just a ``Span`` (D48's shared hover text,
+    ``plot_pipeline.py``'s ``_tip``) can name the tile without importing the
+    deployment's own geometry. Same object for every span of one trace: it
+    replaces the bare ``tiles_per_ks`` width, which could only describe the
+    weight-stationary grid."""
 
     @property
     def duration_s(self) -> float:
@@ -297,21 +303,44 @@ def tile_count(op: Operation, machine: MachineModel) -> int:
     return grid.tiles if grid is not None else 1
 
 
-def ntiles_per_kslice(op: Operation, machine: MachineModel) -> int:
-    """``ceil(N/cols)`` — tiles served by one staged A k-slice under D33.
+def tiles_per_a_event(op: Operation, machine: MachineModel) -> int:
+    """Tiles one A staging event serves: the width of a grid row (D33/D53).
 
-    The same divisor :func:`_tile_trace` and :mod:`bwz.deploy` use, so the
-    dataflow strategies in ``analysis/schedule.py`` cannot compute a different
-    figure than the schedule and the listing draw. Returns 1 without declared
-    array geometry, where there is no k-slice structure to speak of.
+    ``ceil(N/cols)`` under every stationarity whose column axis is N — which is
+    all of them but ``is`` — so this is the same number D33 called
+    ``NTILES_PER_KS``, generalised to grids whose rows are bands of M rather
+    than slices of K. The same divisor :func:`_tile_trace` and :mod:`bwz.deploy`
+    use, so the dataflow strategies cannot compute a different figure than the
+    schedule and the listing draw. Returns 1 without declared array geometry,
+    where there is no tile structure to speak of.
     """
-    if not isinstance(op.attrs, MatmulAttrs):
-        return 1
-    dims = machine.unit.systolic_dims
-    if dims is None:
-        return 1
-    _, cols = dims
-    return math.ceil(op.attrs.n / cols)
+    grid = grid_of(op, machine)
+    return grid.cols if grid is not None else 1
+
+
+def _resident_tile_bytes(
+    grid: TileGrid | None, result: OpResult, dataflow: DataflowPlan | None
+) -> float:
+    """Bytes one tile of the resident operand occupies on chip (D53).
+
+    Derived from the traffic the report already charged rather than asserted:
+    the operand's own total, divided by the number of grid *cells*. Cells, not
+    tiles — under split-K each partition holds a full-size partial of the same
+    cell, so dividing by ``grid.tiles`` would shrink the buffer as split-K grew
+    it. ``dataflow.a_bytes`` is preferred over the charged activation read for
+    an A-resident grid, since ``stream`` inflates the latter by re-reads (D31)
+    and a buffer holds one copy however many times it is filled.
+    """
+    if grid is None:
+        return result.weight_bytes
+    cells = max(1, grid.rows * grid.cols)
+    if grid.resident is Operand.B:
+        total = result.weight_bytes
+    elif grid.resident is Operand.C:
+        total = result.dram_write_bytes
+    else:
+        total = dataflow.a_bytes if dataflow is not None else result.dram_activation_read_bytes
+    return total / cells
 
 
 def _engine_work(group: list[OpResult], *, matrix: bool) -> tuple[float, float, str]:
@@ -390,7 +419,8 @@ def _tile_trace(
     dataflow: DataflowPlan | None = None,
 ) -> PipelineTrace:
     result = phase.ops[0]
-    tiles = tile_count(op, machine)
+    grid = grid_of(op, machine)
+    tiles = grid.tiles if grid is not None else 1
     # A step is a WAVE, not a tile. The chip has `units` arrays and runs that
     # many weight tiles at once, so drawing one bar per tile showed a 4-core NPU
     # chewing through four tiles in series when it does all four together — a
@@ -414,69 +444,65 @@ def _tile_trace(
     dims = machine.unit.systolic_dims
     shape = f"{dims[0]}x{dims[1]}" if dims is not None else "untiled"
     a_strategy = dataflow.a_strategy if dataflow is not None else AStrategy.STAGE
-    # The real, k-major tile-index range [open_tile, end_tile) each drawn step
+    # The real, row-major tile-index range [open_tile, end_tile) each drawn step
     # covers — independent of a_strategy, so computed once here and reused both
-    # for A's k-slice bookkeeping below and to tag every span this step produces
+    # for A's staging bookkeeping below and to tag every span this step produces
     # with the tiles it actually represents (D48). Capped at the real `tiles`
     # count, not waves * units (the array's theoretical capacity): when tiles
     # doesn't divide evenly into units, the last wave leaves some array slots
     # idle, and an idle slot is not a tile any span should claim (D46).
-    # `tiles_per_ks` is B's own geometry — ceil(N/cols) — true under every
-    # a_strategy, not just stage/whole, so it is hoisted here rather than
-    # nested in the stage-only branch below, letting every span (not only A's)
-    # carry it for the ``A(:,g)``/``B(row,col)`` hover notation (D48).
     tile_ranges: list[tuple[int, int]] | None = None
-    tiles_per_ks: int | None = None
-    if dims is not None:
-        rows, cols = dims
-        tiles_per_ks = max(1, math.ceil(attrs.n / cols))
+    if grid is not None:
         tile_ranges = [
             (math.floor(i * per_step * units), min(tiles, math.floor((i + 1) * per_step * units)))
             for i in range(steps)
         ]
-    # D33: under stage/whole, A is not a stream — each k-slice is staged once
-    # and every tile of its group reads the staging. Concentrate A's DRAM time
-    # into one event per k-slice, at the step that opens it, instead of a
-    # per-wave trickle that reads as a re-read. Tiles are k-major, so tile t
-    # opens the k-slice CEIL(N/COLS) divides it. Under stream (D31) or without
-    # declared geometry, the honest picture *is* the per-wave trickle: `result`
-    # already carries the inflated bytes a per-tile re-fetch costs (analysis/
-    # dataflow.py), and this function only has to schedule what it is given.
+    # D33, generalised by D53: under stage/whole, A is not a stream — one grid
+    # ROW's tiles all read the same slice of A, staged once. Concentrate A's
+    # DRAM time into one event per grid row, at the step that opens it, instead
+    # of a per-wave trickle that reads as a re-read. Tiles are row-major, so
+    # tile t belongs to the row `grid.cols` divides it into. What that row *is*
+    # depends on the stationarity: a k-slice under `ws` (D33's own case), a band
+    # of M rows under `os`/`rs`/`is`. Either way A crosses DRAM exactly once, in
+    # `grid.a_events` pieces. Under stream (D31) or without declared geometry,
+    # the honest picture *is* the per-wave trickle: `result` already carries the
+    # inflated bytes a per-tile re-fetch costs (analysis/dataflow.py), and this
+    # function only has to schedule what it is given.
     ramp_s = 0.0
-    if dims is not None and a_strategy is not AStrategy.STREAM:
+    a_events = 1
+    if grid is not None and a_strategy is not AStrategy.STREAM:
         assert tile_ranges is not None
-        assert tiles_per_ks is not None
-        k_slices = max(1, math.ceil(attrs.k / rows))
+        a_events = grid.a_events
         a_bytes_step: list[float] = []
-        # (first, last) 1-based k-slice *completed* this step, or None if this
+        # (first, last) 1-based grid row *completed* this step, or None if this
         # step completes none. `openings = end//w - start//w` is the number of
-        # k-slices this step finishes — consecutive steps' [start//w, end//w)
-        # windows partition [0, k_slices) exactly, with no gap and no overlap
+        # rows this step finishes — consecutive steps' [start//w, end//w)
+        # windows partition [0, a_events) exactly, with no gap and no overlap
         # (start_{i+1} = end_i, so last_i = end_i//w - 1 = start_{i+1}//w =
         # first_{i+1} - 1) — so the label's range must be *this same* window,
         # not the block merely *touched* by the step's last tile
-        # (`(end_tile - 1) // tiles_per_ks`), which straddles into whichever
+        # (`(end_tile - 1) // grid.cols`), which straddles into whichever
         # later step actually finishes it: that block would then be named by
         # two consecutive steps' labels while its bytes were only ever
         # charged to the second, undercounting this step's own label by
         # exactly the bytes of the one block it doesn't yet own.
-        # Per-slice byte weight, not a uniform total/k_slices average: K need
-        # not divide evenly by rows (188 slices of 16 rows is 3008, not a
-        # 3000-wide K), so the *last* slice is narrower than the rest. A
-        # uniform average charges every slice the same ~31.9 kB regardless,
-        # silently under-charging the 187 full-width slices and over-charging
-        # the ragged last one — small in total, but a step naming three full
-        # k-slices must charge exactly 3 x (1000 rows x 16 cols), not three
-        # shares of a fleet-wide average.
+        # Per-row byte weight, not a uniform total/a_events average: neither M
+        # nor K need divide evenly by rows (188 slices of 16 rows is 3008, not a
+        # 3000-wide K), so the *last* band is narrower than the rest. A uniform
+        # average charges every band the same ~31.9 kB regardless, silently
+        # under-charging the 187 full-width bands and over-charging the ragged
+        # last one — small in total, but a step naming three full bands must
+        # charge exactly 3 x (1000 rows x 16 cols), not three shares of a
+        # fleet-wide average. `grid.a_event_elements` is what knows the shape.
         bytes_per_element = result.dram_activation_read_bytes / (attrs.m * attrs.k)
         ks_opened: list[tuple[int, int] | None] = []
         for open_tile, end_tile in tile_ranges:
-            first_g0 = open_tile // tiles_per_ks
-            last_g0 = end_tile // tiles_per_ks - 1
+            first_g0 = open_tile // grid.cols
+            last_g0 = end_tile // grid.cols - 1
             if last_g0 >= first_g0:
                 a_bytes_step.append(
                     sum(
-                        attrs.m * min(rows, attrs.k - g * rows) * bytes_per_element
+                        grid.a_event_elements(g) * bytes_per_element
                         for g in range(first_g0, last_g0 + 1)
                     )
                 )
@@ -486,7 +512,7 @@ def _tile_trace(
                 ks_opened.append(None)
         if a_strategy is AStrategy.WHOLE:
             # Same total bytes as stage (D33) — only the timing changes: every
-            # k-slice ramps in before wave 0 instead of landing at the wave that
+            # band ramps in before wave 0 instead of landing at the wave that
             # opens it. Zero the per-step shares here; the ramp itself is a
             # single span prepended after `_pipelined_tiles` returns, and every
             # other span shifts to start after it (below).
@@ -501,37 +527,43 @@ def _tile_trace(
         load_a = [result.dram_activation_read_bytes * scale] * steps
         activation_bytes = [result.dram_activation_read_bytes / steps] * steps
         ks_opened = [None] * steps
-        k_slices = 1
     tiles_here = in_flight * per_step
     # Two spaces separate the bar text from the qualifier: `_short` in the plot
     # script splits there, so the bar stays legible and the hover keeps it all.
+    # The tile is named after the operand that stays resident in it — B under
+    # weight-stationary, C's accumulator under output-stationary (D53) — because
+    # that is what the grid is a grid *of*.
+    resident = grid.resident.value if grid is not None else "B"
     if tiles_here == 1:
-        label, qualifier = f"B tile {shape}", ""
+        label, qualifier = f"{resident} tile {shape}", ""
     elif per_step > 1:
         # One bar coalesces several waves, so "in parallel" would overstate it:
         # this many tiles pass through, `in_flight` of them at any instant.
-        label = f"{tiles_here:.0f} B tiles {shape}"
+        label = f"{tiles_here:.0f} {resident} tiles {shape}"
         qualifier = f"{in_flight} at a time"
     elif units > 1:
-        label, qualifier = f"{tiles_here:.0f} B tiles {shape}", "all in parallel"
+        label, qualifier = f"{tiles_here:.0f} {resident} tiles {shape}", "all in parallel"
     else:
-        label, qualifier = f"{tiles_here:.0f} B tiles {shape}", ""
+        label, qualifier = f"{tiles_here:.0f} {resident} tiles {shape}", ""
     tail = f"  {qualifier}" if qualifier else ""
     labels = [f"{label} [{i + 1}/{steps}]{tail}" for i in range(steps)]
 
-    # The k-slice openings' A bars carry their own names under stage; the other
+    # The staging openings' A bars carry their own names under stage; the other
     # steps have no A traffic at all under D33, so nothing else needs one. Under
     # stream or whole there is no per-step opening to name — stream falls back
-    # to the B labels (D31's per-tile share), whole's A traffic is a single ramp
-    # named separately below.
+    # to the tile labels (D31's per-tile share), whole's A traffic is a single
+    # ramp named separately below. The band is named by its own row axis: a
+    # k-slice under ws, a row-band under os (D53).
+    group = grid.group_name if grid is not None else "k-slice"
+    band = f"{grid.a_event_shape[0]}x{grid.a_event_shape[1]}" if grid is not None else ""
+
     def _stage_label(opened: tuple[int, int] | None) -> str:
         if opened is None:
             return ""
         first, last = opened
-        size = f"({attrs.m}x{rows})"
         if first == last:
-            return f"A k-slice {first}/{k_slices} {size} — staged once, feeds its tiles"
-        return f"A k-slices {first}-{last}/{k_slices} {size} — staged once, feed their tiles"
+            return f"A {group} {first}/{a_events} ({band}) — staged once, feeds its tiles"
+        return f"A {group}s {first}-{last}/{a_events} ({band}) — staged once, feed their tiles"
 
     activation_labels = (
         [_stage_label(g) for g in ks_opened] if a_strategy is AStrategy.STAGE else None
@@ -549,9 +581,12 @@ def _tile_trace(
         bytes_per_step=[result.dram_weight_read_bytes / steps] * steps,
         stored_per_step=[result.dram_write_bytes / steps] * steps,
         flops_per_step=[result.flops / steps] * steps,
-        # What one buffer holds: the B tiles the arrays are stationary on for
-        # this wave. Sized from the schedule, not asserted.
-        resident_per_step=[result.weight_bytes / max(tiles, 1) * tiles_here] * steps,
+        # What one buffer holds: the resident operand's tiles the arrays work on
+        # for this wave — B under weight-stationary, C's accumulator under
+        # output-stationary (D53). Sized from the schedule, not asserted, and
+        # divided by the grid's CELL count rather than its tile count: under
+        # split-K every partition holds a full-size partial of the same cell.
+        resident_per_step=[_resident_tile_bytes(grid, result, dataflow) * tiles_here] * steps,
         activation_loads=load_a,
         activation_bytes_per_step=activation_bytes,
         activation_labels=activation_labels,
@@ -559,7 +594,7 @@ def _tile_trace(
         depth_override=(dataflow.a_prefetch_depth if dataflow is not None else None),
         b_on_demand=(dataflow is not None and dataflow.b_dataflow is BDataflow.ON_DEMAND),
         tile_ranges=tile_ranges,
-        tiles_per_ks=tiles_per_ks,
+        grid=grid,
     )
     if a_strategy is AStrategy.WHOLE and ramp_s > 0:
         # Every k-slice staged before wave 0: one span for the whole ramp, and
@@ -569,7 +604,7 @@ def _tile_trace(
         ramp = Span(
             Lane.DRAM,
             Stage.LOAD_A,
-            f"A staged whole  {k_slices} k-slices before wave 0 ({attrs.m}x{rows} each)",
+            f"A staged whole  {a_events} {group}s before wave 0 ({band} each)",
             0.0,
             ramp_s,
             -1,
@@ -579,7 +614,7 @@ def _tile_trace(
             a_fetch_mode=AStrategy.WHOLE.value,
             tile_start=0,
             tile_end=tiles,
-            tiles_per_ks=tiles_per_ks,
+            grid=grid,
         )
         spans = [
             ramp,
@@ -718,7 +753,7 @@ def _pipelined_tiles(
     depth_override: int | None = None,
     b_on_demand: bool = False,
     tile_ranges: list[tuple[int, int]] | None = None,
-    tiles_per_ks: int | None = None,
+    grid: TileGrid | None = None,
 ) -> list[Span]:
     """Software-pipeline the tiles of ONE operation, per the constraints above.
 
@@ -751,7 +786,9 @@ def _pipelined_tiles(
     ``tile_ranges[i]`` is the ``[start, end)`` global tile-index range step
     ``i`` covers (D48) — the same range for every span that step produces,
     since they all cover the same real tiles. ``None`` when the caller has no
-    tile grid to index into (no declared systolic geometry).
+    tile grid to index into (no declared systolic geometry). ``grid`` is the
+    decomposition those indices are indices *into* (D53); every span carries it
+    so a renderer can decode a tile position without re-deriving the geometry.
     """
     steps = len(loads)
     a_loads = activation_loads if activation_loads is not None else [0.0] * steps
@@ -847,7 +884,7 @@ def _pipelined_tiles(
                     bytes_moved=bytes_per_step[i],
                     tile_start=tile_start,
                     tile_end=tile_end,
-                    tiles_per_ks=tiles_per_ks,
+                    grid=grid,
                 )
             )
         if a_loads[i] > 0:
@@ -865,7 +902,7 @@ def _pipelined_tiles(
                     a_fetch_mode=a_fetch_mode,
                     tile_start=tile_start,
                     tile_end=tile_end,
-                    tiles_per_ks=tiles_per_ks,
+                    grid=grid,
                 )
             )
         # A buffer is occupied from the moment its fetch begins until its result
@@ -886,7 +923,7 @@ def _pipelined_tiles(
                 resident_bytes=resident_per_step[i],
                 tile_start=tile_start,
                 tile_end=tile_end,
-                tiles_per_ks=tiles_per_ks,
+                grid=grid,
             )
         )
         if executes[i] > 0:
@@ -903,7 +940,7 @@ def _pipelined_tiles(
                     flops=flops_per_step[i],
                     tile_start=tile_start,
                     tile_end=tile_end,
-                    tiles_per_ks=tiles_per_ks,
+                    grid=grid,
                 )
             )
         if stores[i] > 0:
@@ -920,7 +957,7 @@ def _pipelined_tiles(
                     bytes_moved=stored_per_step[i],
                     tile_start=tile_start,
                     tile_end=tile_end,
-                    tiles_per_ks=tiles_per_ks,
+                    grid=grid,
                 )
             )
     return spans

@@ -82,7 +82,7 @@ def test_reduction_is_partitions_minus_one_adds_over_the_whole_output() -> None:
     back by the reduction kernel, because the two are separate launches.
     """
     split = grid_for(Dataflow.OUTPUT_STATIONARY, ATTRS, ROWS, COLS, k_partitions=4)
-    cost = reduction_cost(split, ATTRS, accumulator_bytes=4.0)
+    cost = reduction_cost(split, accumulator_bytes=4.0)
 
     elements = 1000 * 2000
     assert cost.partial_sums == pytest.approx(3 * elements)
@@ -93,19 +93,29 @@ def test_reduction_is_partitions_minus_one_adds_over_the_whole_output() -> None:
 
 def test_a_grid_that_needs_no_reduction_costs_nothing_to_reduce() -> None:
     plain = grid_for(Dataflow.OUTPUT_STATIONARY, ATTRS, ROWS, COLS)
-    assert reduction_cost(plain, ATTRS, accumulator_bytes=4.0) is NO_REDUCTION
+    assert reduction_cost(plain, accumulator_bytes=4.0) is NO_REDUCTION
     assert NO_REDUCTION.is_free
 
 
-def test_weight_stationary_reduces_once_per_k_slice_on_the_grid() -> None:
-    """``ws`` puts all 188 k-slices on the grid, so all 188 partials must be summed
-    — the cost the engine has been silently omitting for every chip (D53)."""
-    ws_grid = grid_for(Dataflow.WEIGHT_STATIONARY, ATTRS, ROWS, COLS)
-    cost = reduction_cost(ws_grid, ATTRS, accumulator_bytes=4.0)
+def test_k_on_the_grid_owes_a_reduction_but_does_not_materialise_it() -> None:
+    """The line D53 draws, and the reason the two properties are separate.
 
-    elements = 1000 * 2000
-    assert cost.partial_sums == pytest.approx(187 * elements), "188 partials, 187 adds"
-    assert cost.dispatches == 1
+    ``ws`` puts all 188 k-slices on the grid, so partial sums genuinely exist
+    and genuinely have to be added — ``needs_reduction`` says so. What it does
+    NOT do is write them to DRAM: the same unit comes back to the same output
+    cell on a later wave, so they meet in an accumulator, and D5a gives this
+    model no on-chip bandwidth term to charge that against. Split-K is the case
+    that materialises them, because CUTLASS runs it as two kernels — so only it
+    is costed here.
+    """
+    ws_grid = grid_for(Dataflow.WEIGHT_STATIONARY, ATTRS, ROWS, COLS)
+
+    assert ws_grid.needs_reduction, "188 k-slices of partials do have to be summed"
+    assert not ws_grid.materialises_partials, "but in an accumulator, not through DRAM"
+    assert reduction_cost(ws_grid, accumulator_bytes=4.0) is NO_REDUCTION
+    # What it costs instead is capacity, and the drawer has to be able to say
+    # how much: the whole output is live under a K-on-grid walk.
+    assert ws_grid.accumulator_elements == 1000 * 2000
 
 
 @pytest.mark.parametrize("stationarity", list(Dataflow))

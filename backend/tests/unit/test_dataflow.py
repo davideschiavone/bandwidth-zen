@@ -14,7 +14,7 @@ import pytest
 
 from bwz.analysis import analyze, machine_model, trace_phases
 from bwz.analysis.dataflow import DataflowPlan, plan_dataflow
-from bwz.analysis.pipeline import Lane, ntiles_per_kslice, tile_count
+from bwz.analysis.pipeline import Lane, tile_count, tiles_per_a_event
 from bwz.deploy import check as check_deployment
 from bwz.deploy import deployment_of
 from bwz.graph import GraphPhase, build_graph
@@ -88,7 +88,7 @@ def test_stream_multiplies_a_by_ntiles_per_ks() -> None:
 
     assert plan.a_strategy.value == "stream"
     assert plan.residency_tiles == 1
-    assert plan.ntiles_per_ks == METIS_8192_NTILES_PER_KS
+    assert plan.tiles_per_a_event == METIS_8192_NTILES_PER_KS
     assert plan.a_bytes_multiplier == pytest.approx(METIS_8192_NTILES_PER_KS)
 
     op = report.phases[0].ops[0]
@@ -271,7 +271,7 @@ def test_a_residency_tiles_clamps_to_the_largest_power_of_two_divisor() -> None:
     )
     plan, _report = _plan("metis_aipu", spec, deployment)
 
-    assert plan.ntiles_per_ks == 16
+    assert plan.tiles_per_a_event == 16
     assert plan.residency_tiles == 4
     assert plan.a_bytes_multiplier == pytest.approx(4.0)
     assert any("clamped to 4" in note for note in plan.notes)
@@ -439,4 +439,4 @@ def test_ntiles_per_kslice_matches_deploy_and_pipeline() -> None:
     machine = machine_model(chip, spec.operand_dtype)
     deployment = DeploymentSpec.model_validate({"batch": 1, "input_tokens": 1, "output_tokens": 1})
     graph = build_graph(spec, deployment, GraphPhase.STATIC)
-    assert ntiles_per_kslice(graph.ops[0], machine) == math.ceil(8192 / 512) == 16
+    assert tiles_per_a_event(graph.ops[0], machine) == math.ceil(8192 / 512) == 16

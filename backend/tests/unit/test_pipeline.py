@@ -443,9 +443,9 @@ def test_a_label_names_every_k_slice_a_step_opens_not_just_the_first() -> None:
     )
     for span in a_spans:
         assert span.tile_start is not None and span.tile_end is not None
-        assert span.tiles_per_ks is not None
-        first = span.tile_start // span.tiles_per_ks + 1
-        last = span.tile_end // span.tiles_per_ks
+        assert span.grid is not None
+        first = span.tile_start // span.grid.cols + 1
+        last = span.tile_end // span.grid.cols
         assert (
             f"A k-slice {first}/" in span.label
             if first == last

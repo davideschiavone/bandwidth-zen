@@ -61,6 +61,7 @@ from bwz.analysis import analyze, idealised, machine_model
 from bwz.analysis.dataflow import DataflowPlan, plan_dataflow
 from bwz.analysis.pipeline import Lane, PipelineTrace, Span, Stage, build_trace
 from bwz.analysis.roofline import MATRIX_OP_TYPES, compute_dtype
+from bwz.analysis.stationarity import Dim, TileGrid
 from bwz.deploy import check as check_deployment
 from bwz.deploy import deployment_of
 from bwz.explain import Explanation, explain_graph
@@ -566,19 +567,20 @@ def write_html(panels: list[Panel], command: str, out: Path) -> None:
     print(f"wrote {out}")
 
 
-def _tile_segments(tile_start: int, tile_end: int, tiles_per_ks: int) -> list[tuple[int, int, int]]:
-    """Split a global ``[tile_start, tile_end)`` tile range into per-k-slice-row
-    segments ``(k_row, n_start, n_end)`` — the same decomposition the
+def _tile_segments(tile_start: int, tile_end: int, grid_cols: int) -> list[tuple[int, int, int]]:
+    """Split a global ``[tile_start, tile_end)`` tile range into per-grid-row
+    segments ``(row, col_start, col_end)`` — the same decomposition the
     animation's geometry panel does in JS (D48's ``geoSegments``), so the
-    hover and the panel never name a tile differently.
+    hover and the panel never name a tile differently. What a row *is* depends
+    on the stationarity (D53): a k-slice under ``ws``, a band of M under ``os``.
     """
     segments: list[tuple[int, int, int]] = []
     t = tile_start
     while t < tile_end:
-        k_row = t // tiles_per_ks
-        row_end = (k_row + 1) * tiles_per_ks
+        row = t // grid_cols
+        row_end = (row + 1) * grid_cols
         seg_end = min(tile_end, row_end)
-        segments.append((k_row, t - k_row * tiles_per_ks, seg_end - k_row * tiles_per_ks))
+        segments.append((row, t - row * grid_cols, seg_end - row * grid_cols))
         t = seg_end
     return segments
 
@@ -605,11 +607,12 @@ def _format_index_ranges(nums: list[int]) -> str:
 def _merge_column_ranges(ranges: list[tuple[int, int]]) -> list[tuple[int, int]]:
     """Merge overlapping/touching half-open ``[n0, n1)`` ranges.
 
-    C has no k-slice-row dimension — a result tile is the full M height x one
-    n-tile's width, so several k-slice-row segments touching the *same*
-    columns (the common case: a wave's tiles span many rows, each covering
-    most or all of one row's columns) must read as one C column range, not
-    one repeated per row it happened to come from.
+    For an operand whose other dimension is *swept* rather than on the grid,
+    several grid-row segments touching the *same* columns (the common case: a
+    wave's tiles span many rows, each covering most or all of one row's
+    columns) must read as one column range, not one repeated per row it
+    happened to come from. Under ``ws`` that operand is C, whose result tile is
+    the full M height x one n-tile's width.
     """
     merged: list[tuple[int, int]] = []
     for start, end in sorted(ranges):
@@ -620,33 +623,59 @@ def _merge_column_ranges(ranges: list[tuple[int, int]]) -> list[tuple[int, int]]
     return merged
 
 
+def _operand_axes(grid: TileGrid, first: Dim, second: Dim) -> tuple[bool, bool]:
+    """Whether each of an operand's two dimensions is the grid's row axis.
+
+    ``(is_row, is_col)`` per dimension is all a caller needs to place a grid
+    position into that operand's own index: a dimension on the row axis takes
+    the row number, one on the column axis takes the column, and one the tiles
+    sweep takes ``:`` because the operand is covered in full (D53).
+    """
+    return (first is grid.row_dim, second is grid.col_dim)
+
+
 def _index_notation(span: Span) -> str:
     """``A(:,g)``/``B(row,col)``/``C(:,col)`` — the same tile-grid vocabulary
-    the geometry panel's caption uses (D48). Empty for a network's
-    per-operation trace, which has no tile grid to index into (D42), and for
-    the kernel dispatch span, which is not a tile at all.
+    the geometry panel's caption uses (D48), for whichever grid the machine's
+    stationarity implies (D53). Which index an operand takes follows from where
+    its dimensions sit: on the grid's rows, on its columns, or swept. Empty for
+    a network's per-operation trace, which has no tile grid to index into (D42),
+    and for the kernel dispatch span, which is not a tile at all.
     """
-    if span.tile_start is None or span.tile_end is None or span.tiles_per_ks is None:
+    grid = span.grid
+    if span.tile_start is None or span.tile_end is None or grid is None:
         return ""
     if span.stage is Stage.LOAD_A:
         # Not `_tile_segments` (which decomposes the step's raw *touched* tile
         # range — right for B/EXEC, which genuinely spans several rows at
         # once). A's own byte cost is `openings`-based (D33/D48): this event
-        # *completes* k-slices [start//w, end//w) — the same window
-        # `_tile_trace`'s label uses — never the block its last tile merely
-        # touches but a *later* event finishes and gets billed for.
-        first = span.tile_start // span.tiles_per_ks
-        last = span.tile_end // span.tiles_per_ks - 1
-        return "A(:," + _format_index_ranges(list(range(first, last + 1))) + ")"
-    segments = _tile_segments(span.tile_start, span.tile_end, span.tiles_per_ks)
-    if span.stage is Stage.STORE:
-        merged = _merge_column_ranges([(n0, n1) for _k, n0, n1 in segments])
-        cells = [f"{n0}" if n1 - n0 == 1 else f"{n0}..{n1 - 1}" for n0, n1 in merged]
-        return "C(:," + "); C(:,".join(cells) + ")"
-    cells = [
-        f"{k_row},{n0}" if n1 - n0 == 1 else f"{k_row},{n0}..{n1 - 1}" for k_row, n0, n1 in segments
-    ]
-    return "B(" + "); B(".join(cells) + ")"
+        # *completes* rows [start//w, end//w) — the same window `_tile_trace`'s
+        # label uses — never the block its last tile merely touches but a
+        # *later* event finishes and gets billed for.
+        first = span.tile_start // grid.cols
+        last = span.tile_end // grid.cols - 1
+        bands = _format_index_ranges(list(range(first, last + 1)))
+        # A is M x K. Under ws the staged band is a slice of K; under os it is
+        # a band of M rows. Whichever it is, the other axis is read in full.
+        return f"A({bands},:)" if grid.row_dim is Dim.M else f"A(:,{bands})"
+    segments = _tile_segments(span.tile_start, span.tile_end, grid.cols)
+    operand, first_dim, second_dim = {
+        Stage.LOAD: ("B", Dim.K, Dim.N),
+        Stage.STORE: ("C", Dim.M, Dim.N),
+    }.get(span.stage, (grid.resident.value, grid.row_dim, grid.col_dim))
+    row_on_grid, col_on_grid = _operand_axes(grid, first_dim, second_dim)
+    if not row_on_grid:
+        # One index only: the rows all cover the same columns of this operand,
+        # so they collapse into one range rather than repeating per row.
+        merged = _merge_column_ranges([(c0, c1) for _row, c0, c1 in segments])
+        cells = [f"{c0}" if c1 - c0 == 1 else f"{c0}..{c1 - 1}" for c0, c1 in merged]
+        joiner = f"); {operand}(:,"
+        return f"{operand}(:," + joiner.join(cells) + ")"
+    if not col_on_grid:
+        rows = _format_index_ranges([row for row, _c0, _c1 in segments])
+        return f"{operand}({rows},:)"
+    cells = [f"{row},{c0}" if c1 - c0 == 1 else f"{row},{c0}..{c1 - 1}" for row, c0, c1 in segments]
+    return f"{operand}(" + f"); {operand}(".join(cells) + ")"
 
 
 def _tip(span: Span) -> str:
@@ -664,8 +693,8 @@ def _tip(span: Span) -> str:
 
     **The index line (D48)** names the same ``A(:,g)``/``B(row,col)`` position
     the geometry panel highlights, straight off ``Span.tile_start``/
-    ``tile_end``/``tiles_per_ks`` — no re-derivation, just the tooltip finally
-    saying what the label's own bytes and k-slice count already implied.
+    ``tile_end``/``grid`` — no re-derivation, just the tooltip finally
+    saying what the label's own bytes and band count already implied.
     """
     when = f"{format_time(span.start_s)} + {format_time(span.duration_s)}"
     idx = _index_notation(span)

@@ -2,29 +2,30 @@
 
 ``docs/CORRECTIONS.md`` D33/D36. Split out of ``analysis/schedule.py`` so that
 :mod:`bwz.analysis.pipeline` — which already supplies :func:`tile_count` and
-:func:`ntiles_per_kslice`, the two divisors every strategy here is built from —
+:func:`tiles_per_a_event`, the two divisors every strategy here is built from —
 can depend on :class:`DataflowPlan` for its trace-building signature without a
 cycle: this module depends on ``pipeline``, never the reverse.
 
 A byte-amount knob and a timing knob, and they must not be fused into one
-(``PROMPT.md`` dataflow strategy discussion): A has reuse — every tile of a
-k-slice's group reads the same staged slice — so how often that slice is
-re-staged changes A's DRAM traffic. B has none: within one pass every tile is
-fetched exactly once whatever the choice (D30), so the choice only moves *when*
+(``PROMPT.md`` dataflow strategy discussion): A has reuse — every tile of one
+grid row reads the same staged slice, whatever that row is a slice *of* (D53) —
+so how often that slice is re-staged changes A's DRAM traffic. B has none:
+within one pass every tile is fetched exactly once whatever the choice (D30),
+so the choice only moves *when*
 the write lands relative to compute, not how many bytes cross — except across
 *iterations*, where a resident weight set need not be rewritten on a repeat pass.
 """
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 
-from bwz.analysis.pipeline import ntiles_per_kslice, tile_count
+from bwz.analysis.pipeline import grid_of, tile_count, tiles_per_a_event
 from bwz.analysis.roofline import MachineModel
-from bwz.graph.ops import MatmulAttrs, Operation
+from bwz.analysis.stationarity import TileGrid
+from bwz.graph.ops import Operation
 from bwz.spec.deployment import AStrategy, BDataflow, DeploymentSpec
-from bwz.spec.hardware_spec import HardwareSpec
+from bwz.spec.hardware_spec import Dataflow, HardwareSpec
 from bwz.units import format_bytes
 
 
@@ -36,26 +37,51 @@ class DataflowPlan:
     prints cannot disagree.
     """
 
+    grid: TileGrid | None
+    """The decomposition the machine's stationarity implies (D53), or ``None``
+    without declared array geometry. Every divisor below is read off it, so a
+    strategy cannot be planned against a different grid than the one the trace
+    draws and the utilisation model costs."""
+    stationarity: Dataflow
+    """The effective stationarity — the unit's own unless a deployment asked for
+    another it supports. An unsupported request never reaches here: it is
+    refused with ``feasible: false`` before any planning (D53)."""
+    requested_stationarity: Dataflow | None
+    """What the deployment asked for, or ``None`` where it took the chip's own.
+    Kept apart from :attr:`stationarity` so the drawer can say which of the two
+    a number rests on — unlike the A/B knobs there is never a clamp between
+    them, so the pair differ only in whether the user chose."""
+    split_k: int
+    """``k_partitions``: how many independent pieces the contraction is cut into
+    beyond the grid. 1 unless ``--split-k`` asked otherwise."""
     a_strategy: AStrategy
     """Effective, after any clamp: ``whole`` falls back to ``stage`` when the
     scratchpad cannot hold all of A — same bytes either way, D33."""
     a_requested: AStrategy
     residency_tiles: int
-    """Tiles served by one A staging event: ``ntiles_per_ks`` under stage/whole
-    (the default, or a valid override), 1 under stream."""
-    ntiles_per_ks: int
+    """Tiles served by one A staging event: ``tiles_per_a_event`` under
+    stage/whole (the default, or a valid override), 1 under stream."""
+    tiles_per_a_event: int
+    """Width of one grid row — D33's ``NTILES_PER_KS``, generalised: the tiles
+    that share one staged slice of A."""
     a_bytes_multiplier: float
     """1.0 for stage/whole — both cross DRAM exactly once (D33); the byte total
-    does not depend on whether the staging is spread across k-slice boundaries
-    or ramped upfront. ``ntiles_per_ks / residency_tiles`` for stream (D31)."""
+    does not depend on whether the staging is spread across row boundaries or
+    ramped upfront. ``tiles_per_a_event / residency_tiles`` for stream (D31)."""
     a_bytes: float
     """A's whole footprint — ``M x K x element size`` — independent of strategy."""
-    k_slices: int
-    """``ceil(K/rows)``, or 1 without declared array geometry."""
+    a_events: int
+    """A staging events: one per grid row, per split-K piece. ``ceil(K/rows)``
+    k-slices under ``ws`` (D33's own count), ``ceil(M/rows)`` row-bands under
+    ``os``; 1 without declared array geometry."""
+    group_name: str
+    """What one grid row is called — ``"k-slice"`` under ``ws``, ``"row-band"``
+    under ``os``. Carried so the assumptions drawer and the listing name A's
+    staging after the decomposition actually being run."""
     a_bytes_per_event: float
-    """Bytes moved by one A staging event: a full k-slice's share under stage
-    (``a_bytes / k_slices``) scaled by ``residency_tiles / ntiles_per_ks`` when
-    an override serves less than the whole k-slice per event."""
+    """Bytes moved by one A staging event: a full band's share under stage
+    (``a_bytes / a_events``) scaled by ``residency_tiles / tiles_per_a_event``
+    when an override serves less than the whole band per event."""
     b_dataflow: BDataflow
     """Effective, after any clamp: ``persistent`` falls back to ``write-ahead``
     when B does not fit the array's resident tile capacity."""
@@ -68,7 +94,7 @@ class DataflowPlan:
     1/iterations — the first invocation writes B, the rest reuse it."""
     a_prefetch_depth: int | None
     """Override for the double-buffered staging depth ``build_trace`` schedules A's
-    k-slice fetches at. Schedule-only — never changes a byte count. ``None`` keeps
+    per-row fetches at. Schedule-only — never changes a byte count. ``None`` keeps
     today's depth, derived from whether on-chip capacity fits two tiles."""
     notes: tuple[str, ...]
     """Clamp and amortisation assumptions, appended verbatim to
@@ -106,8 +132,9 @@ def plan_dataflow(
     array's resident tile capacity falls back to ``write-ahead``. Both fallbacks
     are named in :attr:`DataflowPlan.notes` rather than happening silently.
     """
+    grid = grid_of(op, machine)
     tiles = tile_count(op, machine)
-    ntiles_per_ks = ntiles_per_kslice(op, machine)
+    per_event = tiles_per_a_event(op, machine)
     unit = machine.unit
     notes: list[str] = []
 
@@ -116,7 +143,7 @@ def plan_dataflow(
         notes.append(
             f"a_strategy=whole requested but A ({format_bytes(a_bytes)}) does not fit the "
             f"{format_bytes(chip.on_chip_capacity_bytes)} scratchpad; fell back to stage — the "
-            f"same {format_bytes(a_bytes)} total, staged per k-slice instead of ramped upfront."
+            f"same {format_bytes(a_bytes)} total, staged per grid row instead of ramped upfront."
         )
         a_strategy = AStrategy.STAGE
 
@@ -125,24 +152,22 @@ def plan_dataflow(
     else:
         requested = deployment.a_residency_tiles
         if requested is None:
-            residency_tiles = ntiles_per_ks
+            residency_tiles = per_event
         else:
-            residency_tiles = _largest_power_of_two_divisor_at_most(requested, ntiles_per_ks)
+            residency_tiles = _largest_power_of_two_divisor_at_most(requested, per_event)
             if residency_tiles != requested:
                 notes.append(
                     f"a_residency_tiles={requested} is not a power-of-2 divisor of "
-                    f"NTILES_PER_KS={ntiles_per_ks}; clamped to {residency_tiles}, the largest "
+                    f"TILES_PER_GROUP={per_event}; clamped to {residency_tiles}, the largest "
                     f"one that is."
                 )
-    a_bytes_multiplier = (ntiles_per_ks / residency_tiles) if residency_tiles > 0 else 1.0
+    a_bytes_multiplier = (per_event / residency_tiles) if residency_tiles > 0 else 1.0
 
-    dims = unit.systolic_dims
-    if dims is not None and isinstance(op.attrs, MatmulAttrs):
-        rows, _ = dims
-        k_slices = max(1, math.ceil(op.attrs.k / rows))
-    else:
-        k_slices = 1
-    a_bytes_per_event = (a_bytes / k_slices) * (residency_tiles / ntiles_per_ks)
+    # One event per grid row (D53): a k-slice under ws, a band of M rows under
+    # os. Both stage A exactly once in total — what changes is what a "row" is.
+    a_events = grid.a_events if grid is not None else 1
+    group_name = grid.group_name if grid is not None else "k-slice"
+    a_bytes_per_event = (a_bytes / a_events) * (residency_tiles / per_event)
 
     b_dataflow = deployment.b_dataflow
     resident_tile_capacity = unit.resident_tile_capacity()
@@ -179,13 +204,18 @@ def plan_dataflow(
         b_write_multiplier = 1.0
 
     return DataflowPlan(
+        grid=grid,
+        stationarity=machine.stationarity,
+        requested_stationarity=deployment.stationarity,
+        split_k=machine.k_partitions,
         a_strategy=a_strategy,
         a_requested=deployment.a_strategy,
         residency_tiles=residency_tiles,
-        ntiles_per_ks=ntiles_per_ks,
+        tiles_per_a_event=per_event,
         a_bytes_multiplier=a_bytes_multiplier,
         a_bytes=a_bytes,
-        k_slices=k_slices,
+        a_events=a_events,
+        group_name=group_name,
         a_bytes_per_event=a_bytes_per_event,
         b_dataflow=b_dataflow,
         b_requested=deployment.b_dataflow,

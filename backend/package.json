@@ -1,0 +1,8 @@
+{
+  "dependencies": {
+    "@opendataloader/pdf": "^2.5.1",
+    "pdf-extract-image": "^0.0.3",
+    "pdf-parse": "^1.1.1",
+    "pdf2pic": "^3.2.0"
+  }
+}
