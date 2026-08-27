@@ -16,6 +16,7 @@ from bwz.analysis.stationarity import (
     Operand,
     grid_for,
     reduction_cost,
+    refusal_reason,
 )
 from bwz.graph.ops import MatmulAttrs
 from bwz.spec.hardware_spec import Dataflow
@@ -142,3 +143,46 @@ def test_split_k_partitions_are_distinguishable_from_grid_position() -> None:
     assert grid.partition_of(0) == 0
     assert grid.partition_of(cells) == 1, "same output cell, next slice of K"
     assert grid.decode(cells) == grid.decode(0)
+
+
+def test_asking_a_chip_for_a_dataflow_it_cannot_run_is_refused_not_clamped() -> None:
+    """D53, and a deliberate departure from the A/B strategy knobs.
+
+    Those clamp: stage/stream/whole are orderings of the same work, so falling
+    back still answers the question. A stationarity is a different
+    decomposition, so substituting one would report a number for hardware the
+    caller never asked about. The message has to name the field, the request
+    and the real capability (CLAUDE.md #8).
+    """
+    from bwz.analysis import analyze
+    from bwz.spec import DeploymentSpec, MatmulSpec, load_chip
+
+    # Input-stationary: no shipped profile declares it, so this stays a refusal
+    # whichever native dataflow the chips are on.
+    tensor_core = load_chip("a100_80gb").compute_units[0]
+    why = refusal_reason(tensor_core, Dataflow.INPUT_STATIONARY)
+    assert why is not None
+    assert "stationarity='is'" in why, "names the field and the request"
+    assert "tensor_core" in why, "names the unit that cannot run it"
+    assert tensor_core.dataflow.value in why, "names the real capability"
+
+    spec = MatmulSpec.model_validate(
+        {"id": "t", "name": "t", "family": "matmul", "m": 512, "n": 512, "k": 4096}
+    )
+    deployment = DeploymentSpec.model_validate(
+        {"batch": 1, "input_tokens": 1, "output_tokens": 1, "stationarity": "is"}
+    )
+    report = analyze(spec, load_chip("a100_80gb"), deployment)
+
+    assert report.feasible is False, "refused, never raised and never silently substituted"
+    assert any("stationarity" in reason for reason in report.infeasibility)
+
+
+def test_a_chip_running_its_own_declared_dataflow_is_always_accepted() -> None:
+    """Whatever a profile declares, it must be able to run — the schema enforces
+    that its native dataflow is in its supported set."""
+    from bwz.spec import load_chip
+
+    for chip_id in ("a100_80gb", "h100_sxm", "metis_aipu", "chip_a"):
+        for unit in load_chip(chip_id).compute_units:
+            assert refusal_reason(unit, unit.dataflow) is None, chip_id

@@ -35,7 +35,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from bwz.graph.ops import MatmulAttrs
-from bwz.spec.hardware_spec import Dataflow
+from bwz.spec.hardware_spec import ComputeUnit, Dataflow
 
 
 class Dim(StrEnum):
@@ -190,4 +190,36 @@ def reduction_cost(grid: TileGrid, attrs: MatmulAttrs, accumulator_bytes: float)
         partial_sums=(partitions - 1) * elements,
         dram_bytes=partitions * elements * accumulator_bytes * 2.0,
         dispatches=1,
+    )
+
+
+def refusal_reason(unit: ComputeUnit, requested: Dataflow) -> str | None:
+    """Why *unit* cannot run *requested*, or ``None`` if it can.
+
+    Refused rather than clamped, unlike the A/B strategy knobs: those pick
+    between orderings of the same work, so falling back still answers the
+    question asked. A stationarity is a different decomposition — quietly
+    substituting one would report a number for hardware the caller did not ask
+    about (D53). The message names the field, the request, and the declared
+    capability, so it is actionable (CLAUDE.md #8).
+    """
+    supported = unit.dataflows()
+    if requested in supported:
+        return None
+    names = ", ".join(sorted(d.value for d in supported))
+    why = ""
+    if requested is Dataflow.WEIGHT_STATIONARY and unit.weight_sets <= 1:
+        why = (
+            f" {unit.name} declares weight_sets=1, i.e. no weight residency at all: both "
+            f"operands are re-read per instruction (D30), so there is nothing for a weight "
+            f"to stay stationary in."
+        )
+    elif requested is Dataflow.OUTPUT_STATIONARY and unit.weight_sets > 1:
+        why = (
+            f" {unit.name} holds {unit.weight_sets} weight sets — for an in-memory array the "
+            f"weights ARE the storage, so it cannot instead hold accumulators."
+        )
+    return (
+        f"stationarity={requested.value!r} is not supported by {unit.name}, which declares "
+        f"{names}.{why} Drop the flag to use the chip's own dataflow, or pick one it declares."
     )

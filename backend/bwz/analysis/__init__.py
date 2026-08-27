@@ -15,6 +15,7 @@ from bwz.analysis.memory import infeasibility_reasons, plan_memory, usable_memor
 from bwz.analysis.pipeline import PipelineTrace, build_trace
 from bwz.analysis.roofline import MachineModel, compute_dtype, idealised, machine_model
 from bwz.analysis.schedule import run_phase
+from bwz.analysis.stationarity import refusal_reason
 from bwz.graph.builder import build_graphs, phases_for
 from bwz.graph.ops import GraphPhase
 from bwz.operators.base import cost_of
@@ -81,6 +82,19 @@ def analyze(model: AnyModelSpec, hardware: HardwareSpec, deployment: DeploymentS
             ),
         )
 
+    # Refused, not clamped (D53): a stationarity is a whole decomposition, so
+    # substituting a supported one would answer a different question than the
+    # caller asked. Checked before any work, against the matrix unit that would
+    # actually run the GEMM.
+    if deployment.stationarity is not None:
+        matrix_unit = max(
+            (u for u in hardware.compute_units if u.supports(dtype)),
+            key=lambda u: u.peak_flops_per_s(hardware.clock_hz, dtype),
+        )
+        refusal = refusal_reason(matrix_unit, deployment.stationarity)
+        if refusal is not None:
+            return _infeasible(meta, (refusal,))
+
     graphs = build_graphs(model, deployment)
     sizing_phase = GraphPhase.DECODE if GraphPhase.DECODE in graphs else next(iter(graphs))
     plan = plan_memory(graphs[sizing_phase], hardware, deployment)
@@ -88,7 +102,12 @@ def analyze(model: AnyModelSpec, hardware: HardwareSpec, deployment: DeploymentS
     if not plan.fits:
         return _infeasible(meta, infeasibility_reasons(plan, hardware, deployment), plan)
 
-    machine = machine_model(hardware, dtype)
+    machine = machine_model(
+        hardware,
+        dtype,
+        stationarity=deployment.stationarity,
+        k_partitions=deployment.split_k,
+    )
     phases = tuple(
         run_phase(
             graphs[phase],
@@ -145,7 +164,14 @@ def trace_phases(
         if isinstance(model, MatmulSpec)
         else compute_dtype(hardware, deployment.precision.weights, deployment.precision.activations)
     )
-    machine = machine_model(hardware, dtype)
+    # Same stationarity the report was built with, or the trace would draw a
+    # different decomposition than the numbers above it (D53).
+    machine = machine_model(
+        hardware,
+        dtype,
+        stationarity=deployment.stationarity,
+        k_partitions=deployment.split_k,
+    )
     graphs = build_graphs(model, deployment)
     dataflow: DataflowPlan | None = None
     if isinstance(model, MatmulSpec):
