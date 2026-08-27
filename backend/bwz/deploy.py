@@ -24,12 +24,13 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
-from bwz.analysis.pipeline import Lane, PipelineTrace, tile_count
+from bwz.analysis.pipeline import Lane, PipelineTrace, grid_of, tile_count
 from bwz.analysis.roofline import MachineModel
+from bwz.analysis.stationarity import Dim, TileGrid
 from bwz.graph.ops import MatmulAttrs, Operation
 from bwz.report import PhaseResult
 from bwz.spec.deployment import AStrategy, BDataflow
-from bwz.spec.hardware_spec import HardwareSpec
+from bwz.spec.hardware_spec import Dataflow, HardwareSpec
 from bwz.units import format_bytes, format_time
 
 
@@ -65,20 +66,142 @@ class Deployment:
     statement is truly concurrent (D41)."""
     array_rows: int = 0
     array_cols: int = 0
-    k_slices: int = 0
-    tiles_per_ks: int = 0
-    """The tile-grid geometry a ``"tiles"`` listing was built from: B is cut
-    into ``array_rows x array_cols`` tiles, ``k_slices`` of them along K
-    (``ceil(K/array_rows)``) each holding ``tiles_per_ks`` along N
-    (``ceil(N/array_cols)``). A is cut only along K, into the same
-    ``k_slices`` -- never along M, which streams (D30/D33). All four are 0 for
-    an ``"operations"`` network listing, which has no tile grid at all. Lets
-    the ``--animate`` geometry panel (D48) draw A/B/C without recomputing this
-    module's own arithmetic."""
+    grid: TileGrid | None = None
+    """The decomposition a ``"tiles"`` listing was built from (D53): which
+    operand is resident, how many tiles there are and along which dimensions,
+    and which dimension each tile sweeps. ``None`` for an ``"operations"``
+    network listing, which has no tile grid at all. Lets the ``--animate``
+    geometry panel (D48) draw A/B/C without recomputing this module's own
+    arithmetic — and lets it draw the *right* grid, which is the resident
+    operand's and therefore not the same one on every chip."""
 
 
 def _int(value: float) -> str:
     return f"{round(value):,}"
+
+
+_STATIONARITY_HEADERS: dict[Dataflow, tuple[str, ...]] = {
+    Dataflow.WEIGHT_STATIONARY: (
+        "Weight-stationary: B is cut into {rows}x{cols} tiles and held by the array;",
+        "{swept} streams past it. Each tile owns a slice of the contraction, so the",
+        "partials meet in an accumulator on a later wave (D53).",
+    ),
+    Dataflow.OUTPUT_STATIONARY: (
+        "Output-stationary — what cuBLAS/CUTLASS do: C is cut into {rows}x{cols}",
+        "accumulator tiles and K is swept INSIDE each one, in registers. No partial",
+        "sum ever leaves a core, so there is no reduction to pay for (D53).",
+    ),
+    Dataflow.INPUT_STATIONARY: (
+        "Input-stationary: A is cut into {rows}x{cols} tiles and held by the array;",
+        "{swept} streams past it. Each tile owns a slice of the contraction (D53).",
+    ),
+    Dataflow.ROW_STATIONARY: (
+        "Row-stationary, after Eyeriss (Chen/Emer/Sze, ISCA 2016): one A row per PE,",
+        "with K spread across the array's own columns so partial sums reduce INSIDE",
+        "the array. No shipped profile declares this — these numbers are UNVALIDATED.",
+    ),
+}
+"""How each stationarity cuts the problem, in the listing's own voice. A table
+rather than a branch because every entry says the same three things — what is
+resident, what streams, and where the partial sums go — and the reader should be
+able to compare two chips' listings line for line (D53)."""
+
+_MMA_WEIGHT_STATIONARY_HEADER = (
+    "Weight-stationary: B is cut into {rows}x{cols} tiles; each instruction tile",
+    "pairs one with {rows} rows of A. Nothing is held — this unit reads both",
+    "operands per instruction (D30) — but K is still on the grid, so each tile",
+    "owns a slice of the contraction (D53).",
+)
+"""Weight-stationary on a unit that holds no weights. The grid is the same, but
+saying "held by the array" of an MMA unit would contradict D30 and D52 in the
+same breath the cost model denies it — the reason D52's addendum exists."""
+
+
+def _stationarity_header(grid: TileGrid, issues_instruction_tiles: bool) -> list[str]:
+    """The header lines naming the decomposition this listing is of."""
+    template = _STATIONARITY_HEADERS[grid.stationarity]
+    if grid.stationarity is Dataflow.WEIGHT_STATIONARY and issues_instruction_tiles:
+        template = _MMA_WEIGHT_STATIONARY_HEADER
+    lines = [
+        text.format(rows=grid.tile_rows, cols=grid.tile_cols, swept=grid.swept_dim.value)
+        for text in template
+    ]
+    lines.append(
+        f"Grid: {_int(grid.rows)} x {_int(grid.cols)} tiles "
+        f"({grid.row_dim.value} x {grid.col_dim.value}), each sweeping {grid.swept_dim.value}"
+        + (
+            " in whole instruction tiles (D52)."
+            if issues_instruction_tiles
+            else " element by element."
+        )
+    )
+    return lines
+
+
+def _sweep_note(grid: TileGrid) -> str:
+    """What the swept-dimension loop is doing, for its own trailing comment."""
+    axis = grid.swept_dim.value
+    if grid.stationarity is Dataflow.OUTPUT_STATIONARY:
+        return f"{axis} accumulates in the tile's own accumulator — nothing spills (D53)"
+    if grid.stationarity is Dataflow.ROW_STATIONARY:
+        return f"{axis} is ALSO spread across the array's columns; this walks the rest"
+    return f"{axis} is spatial: whole instruction tiles, no serial pipeline (D52)"
+
+
+def _operand_indices(grid: TileGrid, *, instruction_tiles: bool) -> tuple[str, str]:
+    """``A[..][..]``/``B[..][..]`` subscripts for one tile's inner loop.
+
+    A dimension on the grid's row axis is ``GROUP(w, u)``, one on its column
+    axis is ``COL(w, u)``, and the swept one is the loop variable — so which
+    subscript varies is exactly the stationarity's choice, and the listing says
+    the same thing the cost model does (D53). An MMA unit walks the swept
+    dimension a whole instruction tile at a time (``kt * ROWS``); a streaming
+    array walks it element by element (``m``).
+    """
+
+    def axis(dim: Dim) -> str:
+        if dim is grid.row_dim:
+            return "GROUP(w, u)"
+        if dim is grid.col_dim:
+            return "COL(w, u)"
+        name = dim.value.lower()
+        if not instruction_tiles:
+            return name
+        return f"{name}t * {'COLS' if dim is Dim.N else 'ROWS'}"
+
+    return (
+        f"[{axis(Dim.M)}][{axis(Dim.K)}]",
+        f"[{axis(Dim.K)}][{axis(Dim.N)}]",
+    )
+
+
+def _reduction_kernel(
+    grid: TileGrid, machine: MachineModel, dram_bytes: float
+) -> list[tuple[str, str | None]]:
+    """The second kernel split-K needs, as its own listing block (D53).
+
+    A separate block rather than more lines in the loop nest above, because it is
+    a separate *launch*: the GEMM has to finish everywhere before any of this can
+    start. That is also why its bytes are real — the partials cannot stay in
+    registers across a kernel boundary, so they go out to DRAM and come back.
+    """
+    adds = (grid.k_partitions - 1) * grid.m * grid.n
+    return [
+        ("/* ---- kernel 2: the batched reduction (split-K, D53) ---- ", None),
+        (" * The GEMM above wrote SPLITS partial results per output element instead", None),
+        (" * of one finished one. Summing them is a second launch, on the vector", None),
+        (f" * unit rather than the array (D27): {machine.vector_unit.name}.", None),
+        (f" * {format_bytes(dram_bytes)} crosses DRAM here — the partials out of", None),
+        (f" * kernel 1 and back into kernel 2 — for {_int(adds)} adds. */", None),
+        ("for (int i = 0; i < M * N; ++i) {", None),
+        ("    acc_t acc = partial[0][i];", None),
+        ("    for (int s = 1; s < SPLITS; ++s)", None),
+        ("        acc += partial[s][i];   /* not new arithmetic: 2*M*N*K already", "reduce"),
+        ("                                 * counts these adds — they have merely left", None),
+        ("                                 * the array's accumulator (D53) */", None),
+        ("    C[i] = acc;", None),
+        ("}", None),
+    ]
 
 
 def deployment_of(
@@ -114,20 +237,28 @@ def deployment_of(
         return _network_deployment(chip, machine, phase, trace, workload=workload)
 
     rows, cols = dims
+    grid = grid_of(operation, machine)
+    assert grid is not None, "systolic_dims present and attrs is a matmul"
     waves = trace.tiles
     tiles = tile_count(operation, machine)
-    stream_rows = operation.attrs.m
     resident = unit.resident_tile_capacity()
     reloads = max(0, tiles - resident)
     multiplier = unit.dtype_multipliers.get(machine.dtype, 1.0)
     sub_cycles = round(1 / multiplier) if 0 < multiplier < 1 else 1
     # An MMA unit — tensor/matrix core: full-rate (not bit-serial) and holding
     # no resident weights, so it issues fixed instruction tiles rather than
-    # streaming M past a stationary operand. Same partition the cost model
-    # makes in analysis/tiling.py (D52), plus the weight-residency test, so a
-    # full-rate array that DOES hold weights still reads as a streaming one.
-    is_mma = sub_cycles == 1 and unit.weight_sets <= 1
-    m_tiles = math.ceil(operation.attrs.m / rows)
+    # streaming the swept dimension past a stationary operand. Same partition
+    # the cost model makes in analysis/tiling.py (D52), plus the
+    # weight-residency test, so a full-rate array that DOES hold weights still
+    # reads as a streaming one.
+    issues_instruction_tiles = sub_cycles == 1 and unit.weight_sets <= 1
+    # What each tile sweeps, and how far: M under weight-stationary, K under
+    # output-stationary, N under input-stationary (D53). N is the dimension the
+    # array's columns cut; M and K are both cut by its rows.
+    swept = grid.swept_dim
+    swept_extent = grid.extent(swept)
+    swept_tile = cols if swept is Dim.N else rows
+    swept_tiles = math.ceil(swept_extent / swept_tile)
     depth = 2 if trace.double_buffered else 1
     # One representative tile's share of the traffic the report charged. This
     # must divide by the real tile count, not waves * units (the array's
@@ -137,41 +268,37 @@ def deployment_of(
     per = max(tiles, 1)
     b_bytes = format_bytes(result.dram_weight_read_bytes / per)
     c_bytes = format_bytes(result.dram_write_bytes / per)
-    # The k-slice structure behind the listing: tiles are counted k-major, each
-    # k-slice holds ceil(N/COLS) of them, and A is staged once per k-slice.
-    n_tiles_per_ks = math.ceil(operation.attrs.n / cols)
-    k_slices = math.ceil(operation.attrs.k / rows)
-    k_slice_bytes = result.dram_activation_read_bytes / k_slices
-    a_stage = format_bytes(k_slice_bytes)
+    # The staging structure behind the listing: tiles are counted row-major,
+    # each grid row holds `grid.cols` of them, and A is staged once per row — a
+    # k-slice under ws, a band of M rows under os (D53).
+    group = grid.group_name
+    a_events = grid.a_events
+    band_bytes = result.dram_activation_read_bytes / a_events
+    a_stage = format_bytes(band_bytes)
 
     header = [
         f"/* {chip.name} — how this model deploys the run",
         f" * {workload}",
         " *",
-        (
-            f" * B is cut into {rows}x{cols} tiles; each instruction tile pairs one"
-            f" with {rows} rows of A."
-            if is_mma
-            else f" * B is cut into {rows}x{cols} tiles and held by the array; M streams past it."
-        ),
+        *(f" * {line}" for line in _stationarity_header(grid, issues_instruction_tiles)),
         f" * {_int(tiles)} tiles over {units} array{'s' if units != 1 else ''}"
         f" -> {_int(waves)} wave{'s' if waves != 1 else ''}.",
     ]
     if a_strategy is AStrategy.STREAM:
         a_lines = [
-            f" * A is re-read per tile ({n_tiles_per_ks}x the staged total, D31) — the honest",
+            f" * A is re-read per tile ({grid.cols}x the staged total, D31) — the honest",
             " * picture for a machine whose GEMMs genuinely refetch operands.",
         ]
     elif a_strategy is AStrategy.WHOLE:
         a_lines = [
             f" * A is staged whole ({format_bytes(result.dram_activation_read_bytes)} of",
-            " * scratchpad), every k-slice before wave 0 — the same total as staging per",
-            " * k-slice (D33), only the timing changes.",
+            f" * scratchpad), every {group} before wave 0 — the same total as staging per",
+            f" * {group} (D33), only the timing changes.",
         ]
     else:
         a_lines = [
-            f" * A is staged once per k-slice ({_int(k_slice_bytes)} B of scratchpad); every",
-            " * tile of that k-slice reads the staging. A crosses DRAM exactly once",
+            f" * A is staged once per {group} ({_int(band_bytes)} B of scratchpad); every",
+            f" * tile of that {group} reads the staging. A crosses DRAM exactly once",
             " * (D33).",
         ]
 
@@ -213,11 +340,18 @@ def deployment_of(
         header.extend(a_lines)
     header.append(" */")
 
+    row_axis, col_axis = grid.row_dim.value, grid.col_dim.value
+    row_tile = "COLS" if grid.row_dim is Dim.N else "ROWS"
+    col_tile = "COLS" if grid.col_dim is Dim.N else "ROWS"
     defines = [
         f"#define UNITS        {units:<10} /* {unit.name} */",
-        f"#define ROWS         {rows:<10} /* array rows -> K per tile */",
+        f"#define ROWS         {rows:<10} /* array rows -> M or K per tile */",
         f"#define COLS         {cols:<10} /* array cols -> N per tile */",
-        f"#define TILES        {tiles:<10} /* ceil(K/ROWS) * ceil(N/COLS) */",
+        f"#define GRID_ROWS    {grid.rows:<10} /* ceil({row_axis} / {row_tile}) */",
+        f"#define GRID_COLS    {grid.cols:<10} /* ceil({col_axis} / {col_tile}) */",
+        f"#define TILES        {tiles:<10} /* GRID_ROWS * GRID_COLS"
+        + (f" * SPLITS ({grid.k_partitions} split-K pieces)" if grid.k_partitions > 1 else "")
+        + " */",
         f"#define WAVES        {waves:<10} /* ceil(TILES / UNITS) */",
         f"#define DEPTH        {depth:<10} /* "
         + (
@@ -226,8 +360,14 @@ def deployment_of(
             else "no room for a second tile"
         )
         + " */",
-        f"#define NTILES_PER_KS {n_tiles_per_ks:<7} /* n-tiles per k-slice: ceil(N / COLS) */",
-        "#define KSLICE(w, u)  (((w) * UNITS + (u)) / NTILES_PER_KS * ROWS) /* this tile's k */",
+        # Both macros used to be spelled in k-slice vocabulary (NTILES_PER_KS,
+        # KSLICE), which named a decomposition only weight-stationary runs. The
+        # arithmetic is unchanged; what a "group" is now follows the grid (D53).
+        f"#define TILES_PER_GROUP {grid.cols:<6} /* tiles per grid row: GRID_COLS */",
+        f"#define GROUP(w, u)   (((w) * UNITS + (u)) / TILES_PER_GROUP % GRID_ROWS * {row_tile})"
+        f"  /* this tile's {row_axis} */",
+        f"#define COL(w, u)     (((w) * UNITS + (u)) % TILES_PER_GROUP * {col_tile})"
+        f"  /* this tile's {col_axis} */",
     ]
     if unit.weight_sets > 1:
         defines.insert(
@@ -238,10 +378,16 @@ def deployment_of(
             f"#define SUB_CYCLES   {sub_cycles:<10} /* {machine.dtype.value} multiplier"
             f" {multiplier:g} -> {sub_cycles} cycles per operand */"
         )
-    if is_mma:
+    if issues_instruction_tiles:
         defines.append(
-            f"#define MTILES       {m_tiles:<10} /* ceil(M / ROWS): M is padded to whole"
+            f"#define {swept.value}TILES       {swept_tiles:<10} /* ceil({swept.value} /"
+            f" {'COLS' if swept is Dim.N else 'ROWS'}): the swept dimension is padded to whole"
             f" instruction tiles (D52) */"
+        )
+    if grid.k_partitions > 1:
+        defines.append(
+            f"#define SPLITS       {grid.k_partitions:<10} /* split-K: independent pieces of the"
+            f" contraction, summed by the second kernel below (D53) */"
         )
 
     # An in-memory array must be *written* before it can compute, but the sets
@@ -260,7 +406,7 @@ def deployment_of(
 
     def a_staging_lines(wave_expr: str, indent: str) -> list[tuple[str, str]]:
         # WHOLE has no per-wave staging line at all — it is a prologue-only ramp
-        # (a_prologue_line below), same total bytes as staging per k-slice (D33).
+        # (a_prologue_line below), same total bytes as staging per group (D33).
         if a_strategy is AStrategy.WHOLE:
             return []
         if a_strategy is AStrategy.STREAM:
@@ -273,12 +419,12 @@ def deployment_of(
             ]
         return [
             (
-                f"{indent}if (tile({wave_expr}, u) % NTILES_PER_KS == 0)  "
-                f"/* this tile opens a k-slice */",
+                f"{indent}if (tile({wave_expr}, u) % TILES_PER_GROUP == 0)  "
+                f"/* this tile opens a {group} */",
                 "load_a",
             ),
             (
-                f"{indent}    stage_A(u, KSLICE({wave_expr}, u)); "
+                f"{indent}    stage_A(u, GROUP({wave_expr}, u)); "
                 f"/* {a_stage} — hatched bar; staged once (D33) */",
                 "load_a",
             ),
@@ -287,7 +433,7 @@ def deployment_of(
     a_prologue_line: tuple[str, str] | None = (
         (
             f"stage_all_of_A();  /* {format_bytes(result.dram_activation_read_bytes)} — hatched "
-            f"bar; every k-slice ramped in before wave 0, same total as staging per k-slice (D33) "
+            f"bar; every {group} ramped in before wave 0, same total as staging per {group} (D33) "
             f"*/",
             "load_a",
         )
@@ -295,20 +441,25 @@ def deployment_of(
         else None
     )
 
+    # How one tile reads its operands, in the vocabulary of the grid it belongs
+    # to: `GROUP(w, u)` is the tile's position along the grid's row axis and
+    # `COL(w, u)` along its column axis, so the swept dimension is the only one
+    # the inner loop varies (D53).
+    a_index, b_index = _operand_indices(grid, instruction_tiles=issues_instruction_tiles)
     inner: list[str] = (
         [
             "            for (int c = 0; c < SUB_CYCLES; ++c)",
-            "                feed(u, w % WEIGHT_SETS, &A[m][KSLICE(w, u)]);"
+            f"                feed(u, w % WEIGHT_SETS, &A{a_index});"
             "   /* one sub-cycle of the operand */",
         ]
         if sub_cycles > 1
         else (
             [
-                f"            mma(u, &A[mt * ROWS][KSLICE(w, u)]);"
+                f"            mma(u, &A{a_index}, &B{b_index});"
                 f"   /* one {rows}x{cols}x{rows} instruction tile */"
             ]
-            if is_mma
-            else ["            mac(u, &A[m][KSLICE(w, u)]);"]
+            if issues_instruction_tiles
+            else [f"            mac(u, &A{a_index});"]
         )
     )
     if sub_cycles > 1 and unit.weight_sets == 1:
@@ -329,33 +480,37 @@ def deployment_of(
     )
 
     def compute_lines() -> list[tuple[str, str | None]]:
-        # An MMA unit does not stream M past a resident tile — it issues fixed
-        # instruction tiles, so M is spatial and quantises into ceil(M/ROWS) of
-        # them (D52). A resident-weight array (Metis) genuinely does stream M,
-        # and keeps the row loop.
-        m_line = (
+        # An MMA unit does not stream the swept dimension past a resident tile —
+        # it issues fixed instruction tiles, so that dimension is spatial and
+        # quantises into whole tiles of it (D52). A resident-weight array (Metis)
+        # genuinely does stream, and keeps the element loop. Which dimension is
+        # swept is the stationarity's doing: M under ws, K under os (D53).
+        axis = swept.value
+        sweep_line = (
             (
-                f"        for (int mt = 0; mt < MTILES; ++mt)"
-                f"   /* M is spatial: ceil({stream_rows}/ROWS) instruction tiles */",
+                f"        for (int {axis.lower()}t = 0; {axis.lower()}t < {axis}TILES;"
+                f" ++{axis.lower()}t)"
+                f"   /* {_sweep_note(grid)} */",
                 None,
             )
-            if is_mma
+            if issues_instruction_tiles
             else (
-                f"        for (int m = 0; m < {stream_rows}; ++m)"
-                f"   /* M streams past the resident tile */",
+                f"        for (int {axis.lower()} = 0; {axis.lower()} < {swept_extent};"
+                f" ++{axis.lower()})"
+                f"   /* {axis} streams past the resident {grid.resident.value} tile */",
                 None,
             )
         )
         if on_demand_line is None:
             return [
                 ("    parallel_for (int u = 0; u < UNITS; ++u)", None),
-                m_line,
+                sweep_line,
                 *inner_lines,
             ]
         return [
             ("    parallel_for (int u = 0; u < UNITS; ++u) {", None),
             on_demand_line,
-            m_line,
+            sweep_line,
             *inner_lines,
             ("    }", None),
         ]
@@ -506,6 +661,12 @@ def deployment_of(
     combined.extend((d, None) for d in defines)
     combined.append(("", None))
     combined.extend(body)
+    if grid.materialises_partials:
+        combined.append(("", None))
+        combined.extend(
+            (line, tag)
+            for line, tag in _reduction_kernel(grid, machine, result.dram_reduction_bytes)
+        )
     combined.extend((f, None) for f in footer.split("\n"))
 
     code = "\n".join(text for text, _tag in combined)
@@ -526,8 +687,7 @@ def deployment_of(
         stage_lines=tuple((tag, tuple(indices)) for tag, indices in stage_line_map.items()),
         array_rows=rows,
         array_cols=cols,
-        k_slices=k_slices,
-        tiles_per_ks=n_tiles_per_ks,
+        grid=grid,
     )
 
 

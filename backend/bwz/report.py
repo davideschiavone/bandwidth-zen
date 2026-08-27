@@ -88,10 +88,12 @@ class OpResult:
     operand that streams *through* the array rather than sitting in it."""
     dram_reduction_bytes: float = 0.0
     """Split-K only: the partial results' round trip, counted in
-    :attr:`dram_bytes` but in neither operand's share — they are neither A nor B
-    but C, written by the GEMM kernel and read back by the reduction kernel that
-    sums them (D53). Half of it is a read and half a write, so it is also inside
-    both :attr:`dram_read_bytes` and :attr:`dram_write_bytes`."""
+    :attr:`dram_bytes` and in **neither** :attr:`dram_read_bytes` nor
+    :attr:`dram_write_bytes`. Those two are the operands' traffic — A and B in,
+    C out — and this is neither: it is one kernel's output read back as the
+    next kernel's input, half write and half read (D53). Kept apart so the
+    three still sum to :attr:`dram_bytes` and the trace can draw the second
+    kernel as the separate thing it is."""
     t_reduce_s: float = 0.0
     """Split-K only: the reduction kernel's additions, on the vector unit. Part
     of :attr:`t_compute_s`, broken out so the trace can draw the second kernel

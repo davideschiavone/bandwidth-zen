@@ -138,17 +138,19 @@ it, since the byte/flop model has no event distinct from the arithmetic itself f
 different engines never glow together, because operations run in strict sequence in this model
 (D5a). The pseudo-C on the right lights up the line(s) executing right now — more than one at once
 when double buffering means more than one statement is truly concurrent (D41). Below, A/B/C's own
-shapes (schematic, not to scale, D48): A is cut only along K into k-slices — the whole M height
-reads one staged slice, never tiled along M — while B genuinely has a 2-D tile grid, and C mirrors
-B's column cuts. The lit cell tracks whichever operand the current instant actually touches.
-<b>Reading a tile address:</b> <code>B(row,col)</code> and <code>C(:,col)</code> number tiles
-row-major within B's grid — <code>row</code> is the k-slice, <code>col</code> the n-tile inside it,
-0-indexed, up to <code>tiles_per_ks - 1</code> per row (the geometry panel's own caption states
-this width). A comma-range like <code>0..124</code> is not one tile — it names *every* tile in that
-row from column 0 through 124 inclusive, compacted so a wave of hundreds of tiles reads as a few
-ranges instead of being spelled out one by one: <code>B(0,0..124); B(1,0..124); B(2,0..124);
-B(3,0..56)</code> is <code>125 + 125 + 125 + 57 = 432</code> tiles, not 4. <code>A(:,g)</code> has
-no column at all — A is 1-D, one k-slice wide, the whole M height (never tiled along M, above).</p>
+shapes (schematic, not to scale, D48): the tile grid has a row axis and a column axis, and every
+tile sweeps the third dimension in full, so an operand is cut along a dimension exactly when the
+grid carries it and covered whole along the one it sweeps (D53). Under weight-stationary that
+gives B the 2-D grid and C a set of column bands; under output-stationary it is the other way
+round. The caption below names which. The lit cell tracks whichever operand the current instant
+actually touches. <b>Reading a tile address:</b> a tile is named
+<code>Operand(row,col)</code>, row-major within the grid, 0-indexed; <code>:</code> in either
+position means that dimension is swept in full rather than cut, so <code>C(:,col)</code> is one
+column band of C over the whole of M. A comma-range like <code>0..124</code> is not one tile — it
+names *every* tile in that row from column 0 through 124 inclusive, compacted so a wave of
+hundreds of tiles reads as a few ranges instead of being spelled out one by one:
+<code>B(0,0..124); B(1,0..124); B(2,0..124); B(3,0..56)</code> is
+<code>125 + 125 + 125 + 57 = 432</code> tiles, not 4.</p>
 
 <div id="controls">
   <button id="playBtn">Play</button>
@@ -314,14 +316,17 @@ function updateCodeHighlight(events) {{
   lastHotLines = hotLines;
 }}
 
-// ---- the tile-geometry panel (A/B/C, D48) -----------------------------------
-// A is M x K, cut only along K into k_slices — the whole M height reads one
-// staged slice, never tiled along M (D30/D33). B is K x N, cut into a real
-// k_slices x tiles_per_ks grid. C mirrors B's column cuts (a result tile is
-// the full M height x one B tile's width). The classic GEMM diagram makes the
-// shared axes visible for free: A's width and B's height are both K, drawn to
-// the same pixel scale; B's width and C's width are both N; A's height and
-// C's height are both M.
+// ---- the tile-geometry panel (A/B/C, D48/D53) -------------------------------
+// Which operand has a 2-D tile grid is the STATIONARITY's doing, not a fixed
+// fact: the grid has a row axis and a column axis (GEO.row_dim/col_dim), and a
+// third dimension every tile sweeps in full. An operand is cut along a
+// dimension exactly when that dimension is one of the grid's two axes, and
+// covered whole along the one that is swept. Under ws that makes B the 2-D one
+// and C a set of column bands; under os it makes C the 2-D one and B the bands.
+// The classic GEMM diagram makes the shared axes visible for free: A's width
+// and B's height are both K, drawn to the same pixel scale; B's width and C's
+// width are both N; A's height and C's height are both M.
+const GEO_DIMS = {{A: ["M", "K"], B: ["K", "N"], C: ["M", "N"]}};   // [vertical, horizontal]
 const geoSvg = document.getElementById("geometry");
 const geoCaption = document.getElementById("geocaption");
 const georow = document.getElementById("georow");
@@ -346,38 +351,64 @@ function geoAxisScale() {{
 }}
 
 function geoSegments(f) {{
-  // Split one flow event's [tile_start, tile_end) into per-k-slice-row
-  // segments {{kRow, nStart, nEnd}}: a coalesced step (many real tiles per
-  // drawn frame) can span more than one k-slice row, and each row's own
-  // column range has to be drawn separately — never one fake single cell.
+  // Split one flow event's [tile_start, tile_end) into per-grid-row segments
+  // {{row, colStart, colEnd}}: a coalesced step (many real tiles per drawn
+  // frame) can span more than one row, and each row's own column range has to
+  // be drawn separately — never one fake single cell.
   if (!GEO || f.tile_start == null || f.tile_end == null) return [];
   const segments = [];
   let t = f.tile_start;
   while (t < f.tile_end) {{
-    const kRow = Math.floor(t / GEO.tiles_per_ks);
-    const rowEnd = (kRow + 1) * GEO.tiles_per_ks;
-    const segEnd = Math.min(f.tile_end, rowEnd);
-    segments.push({{
-      kRow, nStart: t - kRow * GEO.tiles_per_ks, nEnd: segEnd - kRow * GEO.tiles_per_ks,
-    }});
+    const row = Math.floor(t / GEO.grid_cols) % GEO.grid_rows;
+    const rowStart = Math.floor(t / GEO.grid_cols) * GEO.grid_cols;
+    const segEnd = Math.min(f.tile_end, rowStart + GEO.grid_cols);
+    segments.push({{row, colStart: t - rowStart, colEnd: segEnd - rowStart}});
     t = segEnd;
   }}
   return segments;
 }}
 
-function mergeColumnRanges(segs) {{
-  // C has no k-slice-row dimension — merge overlapping/touching [nStart,
-  // nEnd) ranges from different rows into one, since a result tile is the
-  // full M height x one n-tile's width, not one per k-slice row it
-  // happened to come from (D48).
-  const sorted = segs.map(s => [s.nStart, s.nEnd]).sort((a, b) => a[0] - b[0]);
+function geoSpan(seg, dim) {{
+  // Where one segment sits along `dim`, as a [lo, hi) fraction of it. A
+  // dimension the grid does not carry is covered in FULL by every tile — that
+  // is what "swept" means — so it spans the whole extent (D53).
+  if (dim === GEO.row_dim) return [seg.row / GEO.grid_rows, (seg.row + 1) / GEO.grid_rows];
+  if (dim === GEO.col_dim) return [seg.colStart / GEO.grid_cols, seg.colEnd / GEO.grid_cols];
+  return [0, 1];
+}}
+
+function geoDivisions(dim) {{
+  if (dim === GEO.row_dim) return GEO.grid_rows;
+  if (dim === GEO.col_dim) return GEO.grid_cols;
+  return 1;
+}}
+
+function mergeSpans(pairs) {{
+  const sorted = pairs.map(p => [p[0], p[1]]).sort((a, b) => a[0] - b[0]);
   const merged = [];
   sorted.forEach(([start, end]) => {{
     const last = merged[merged.length - 1];
-    if (last && start <= last[1]) last[1] = Math.max(last[1], end);
+    if (last && start <= last[1] + 1e-9) last[1] = Math.max(last[1], end);
     else merged.push([start, end]);
   }});
   return merged;
+}}
+
+function geoRects(segs, dimV, dimH) {{
+  // Segments that land on the same band of the vertical dimension merge along
+  // the horizontal one. That is what stops an operand whose vertical dimension
+  // is *swept* — C under ws, B under os — from drawing one repeated rectangle
+  // per grid row it happened to come from (D48).
+  const byBand = new Map();
+  segs.forEach(seg => {{
+    const v = geoSpan(seg, dimV), h = geoSpan(seg, dimH);
+    const key = v[0] + ":" + v[1];
+    if (!byBand.has(key)) byBand.set(key, {{v, hs: []}});
+    byBand.get(key).hs.push(h);
+  }});
+  const out = [];
+  byBand.forEach(({{v, hs}}) => mergeSpans(hs).forEach(h => out.push({{v, h}})));
+  return out;
 }}
 
 function drawGeometry(events) {{
@@ -408,46 +439,55 @@ function drawGeometry(events) {{
     class: "geo-label", x: cX + nPx / 2, y: cY - 5, "text-anchor": "middle",
   }}, `C  M=${{GEO.m}} x N=${{GEO.n}}`));
 
-  // Grid lines, capped: past GEO_GRID_CAP a k-slice/n-tile count draws at a
-  // coarser stride instead of one line per tile, and the caption says so —
-  // never a silent truncation that would read as "this is the whole grid".
-  const strideK = Math.max(1, Math.ceil(GEO.k_slices / GEO_GRID_CAP));
-  const strideN = Math.max(1, Math.ceil(GEO.tiles_per_ks / GEO_GRID_CAP));
-  for (let g = strideK; g < GEO.k_slices; g += strideK) {{
-    const x = aX + (g / GEO.k_slices) * kPx;
-    geoSvg.appendChild(el("line", {{class: "geo-grid", x1: x, x2: x, y1: aY, y2: aY + mPx}}));
-    const y = bY + (g / GEO.k_slices) * kPx;
-    geoSvg.appendChild(el("line", {{class: "geo-grid", x1: bX, x2: bX + nPx, y1: y, y2: y}}));
+  // Grid lines, capped: past GEO_GRID_CAP a division count draws at a coarser
+  // stride instead of one line per tile, and the caption says so — never a
+  // silent truncation that would read as "this is the whole grid". Which
+  // operand gets lines along which axis follows from the grid, not from a
+  // fixed assumption about B (D53).
+  const strideRow = Math.max(1, Math.ceil(GEO.grid_rows / GEO_GRID_CAP));
+  const strideCol = Math.max(1, Math.ceil(GEO.grid_cols / GEO_GRID_CAP));
+  function drawGridLines(x, y, w, h, dimV, dimH) {{
+    const dv = geoDivisions(dimV), dh = geoDivisions(dimH);
+    const sv = dimV === GEO.row_dim ? strideRow : strideCol;
+    const sh = dimH === GEO.row_dim ? strideRow : strideCol;
+    for (let i = sv; i < dv; i += sv) {{
+      const yy = y + (i / dv) * h;
+      geoSvg.appendChild(el("line", {{class: "geo-grid", x1: x, x2: x + w, y1: yy, y2: yy}}));
+    }}
+    for (let i = sh; i < dh; i += sh) {{
+      const xx = x + (i / dh) * w;
+      geoSvg.appendChild(el("line", {{class: "geo-grid", x1: xx, x2: xx, y1: y, y2: y + h}}));
+    }}
   }}
-  for (let u = strideN; u < GEO.tiles_per_ks; u += strideN) {{
-    const xB = bX + (u / GEO.tiles_per_ks) * nPx;
-    geoSvg.appendChild(el("line", {{class: "geo-grid", x1: xB, x2: xB, y1: bY, y2: bY + kPx}}));
-    const xC = cX + (u / GEO.tiles_per_ks) * nPx;
-    geoSvg.appendChild(el("line", {{class: "geo-grid", x1: xC, x2: xC, y1: cY, y2: cY + mPx}}));
-  }}
+  drawGridLines(aX, aY, kPx, mPx, "M", "K");
+  drawGridLines(bX, bY, nPx, kPx, "K", "N");
+  drawGridLines(cX, cY, nPx, mPx, "M", "N");
 
-  // Highlights: A lights on load_a (A is being staged), B on exec (the tile
-  // actually in the array right now), C on store (the result landing) — each
-  // tied to the event that genuinely touches that operand at this instant.
-  const aRows = new Set(), bSegs = [], cSegs = [];
+  // Highlights: A lights on load_a (A is being staged), the RESIDENT operand
+  // on exec (the tile actually in the array right now), C on store (the result
+  // landing), and B on its own load when B is not the resident one — each tied
+  // to the event that genuinely touches that operand at this instant (D53).
+  const aRows = new Set(), execSegs = [], cSegs = [], bSegs = [];
   events.forEach(f => {{
     if (f.stage === "load_a") {{
-      // Not geoSegments (the raw *touched* tile range — right for B/EXEC,
-      // which genuinely spans several rows at once). A's byte cost is
-      // openings-based (D33/D48): this event *completes* k-slices
-      // [start//w, end//w) — the same window the hover's label uses — never
-      // the block its last tile merely touches but a later event finishes
-      // and gets billed for.
+      // Not geoSegments (the raw *touched* tile range — right for EXEC, which
+      // genuinely spans several rows at once). A's byte cost is openings-based
+      // (D33/D48): this event *completes* grid rows [start//w, end//w) — the
+      // same window the hover's label uses — never the block its last tile
+      // merely touches but a later event finishes and gets billed for.
       if (f.tile_start == null || f.tile_end == null) return;
-      const first = Math.floor(f.tile_start / GEO.tiles_per_ks);
-      const last = Math.floor(f.tile_end / GEO.tiles_per_ks) - 1;
-      for (let k = first; k <= last; k++) aRows.add(k);
+      const first = Math.floor(f.tile_start / GEO.grid_cols);
+      const last = Math.floor(f.tile_end / GEO.grid_cols) - 1;
+      for (let k = first; k <= last; k++) aRows.add(k % GEO.grid_rows);
     }} else if (f.stage === "exec") {{
-      bSegs.push(...geoSegments(f));
+      execSegs.push(...geoSegments(f));
     }} else if (f.stage === "store") {{
       cSegs.push(...geoSegments(f));
+    }} else if (f.stage === "load_b" && GEO.resident !== "B") {{
+      bSegs.push(...geoSegments(f));
     }}
   }});
+  const aSegs = [...aRows].map(row => ({{row, colStart: 0, colEnd: GEO.grid_cols}}));
   // Boundary lines at the highlight's own real edges, regardless of the
   // coarse stride above — a highlighted cell must never sit unbounded by any
   // visible line just because its own boundary fell off the capped grid, and
@@ -470,46 +510,36 @@ function drawGeometry(events) {{
     drawnBoundaries.add(key);
     geoSvg.appendChild(el("line", {{class: "geo-boundary", x1: x, x2: x, y1, y2}}));
   }}
-  aRows.forEach(kRow => {{
-    const x0 = aX + (kRow / GEO.k_slices) * kPx, x1 = aX + ((kRow + 1) / GEO.k_slices) * kPx;
-    colBoundary(x0, aY, aY + mPx);
-    colBoundary(x1, aY, aY + mPx);
-    geoSvg.appendChild(el("rect", {{
-      class: "geo-highlight", x: x0, y: aY, width: x1 - x0, height: mPx,
-      style: "fill:" + COLOUR.dram,
-    }}));
-  }});
-  bSegs.forEach(s => {{
-    const x0 = bX + (s.nStart / GEO.tiles_per_ks) * nPx;
-    const x1 = bX + (s.nEnd / GEO.tiles_per_ks) * nPx;
-    const y0 = bY + (s.kRow / GEO.k_slices) * kPx;
-    const y1 = bY + ((s.kRow + 1) / GEO.k_slices) * kPx;
-    rowBoundary(bX, y0, bX + nPx);
-    rowBoundary(bX, y1, bX + nPx);
-    colBoundary(x0, y0, y1);
-    colBoundary(x1, y0, y1);
-    geoSvg.appendChild(el("rect", {{
-      class: "geo-highlight", x: x0, y: y0, width: x1 - x0, height: y1 - y0,
-      style: "fill:" + COLOUR.core,
-    }}));
-  }});
-  // C has no k-slice-row dimension: several segments from different rows
-  // routinely land on the same columns (a wave's tiles span many rows, most
-  // covering all or most of one row's width), and must draw/read as one C
-  // column range, not once per row it happened to come from.
-  const cRanges = mergeColumnRanges(cSegs);
-  cRanges.forEach(([n0, n1]) => {{
-    const x0 = cX + (n0 / GEO.tiles_per_ks) * nPx;
-    const x1 = cX + (n1 / GEO.tiles_per_ks) * nPx;
-    colBoundary(x0, cY, cY + mPx);
-    colBoundary(x1, cY, cY + mPx);
-    geoSvg.appendChild(el("rect", {{
-      class: "geo-highlight", x: x0, y: cY, width: x1 - x0, height: mPx,
-      style: "fill:" + COLOUR.dram,
-    }}));
-  }});
+  const boxes = {{
+    A: [aX, aY, kPx, mPx], B: [bX, bY, nPx, kPx], C: [cX, cY, nPx, mPx],
+  }};
+  function highlight(operand, segs, colour) {{
+    if (!segs.length) return [];
+    const [x, y, w, h] = boxes[operand];
+    const [dimV, dimH] = GEO_DIMS[operand];
+    const rects = geoRects(segs, dimV, dimH);
+    rects.forEach(r => {{
+      const y0 = y + r.v[0] * h, y1 = y + r.v[1] * h;
+      const x0 = x + r.h[0] * w, x1 = x + r.h[1] * w;
+      if (r.v[1] - r.v[0] < 1) {{ rowBoundary(x, y0, x + w); rowBoundary(x, y1, x + w); }}
+      colBoundary(x0, y0, y1);
+      colBoundary(x1, y0, y1);
+      geoSvg.appendChild(el("rect", {{
+        class: "geo-highlight", x: x0, y: y0, width: x1 - x0, height: y1 - y0,
+        style: "fill:" + colour,
+      }}));
+    }});
+    return rects;
+  }}
+  // DRAM-side highlights first, the array's on top: where the resident operand
+  // is also the one being written back (C under os), the arithmetic is what a
+  // reader should see at that instant.
+  highlight("A", aSegs, COLOUR.dram);
+  highlight("B", bSegs, COLOUR.dram);
+  highlight("C", cSegs, COLOUR.dram);
+  highlight(GEO.resident, execSegs, COLOUR.core);
 
-  geoCaption.innerHTML = geoCaptionHtml(aRows, bSegs, cRanges, strideK, strideN);
+  geoCaption.innerHTML = geoCaptionHtml(aRows, execSegs, cSegs, strideRow, strideCol);
 }}
 
 function formatIndexRanges(nums) {{
@@ -528,30 +558,55 @@ function formatIndexRanges(nums) {{
   return parts.join(",");
 }}
 
-function geoCaptionHtml(aRows, bSegs, cRanges, strideK, strideN) {{
+function geoIndex(operand, seg) {{
+  // The same rule the hover uses (plot_pipeline._index_notation): a dimension
+  // on the grid's row axis takes the row number, one on its column axis takes
+  // the column range, and a swept one is ":" because the tile covers it whole.
+  const part = dim => {{
+    if (dim === GEO.row_dim) return String(seg.row);
+    if (dim === GEO.col_dim) {{
+      return seg.colEnd - seg.colStart === 1
+        ? String(seg.colStart) : `${{seg.colStart}}..${{seg.colEnd - 1}}`;
+    }}
+    return ":";
+  }};
+  const [dimV, dimH] = GEO_DIMS[operand];
+  return `${{operand}}(${{part(dimV)}},${{part(dimH)}})`;
+}}
+
+function geoCaptionHtml(aRows, execSegs, cSegs, strideRow, strideCol) {{
   const g = GEO;
   const gridNote =
-    strideK > 1 || strideN > 1
-      ? ` (gridlines every ${{strideK}} k-slice(s), ${{strideN}} n-tile(s) — ` +
-        `${{g.k_slices}}x${{g.tiles_per_ks}} total)`
+    strideRow > 1 || strideCol > 1
+      ? ` (gridlines every ${{strideRow}} row(s), ${{strideCol}} column(s) — ` +
+        `${{g.grid_rows}}x${{g.grid_cols}} total)`
       : "";
   const line1 =
-    `A tile = ${{g.m}} rows x ${{g.rows}} cols &middot; ${{g.k_slices}} k-slices &middot; ` +
-    `A(:,0) &hellip; A(:,${{g.k_slices - 1}})`;
+    `${{g.stationarity}}: ${{g.resident}} stays resident &middot; A ${{g.group_name}} = ` +
+    `${{g.band_rows}} x ${{g.band_cols}} &middot; ${{g.a_events}} of them`;
   const line2 =
-    `B tile = ${{g.rows}} rows x ${{g.cols}} cols &middot; ${{g.k_slices}}x${{g.tiles_per_ks}} ` +
-    `tiles &middot; B(0,0) &hellip; B(${{g.k_slices - 1}},${{g.tiles_per_ks - 1}})${{gridNote}}`;
+    `${{g.resident}} tile = ${{g.rows}} rows x ${{g.cols}} cols &middot; ` +
+    `${{g.grid_rows}}x${{g.grid_cols}} tiles (${{g.row_dim}} x ${{g.col_dim}}), each sweeping ` +
+    `${{g.swept_dim}}${{gridNote}}`;
   const parts = [];
   if (aRows.size) {{
-    parts.push("A(:," + formatIndexRanges(aRows) + ")");
+    const bands = formatIndexRanges(aRows);
+    parts.push(GEO.row_dim === "M" ? `A(${{bands}},:)` : `A(:,${{bands}})`);
   }}
-  bSegs.forEach(s => {{
-    const cols = s.nEnd - s.nStart === 1 ? `${{s.nStart}}` : `${{s.nStart}}..${{s.nEnd - 1}}`;
-    parts.push(`B(${{s.kRow}},${{cols}})`);
+  execSegs.forEach(s => parts.push(geoIndex(GEO.resident, s)));
+  // C's own entries merge the same way its rectangles do: when C does not
+  // carry the grid's row axis (ws, where M is swept), every row's segment
+  // names the SAME C columns and must read as one range, not one per row.
+  const cKeyed = new Map();
+  cSegs.forEach(s => {{
+    const key = GEO_DIMS.C.includes(GEO.row_dim) ? s.row : "swept";
+    if (!cKeyed.has(key)) cKeyed.set(key, []);
+    cKeyed.get(key).push([s.colStart, s.colEnd]);
   }});
-  cRanges.forEach(([n0, n1]) => {{
-    const cols = n1 - n0 === 1 ? `${{n0}}` : `${{n0}}..${{n1 - 1}}`;
-    parts.push(`C(:,${{cols}})`);
+  cKeyed.forEach((ranges, key) => {{
+    mergeSpans(ranges).forEach(([c0, c1]) => {{
+      parts.push(geoIndex("C", {{row: key === "swept" ? 0 : key, colStart: c0, colEnd: c1}}));
+    }});
   }});
   const active = parts.length
     ? `<div class="geo-active">active: ${{parts.join(" &middot; ")}}</div>`
@@ -767,7 +822,7 @@ def render(
     notes: list[str],
     code_lines: list[str],
     stage_lines: dict[str, list[int]],
-    geometry: dict[str, int] | None = None,
+    geometry: dict[str, object] | None = None,
 ) -> str:
     """Build the page. Pure: returns text, writes nothing.
 
@@ -781,10 +836,12 @@ def render(
     A/B dataflow strategy to name — a network's operations run in sequence
     (D5a), not as one matmul (D42) — and the banner says so instead.
 
-    ``geometry`` is ``{m, n, k, rows, cols, k_slices, tiles_per_ks}`` for a
-    lone matmul (D48) — ``Deployment``'s own tile-grid numbers, straight
-    through with no re-derivation. ``None`` for a network workload, which has
-    no A/B tile grid; the geometry panel renders nothing in that case.
+    ``geometry`` is the lone matmul's tile grid (D48/D53) — the shape, the
+    array, and the grid's own axes (``row_dim``/``col_dim``/``swept_dim``,
+    ``resident``): ``Deployment``'s own numbers, straight through with no
+    re-derivation, so the panel draws whichever operand this chip's
+    stationarity actually keeps resident. ``None`` for a network workload,
+    which has no tile grid; the geometry panel renders nothing in that case.
     """
     data = json.dumps(
         {

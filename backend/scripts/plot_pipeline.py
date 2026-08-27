@@ -66,7 +66,7 @@ from bwz.deploy import check as check_deployment
 from bwz.deploy import deployment_of
 from bwz.explain import Explanation, explain_graph
 from bwz.graph import GraphPhase, build_graph, build_graphs
-from bwz.graph.ops import MatmulAttrs, Operation
+from bwz.graph.ops import Operation
 from bwz.kernels import encoder_layer_kernel, matmul_kernel
 from bwz.operators.base import cost_of
 from bwz.report import Bound, PhaseResult
@@ -818,19 +818,34 @@ def write_animation_html(panel: Panel, command: str, out: Path) -> None:
         ),
     )
     check_deployment(listing, work.trace)
-    geometry: dict[str, int] | None = None
-    if listing.kind == "tiles" and work.operation is not None:
-        attrs = work.operation.attrs
-        if isinstance(attrs, MatmulAttrs):
-            geometry = {
-                "m": attrs.m,
-                "n": attrs.n,
-                "k": attrs.k,
-                "rows": listing.array_rows,
-                "cols": listing.array_cols,
-                "k_slices": listing.k_slices,
-                "tiles_per_ks": listing.tiles_per_ks,
-            }
+    geometry: dict[str, object] | None = None
+    if listing.kind == "tiles" and listing.grid is not None:
+        # Straight off the listing's own grid (D53): the panel has to draw the
+        # operand THIS chip keeps resident, and which one that is — along with
+        # which dimension each grid axis carries — is exactly what the grid
+        # says. Re-deriving it here is how the panel and the listing would
+        # drift apart.
+        grid = listing.grid
+        band_rows, band_cols = grid.a_event_shape
+        geometry = {
+            "m": grid.m,
+            "n": grid.n,
+            "k": grid.k,
+            "rows": listing.array_rows,
+            "cols": listing.array_cols,
+            "grid_rows": grid.rows,
+            "grid_cols": grid.cols,
+            "row_dim": grid.row_dim.value,
+            "col_dim": grid.col_dim.value,
+            "swept_dim": grid.swept_dim.value,
+            "resident": grid.resident.value,
+            "stationarity": grid.stationarity.value,
+            "a_events": grid.a_events,
+            "group_name": grid.group_name,
+            "band_rows": band_rows,
+            "band_cols": band_cols,
+            "splits": grid.k_partitions,
+        }
     stations: list[dict[str, object]] = [
         {
             "name": row.title,

@@ -103,6 +103,10 @@ class Stage(StrEnum):
     under ``os`` — and every tile of that row reads the staging (D33/D53)."""
     HOLD = "Hold"
     EXEC = "Ex"
+    REDUCE = "Red"
+    """Split-K's second kernel: the partial results read back and summed (D53).
+    Its own stage because it is its own *kernel* — it starts after the GEMM has
+    finished, on a different engine, moving bytes that are neither operand."""
     STORE = "St"
     """Writing the result back. A separate stage because it happens *after* the
     arithmetic and shares the DRAM port with the next tile's load (D22)."""
@@ -341,6 +345,63 @@ def _resident_tile_bytes(
     else:
         total = dataflow.a_bytes if dataflow is not None else result.dram_activation_read_bytes
     return total / cells
+
+
+def _reduction_spans(
+    result: OpResult,
+    phase: GraphPhase,
+    op_type: str,
+    grid: TileGrid | None,
+    *,
+    after: list[Span],
+) -> list[Span]:
+    """The second kernel split-K needs, drawn after the first has finished (D53).
+
+    Two spans, not one: the partials' round trip on DRAM and the additions on
+    the vector unit, which a streaming reduction overlaps with each other but
+    with nothing in the GEMM — the two are separate launches, so this starts
+    where the tile schedule ends. Empty unless the grid materialised partials,
+    which is what keeps the ordinary trace exactly as it was.
+
+    The DRAM span's duration is the same seconds-per-byte the tile spans were
+    scaled by, so the lane still sums to ``t_dram`` exactly.
+    """
+    if result.dram_reduction_bytes <= 0 or grid is None:
+        return []
+    start = max((span.end_s for span in after), default=0.0)
+    per_byte = result.t_dram_s / result.dram_bytes if result.dram_bytes > 0 else 0.0
+    dram_s = result.dram_reduction_bytes * per_byte
+    partials = grid.k_partitions
+    spans = [
+        Span(
+            Lane.DRAM,
+            Stage.REDUCE,
+            f"{partials} split-K partials written, then read back",
+            start,
+            start + dram_s,
+            -2,
+            phase,
+            op_type=op_type,
+            bytes_moved=result.dram_reduction_bytes,
+            grid=grid,
+        )
+    ]
+    if result.t_reduce_s > 0:
+        spans.append(
+            Span(
+                Lane.VECTOR,
+                Stage.REDUCE,
+                f"batched reduction: {partials - 1} x M x N adds into C",
+                start,
+                start + result.t_reduce_s,
+                -2,
+                phase,
+                op_type=op_type,
+                flops=(partials - 1) * float(grid.m) * float(grid.n),
+                grid=grid,
+            )
+        )
+    return spans
 
 
 def _engine_work(group: list[OpResult], *, matrix: bool) -> tuple[float, float, str]:
@@ -620,6 +681,7 @@ def _tile_trace(
             ramp,
             *(replace(s, start_s=s.start_s + ramp_s, end_s=s.end_s + ramp_s) for s in spans),
         ]
+    spans.extend(_reduction_spans(result, phase.phase, op.op_type.value, grid, after=spans))
     return PipelineTrace(
         spans=tuple(spans),
         total_s=max((s.end_s for s in spans), default=0.0),

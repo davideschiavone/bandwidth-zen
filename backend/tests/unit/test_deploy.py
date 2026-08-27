@@ -82,7 +82,8 @@ def test_the_listing_quotes_the_tile_and_wave_counts_it_computed() -> None:
     assert "256 tiles and only 16 fit, so 240 of them" in listing.code
     assert "Each is still written once in this pass" in listing.code
     assert (listing.array_rows, listing.array_cols) == (512, 512)
-    assert (listing.k_slices, listing.tiles_per_ks) == (16, 16)
+    assert listing.grid is not None
+    assert (listing.grid.rows, listing.grid.cols) == (16, 16), "K x N under weight-stationary"
 
 
 def test_the_per_tile_byte_share_does_not_shrink_when_the_wave_is_underfull() -> None:
@@ -164,15 +165,15 @@ def test_the_listing_stages_a_once_and_rotates_weight_sets() -> None:
     _c, _m, _g, _t, metis = _run("metis_aipu", 8192, 8192, 8192)
     _c2, _m2, _g2, _t2, a100 = _run("a100_80gb", 8192, 8192, 8192)
 
-    assert "#define NTILES_PER_KS 16" in metis.code, "16 n-tiles per k-slice at N=8192"
-    assert "KSLICE" in metis.code
+    assert "#define TILES_PER_GROUP 16" in metis.code, "16 n-tiles per k-slice at N=8192"
+    assert "GROUP(w, u)" in metis.code
     assert "A crosses DRAM exactly once" in metis.code
     assert "staged once per k-slice" in metis.code
     assert "(w + 1) % WEIGHT_SETS" in metis.code, "write-ahead: next wave's tile, previous set"
     assert "write-ahead" in metis.code
     assert "must land before the array can use it" not in metis.code
 
-    assert "NTILES_PER_KS" in a100.code and "KSLICE" in a100.code
+    assert "TILES_PER_GROUP" in a100.code and "GROUP(w, u)" in a100.code
     assert "A crosses DRAM exactly once" in a100.code
     assert "write-ahead" not in a100.code, "a tensor core stores no weights (D30)"
 
@@ -235,8 +236,8 @@ def test_double_buffered_listing_prefetches_wave_w_plus_1_beside_waves_compute()
     # Every substring the pre-existing test suite already pins still survives —
     # the restructuring must not be a stealth rewrite of tested behaviour.
     for assertion in (
-        "#define NTILES_PER_KS 16",
-        "KSLICE",
+        "#define TILES_PER_GROUP 16",
+        "GROUP(w, u)",
         "A crosses DRAM exactly once",
         "staged once per k-slice",
         "(w + 1) % WEIGHT_SETS",
@@ -337,7 +338,7 @@ def test_a_network_gets_a_sequence_listing_rather_than_a_tile_nest() -> None:
     assert "SEQUENCE" in listing.code
     assert "TILES" not in listing.code
     assert (listing.array_rows, listing.array_cols) == (0, 0)
-    assert (listing.k_slices, listing.tiles_per_ks) == (0, 0)
+    assert listing.grid is None
 
 
 def _network_listing(chip_id: str, dtype: DType, precision: dict[str, str] | None = None):  # type: ignore[no-untyped-def]

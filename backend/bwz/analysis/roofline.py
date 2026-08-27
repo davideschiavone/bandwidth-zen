@@ -260,8 +260,6 @@ def op_roofline(
     # additions to the *vector* unit (a matrix engine does MAC and nothing else,
     # D27), the second launch to t_fixed.
     reduction = _reduction_for(op, cost, machine)
-    read_bytes += reduction.dram_bytes / 2.0
-    write_bytes += reduction.dram_bytes / 2.0
     t_reduce = (
         reduction.partial_sums / machine.effective_vector_flops_per_s
         if machine.effective_vector_flops_per_s > 0
@@ -270,7 +268,12 @@ def op_roofline(
     t_compute += t_reduce
     t_fixed += reduction.dispatches * machine.per_op_overhead_s
 
-    dram_bytes = read_bytes + write_bytes
+    # Kept out of read_bytes/write_bytes rather than split half and half into
+    # them: those two are the *operands'* traffic, A and B in and C out, and the
+    # trace divides them among tiles. The partials are neither — they are one
+    # kernel's output read back as another's input — so they get their own term
+    # and their own span (D53).
+    dram_bytes = read_bytes + write_bytes + reduction.dram_bytes
     t_dram = dram_bytes / machine.effective_bandwidth_bytes_per_s
 
     overlapped = max(t_dram, t_compute) if double_buffered else t_dram + t_compute
