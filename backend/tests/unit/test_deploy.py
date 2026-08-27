@@ -121,6 +121,31 @@ def test_an_imc_array_gets_weight_sets_and_a_write_and_a_tensor_core_does_not() 
     assert a100.resident_tiles == a100.units, "no weight residency: capacity is just the arrays"
 
 
+def test_an_mma_unit_issues_instruction_tiles_and_a_resident_array_streams_m() -> None:
+    """D52: the loop nest must not narrate what the cost model denies.
+
+    A tensor core holds nothing stationary and issues fixed instruction tiles,
+    so M quantises into ``ceil(M/ROWS)`` of them — the same padding the
+    utilisation term applies. Printing ``for (m = 0; m < M; ++m)`` past a
+    "held by the array" tile would contradict both D52 and D30's "the array
+    stores no weights". Metis genuinely is resident, so it keeps the stream.
+
+    M=1000 on A100's 16-row tile is ceil(1000/16) = 63 instruction tiles.
+    """
+    _c, _m, _g, _t, a100 = _run("a100_80gb", 1000, 2000, 3000, dtype="fp16")
+    _c2, _m2, _g2, _t2, metis = _run("metis_aipu", 1000, 2000, 3000)
+
+    assert "#define MTILES       63" in a100.code, "ceil(1000/16)"
+    assert "for (int mt = 0; mt < MTILES; ++mt)" in a100.code
+    assert "mma(u, &A[mt * ROWS]" in a100.code
+    assert "held by the array" not in a100.code
+    assert "M streams past it" not in a100.code
+
+    assert "MTILES" not in metis.code
+    assert "for (int m = 0; m < 1000; ++m)" in metis.code
+    assert "held by the array" in metis.code
+
+
 def test_the_bit_serial_tax_appears_only_where_the_profile_declares_it() -> None:
     """``SUB_CYCLES`` comes from the dtype multiplier, so it is the profile's."""
     _c, _m, _g, _t, metis = _run("metis_aipu", 8192, 8192, 8192)

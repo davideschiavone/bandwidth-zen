@@ -2139,3 +2139,42 @@ added.
 [ptx]: https://docs.nvidia.com/cuda/parallel-thread-execution/index.html
 [amp]: https://docs.nvidia.com/cuda/ampere-tuning-guide/index.html
 [mfma]: https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores/README.html
+
+### D52 addendum — the loop nest narrated what the cost model had stopped believing (2026-08-27)
+
+User check after D52 landed: *"did anything on performance or scheduling change? cause I don't see
+it in the animation."* It had — but the shape under inspection hides it, and probing that surfaced
+a real leftover.
+
+**Why it looked unchanged.** D52 alters compute rate, not tile geometry, so span *counts* are
+identical and only *durations* scale (verified: 152 exec spans before and after). And at
+`1000x2000x3000` M pads 1000 → 1008 instead of 1016, a 0.8% shift: 39.6 → 39.3 µs, invisible. At
+M=16 the same pipeline halves, 3.450 → 1.725 µs in the animation's own span data, so the change
+does propagate — the shape was simply the wrong place to look.
+
+**The real leftover.** `deploy.py` still printed, for every A100 listing:
+
+```
+ * B is cut into 16x16 tiles and held by the array; M streams past it.
+       for (int m = 0; m < 1000; ++m)   /* M streams; it never tiles */
+```
+
+Both claims are the weight-stationary picture D52 removed from the cost model, and the residency
+claim already contradicted D30 ("the array stores no weights: both operands are re-read per
+instruction"). The numbers were right and the narrative was not.
+
+**Fix.** An MMA unit — full-rate *and* holding no resident weights, the same partition
+`analysis/tiling.py` makes — now gets a listing built from instruction tiles: a `MTILES =
+ceil(M/ROWS)` define, `for (int mt = 0; mt < MTILES; ++mt)`, and `mma(u, &A[mt * ROWS][...])`
+naming the `16x16x16` tile, with the residency sentence dropped. Metis keeps the streaming form
+verbatim — its weight sets *are* resident, so "held by the array; M streams past it" is literally
+what happens there. Guarded by
+`test_an_mma_unit_issues_instruction_tiles_and_a_resident_array_streams_m`, confirmed to fail
+against the previous listing.
+
+**Still open, deliberately not changed here.** `tile_count` remains `ceil(K/rows) · ceil(N/cols)`
+— a split-K decomposition, one unit per (k-slice, n-tile) — so partial sums across k-slices need a
+cross-core reduction the model does not cost. A real cuBLAS GEMM instead tiles the *output*
+`ceil(M/rows) · ceil(N/cols)` and keeps K sequential inside each tile, needing no reduction.
+Changing that moves tile counts, wave occupancy and every trace built on them, so it is a separate
+question from making the listing honest about the tiling the model actually performs.

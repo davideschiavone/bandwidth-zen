@@ -121,6 +121,13 @@ def deployment_of(
     reloads = max(0, tiles - resident)
     multiplier = unit.dtype_multipliers.get(machine.dtype, 1.0)
     sub_cycles = round(1 / multiplier) if 0 < multiplier < 1 else 1
+    # An MMA unit — tensor/matrix core: full-rate (not bit-serial) and holding
+    # no resident weights, so it issues fixed instruction tiles rather than
+    # streaming M past a stationary operand. Same partition the cost model
+    # makes in analysis/tiling.py (D52), plus the weight-residency test, so a
+    # full-rate array that DOES hold weights still reads as a streaming one.
+    is_mma = sub_cycles == 1 and unit.weight_sets <= 1
+    m_tiles = math.ceil(operation.attrs.m / rows)
     depth = 2 if trace.double_buffered else 1
     # One representative tile's share of the traffic the report charged. This
     # must divide by the real tile count, not waves * units (the array's
@@ -141,7 +148,12 @@ def deployment_of(
         f"/* {chip.name} — how this model deploys the run",
         f" * {workload}",
         " *",
-        f" * B is cut into {rows}x{cols} tiles and held by the array; M streams past it.",
+        (
+            f" * B is cut into {rows}x{cols} tiles; each instruction tile pairs one"
+            f" with {rows} rows of A."
+            if is_mma
+            else f" * B is cut into {rows}x{cols} tiles and held by the array; M streams past it."
+        ),
         f" * {_int(tiles)} tiles over {units} array{'s' if units != 1 else ''}"
         f" -> {_int(waves)} wave{'s' if waves != 1 else ''}.",
     ]
@@ -226,6 +238,11 @@ def deployment_of(
             f"#define SUB_CYCLES   {sub_cycles:<10} /* {machine.dtype.value} multiplier"
             f" {multiplier:g} -> {sub_cycles} cycles per operand */"
         )
+    if is_mma:
+        defines.append(
+            f"#define MTILES       {m_tiles:<10} /* ceil(M / ROWS): M is padded to whole"
+            f" instruction tiles (D52) */"
+        )
 
     # An in-memory array must be *written* before it can compute, but the sets
     # are independently addressed, so a write-ahead lands a full wave early and
@@ -285,7 +302,14 @@ def deployment_of(
             "   /* one sub-cycle of the operand */",
         ]
         if sub_cycles > 1
-        else ["            mac(u, &A[m][KSLICE(w, u)]);"]
+        else (
+            [
+                f"            mma(u, &A[mt * ROWS][KSLICE(w, u)]);"
+                f"   /* one {rows}x{cols}x{rows} instruction tile */"
+            ]
+            if is_mma
+            else ["            mac(u, &A[m][KSLICE(w, u)]);"]
+        )
     )
     if sub_cycles > 1 and unit.weight_sets == 1:
         inner = [line.replace("w % WEIGHT_SETS, ", "") for line in inner]
@@ -305,9 +329,22 @@ def deployment_of(
     )
 
     def compute_lines() -> list[tuple[str, str | None]]:
+        # An MMA unit does not stream M past a resident tile — it issues fixed
+        # instruction tiles, so M is spatial and quantises into ceil(M/ROWS) of
+        # them (D52). A resident-weight array (Metis) genuinely does stream M,
+        # and keeps the row loop.
         m_line = (
-            f"        for (int m = 0; m < {stream_rows}; ++m)   /* M streams; it never tiles */",
-            None,
+            (
+                f"        for (int mt = 0; mt < MTILES; ++mt)"
+                f"   /* M is spatial: ceil({stream_rows}/ROWS) instruction tiles */",
+                None,
+            )
+            if is_mma
+            else (
+                f"        for (int m = 0; m < {stream_rows}; ++m)"
+                f"   /* M streams past the resident tile */",
+                None,
+            )
         )
         if on_demand_line is None:
             return [
