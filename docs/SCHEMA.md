@@ -196,8 +196,8 @@ ops:
 
 The escape hatch of PROMPT.md §4.2 — models anything the parametric flavours cannot express.
 
-**A bare matmul is not this.** `CustomOp` carries hand-written FLOPs and bytes but no shape, so the
-systolic tail effect cannot be computed for it and comes back as 100%. Use `family: matmul`
+**A bare matmul is not this.** `CustomOp` carries hand-written FLOPs and bytes but no shape, so
+shape utilisation cannot be computed for it and comes back as 100%. Use `family: matmul`
 (§2.4), which carries `m`, `n`, `k` (`docs/CORRECTIONS.md` D17).
 
 ### 2.4 Matmul workload

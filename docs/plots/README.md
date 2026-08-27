@@ -21,7 +21,7 @@ matplotlib, so it runs without `--group plots`.
 
 | File | Script | Shows |
 |---|---|---|
-| `roofline-<chip>-<dtype>.png` | `plot_roofline.py` | The two ceilings, the ridge point, the M=1 tail line, and a set of workloads placed on them |
+| `roofline-<chip>-<dtype>.png` | `plot_roofline.py` | The two ceilings, the ridge point, the M=1 line, and a set of workloads placed on them |
 | `machine-<chip>.png` | `plot_roofline.py` | The three-element machine (D5a) — DRAM, SRAM-as-capacity, array — and which link carries a bandwidth number |
 | `timeline-<chip>-<dtype>.html` | `plot_pipeline.py` | Where the time went, per hardware resource, **zoomable**, with the roofline for that run below it |
 | `timeline-<chip>-<model>-<phase>-<dtype>.html` | `plot_pipeline.py --model` | A network instead of a matmul, one page per phase |
@@ -48,13 +48,18 @@ a **new tab in an existing window** rather than a new window.
 - **hover** a bar and the tooltip names the transaction: `LOAD — operands in`,
   `STORE — result written back`, `EXEC — matmul`, `HOLD — on chip`, each with its bytes or
   operations and the rate
+- a **banner** naming the decomposition the bars are of: the stationarity, which operand it keeps
+  resident, the grid's extents and which of M/N/K each axis is, plus any split-K (D53). Tile
+  addresses in the hovers index into exactly that grid, so without it they cannot be read
 - below the timeline, the same run's place on the **roofline**: both ceilings, the ridge point, the
-  M=1 tail line, and this workload as a labelled point
+  M=1 line, and this workload as a labelled point
 - below that, **how it is deployed on the chip** — a pseudo-C loop nest **per chip** showing how B
   is cut into array-sized tiles, how many arrays take a wave of them at once, whether and when a
-  tile must be written into the array before it can compute — `--a-strategy` and `--b-dataflow`
-  (`../CLI.md` §2.5, D36) choose *which* loop nest this is — and where the loads and stores sit
-  around it. Every constant is read back out of the schedule drawn above and checked against it, so
+  tile must be written into the array before it can compute. Which loop nest this *is* comes from
+  the chip's stationarity (`--stationarity`, `../CLI.md` §2.5.1, D53) — `os` accumulates K inside
+  the tile, `ws` streams M past a resident one — with `--a-strategy`/`--b-dataflow` (§2.5.2, D36)
+  choosing how the operands move within it, and a second listing block for split-K's reduction
+  kernel when there is one. And where the loads and stores sit around it. Every constant is read back out of the schedule drawn above and checked against it, so
   the listing and the timeline cannot disagree (D32). Rendered once per chip, unlike the arithmetic,
   because the mapping is exactly what differs between two machines
 - below that, **the arithmetic operation by operation** — operand shapes, the algebra, the flop

@@ -15,7 +15,9 @@ behind every figure quoted below.
 | FLOP/byte counts (transformer, CNN) | M2 | **implemented** |
 | Roofline (flat: compute ridge vs DRAM ridge) | M3 | **implemented** |
 | Roofline (hierarchical, multi-level) | M8, on demand | not yet implemented |
-| Shape utilisation (systolic tail effect) | M3 | **implemented** |
+| Shape utilisation (rule of multiples) and wave occupancy | M3 | **implemented** |
+| Tile grid from the chip's declared dataflow (`ws`/`os`/`is`/`rs`) | M3 | **implemented** |
+| Loop-order *search* over dataflows | M8, on demand | not yet implemented |
 | Multi-chip sharding and collectives | M5 | not yet implemented |
 | Memory capacity planning and residency | M3 | **implemented** |
 | Power/energy | M7 | not yet implemented |
@@ -120,7 +122,7 @@ instead of 8 it would be 4.3 GB.
 
 Each model reports the arithmetic an operation performs and its **compulsory** traffic — every
 weight read once, every input read once, every output written once. Nothing here knows about a
-chip: cache reuse and the systolic tail effect are `analysis/`'s job (`docs/CORRECTIONS.md` D10),
+chip: cache reuse and shape utilisation are `analysis/`'s job (`docs/CORRECTIONS.md` D10),
 and tile re-reads are not modelled at all in v1 (§6.2). That is what makes every number below checkable with a calculator.
 
 `OpCost` splits bytes by role because M3 treats them differently — weight traffic is what
@@ -256,13 +258,13 @@ ridge of 295 and chip_a's of 6168, so the whole network is memory-bound on eithe
 
 The smallest workload the engine expresses: one `A[M,K] × B[K,N] → C[M,N]`, three tensors, no
 network around it. Its purpose is to interrogate the *machine* — where the ridge point falls, what
-the systolic tail costs, what `--ideal` does and does not change — with nothing else present to
-explain a number away. `M` folds batch in, as everywhere else.
+the shape padding costs, which decomposition the chip's dataflow implies, what `--ideal` does and
+does not change — with nothing else present to explain a number away. `M` folds batch in, as everywhere else.
 
 It speaks matmul, not transformer: operands `A` and `B` and a result `C`, each with its own width,
 and `deployment.precision` is ignored entirely (`docs/CORRECTIONS.md` D18). It is a family rather
-than a hand-costed `custom` op because a `CustomOp` carries no shape, so the tail effect would
-silently vanish (D17).
+than a hand-costed `custom` op because a `CustomOp` carries no shape, so shape utilisation would
+silently come back as 100% (D17).
 
 **Widths.** The arithmetic runs at the **wider operand** — both enter the array through one
 datapath — and the result width is an **accumulator** width that changes bytes only, never
@@ -282,12 +284,16 @@ and not one nanosecond of arithmetic.
 
 | M | intensity | shape util | verdict | latency |
 |---|---|---|---|---|
-| 10000 | 3333 OP/byte | 99.8% | compute-bound by 24× | 6.42 ms |
-| 512 | 464 OP/byte | 97.0% | compute-bound | 342 µs |
-| 1 | 1.0 OP/byte | **5.88%** = 1/17 | DRAM-bound | 71 µs |
+| 10000 | 3333 OP/byte | 99.91% | compute-bound by 21.8× | 6.42 ms |
+| 512 | 464 OP/byte | 98.50% | compute-bound by 3.8× | 333 µs |
+| 1 | 1.0 OP/byte | **4.52%** | DRAM-bound by 4.8× | 68.3 µs |
 
 `N = K = 10000` throughout. The last row is the whole point: the arithmetic fell by 10000× but the
-traffic did not fall at all, and a 16-row array running one row wastes fifteen of them.
+traffic did not fall at all. Its 4.52% is two losses multiplied, and separating them is worth doing
+by hand — a 16-row instruction tile running one row wastes fifteen of them (`1/16 = 6.25%`), and the
+625 output tiles that remain take two waves over 432 tensor cores whose second is 45% full
+(`625/(2·432) = 0.723`). `6.25% × 0.723 = 4.52%`. The first number is the array's geometry; the
+second is how much of the *chip* the work could reach.
 
 **Traffic is compulsory traffic, split by direction.** Each operand is charged once — the traffic
 of a perfectly tiled schedule that reads every byte exactly once — and reads and writes are charged
@@ -668,8 +674,8 @@ deferred refinements safe to defer.
 |---|---|---|
 | Llama-3-8B fp16 decode, H100 | CLAUDE.md | DRAM_BW_BOUND, 16.1 GB/token, **165 tok/s** (see D12) |
 | … utilisation at batch 1 | CLAUDE.md | **0.27%** |
-| … prefill @2048 | CLAUDE.md | COMPUTE_BOUND, **67.7%** (target 40–70%) |
-| … batch 128 decode | CLAUDE.md | COMPUTE_BOUND, 0.27% → **21%** |
+| … prefill @2048 | CLAUDE.md | COMPUTE_BOUND, **67.3%** (target 40–70%) |
+| … batch 128 decode | CLAUDE.md | COMPUTE_BOUND, 0.27% → **22%** |
 | Gemma-3-4B batch 1, H100 | CLAUDE.md | 0.24% util; DRAM-bound, not latency-bound (D13) |
 | MobileNetV3 on H100 | — | **LATENCY_BOUND**, the regime D13 describes |
 | chip_a residency 4B/2B/1B | D8 | **1.40 / 2.73 / 5.71%** vs 1.4 / 2.7 / 5.5 |
@@ -680,3 +686,5 @@ deferred refinements safe to defer.
 | chip_b decode | D8 | **9.3 tok/s COMPUTE_BOUND** vs 11.7 DRAM-bound (D14) |
 | doubling DRAM bandwidth | CLAUDE.md | never raises latency; ~linear while DRAM binds |
 | INT8 vs FP16 | CLAUDE.md | never slower on hardware supporting both |
+| MACs under every stationarity | D53 | identical — only the tiling, staging and reduction differ |
+| `tile_count` vs the utilisation model's grid | D53 | the same object; they cannot drift |

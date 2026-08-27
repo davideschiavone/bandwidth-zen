@@ -58,9 +58,11 @@ app = typer.Typer(
     rich_markup_mode="rich",
     epilog=(
         "[bold]Typical order:[/bold] [cyan]matmul[/cyan] probes one GEMM on one chip — the "
-        "smallest roofline check, and where the dataflow strategy flags "
-        "([cyan]--a-strategy[/cyan]/[cyan]--b-dataflow[/cyan], see [cyan]docs/CLI.md[/cyan] §2.5) "
-        "live. [cyan]run[/cyan] costs a full model. [cyan]compare[/cyan] puts chips head to head. "
+        "smallest roofline check, and where the dataflow flags live — "
+        "[cyan]--stationarity[/cyan]/[cyan]--split-k[/cyan] pick the decomposition, "
+        "[cyan]--a-strategy[/cyan]/[cyan]--b-dataflow[/cyan] move the operands within it "
+        "([cyan]docs/CLI.md[/cyan] §2.5). [cyan]run[/cyan] costs a full model. "
+        "[cyan]compare[/cyan] puts chips head to head. "
         "[cyan]list[/cyan] shows the bundled chip/model ids these all take.\n\n"
         "Each command prints numbers, derivations and an assumptions drawer — nothing here plots. "
         "For the same run as a zoomable picture: "
@@ -79,7 +81,11 @@ PANEL_ARCHITECTURE = "architecture"
 PANEL_PRECISION = "precision"
 PANEL_DEPLOYMENT = "deployment"
 PANEL_DATAFLOW = "dataflow strategy (docs/CLI.md §2.5)"
-PANEL_DATAFLOW_INERT = "dataflow strategy — inert on a network (docs/CLI.md §2.5)"
+PANEL_STATIONARITY = "dataflow — which operand stays resident (docs/CLI.md §2.5.1)"
+"""Its own panel on ``run`` rather than a slot under PANEL_DATAFLOW_INERT: a
+stationarity applies to every matmul in a graph, so filing it under a heading
+that says "inert on a network" would be false (D53)."""
+PANEL_DATAFLOW_INERT = "dataflow strategy — inert on a network (docs/CLI.md §2.5.2)"
 PANEL_OUTPUT = "output"
 
 
@@ -327,10 +333,10 @@ def run(
         AttentionImpl.FLASH2, "--attention", rich_help_panel=PANEL_DEPLOYMENT
     ),
     stationarity: Dataflow | None = typer.Option(
-        None, "--stationarity", help=STATIONARITY_HELP, rich_help_panel=PANEL_DATAFLOW_INERT
+        None, "--stationarity", help=STATIONARITY_HELP, rich_help_panel=PANEL_STATIONARITY
     ),
     split_k: int = typer.Option(
-        1, "--split-k", help=SPLIT_K_HELP, rich_help_panel=PANEL_DATAFLOW_INERT
+        1, "--split-k", help=SPLIT_K_HELP, rich_help_panel=PANEL_STATIONARITY
     ),
     a_strategy: AStrategy = typer.Option(
         AStrategy.STAGE,

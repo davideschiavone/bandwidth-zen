@@ -10,15 +10,18 @@ about it**, with the numbers behind every claim.
 It is fast enough to explore hundreds of configurations interactively, and honest enough to show you
 every assumption it made.
 
-> ⚠️ **These are estimates, not measurements.** Typical error is ±15–25% against published
-> benchmarks. See [Accuracy](#accuracy) and `docs/CALIBRATION.md`.
+> ⚠️ **These are estimates, and they have not been validated yet.** Every prediction rests on
+> calibration constants that are documented defaults, not values fitted against any measurement —
+> so no report claims better than `low` confidence, and the error against real hardware is
+> currently **unknown rather than bounded**. See [Accuracy](#accuracy) and `docs/CALIBRATION.md`.
 
 ---
 
 ## What it does
 
 - **Decomposes** a model into a DAG of operations with FLOP and byte counts per memory level
-- **Maps** each operation onto the chip: which compute unit, which tile sizes, what fits in SRAM
+- **Maps** each operation onto the chip: which compute unit, which tile grid the chip's dataflow
+  implies, what fits in SRAM
 - **Predicts** latency via a flat roofline (compute ridge vs DRAM ridge; the on-chip SRAM enters
   as a tile-buffer capacity) plus tail-effect and pipeline-fill utilization modelling
 - **Separates prefill from decode** for LLMs — they are different machines, and the tool shows why
@@ -80,23 +83,51 @@ uv run bwz run \
 ```
 
 ```
-Llama-3-8B  ·  NVIDIA H100 SXM5  ·  fp16  ·  batch 1  ·  2048 in / 256 out
+                     Llama-3-8B on NVIDIA H100 SXM5 80GB
 
-  TTFT              68.4 ms          prefill, compute-bound (54% of peak)
-  TPOT              21.7 ms          decode,  DRAM-bandwidth-bound (91% of peak BW)
-  End-to-end         5.62 s
-  Throughput        46.1 tok/s
-  Peak memory       17.4 GB / 77.3 GB usable        KV cache 1.07 GB @ 2304 ctx
-  Energy            0.42 J/token                     avg 421 W
+  phase     latency   bound             util    t_dram   t_compute   t_fixed
+ ────────────────────────────────────────────────────────────────────────────
+  prefill   44.6 ms   COMPUTE_BOUND   67.26%   5.25 ms     43.5 ms    774 µs
+  decode    6.05 ms   DRAM_BW_BOUND    0.27%   5.24 ms      642 µs    774 µs
 
-  Top bottlenecks (decode)
-    1  ffn.down_proj        DRAM_BW_BOUND    31%   AI 0.9   →  INT8 weights: −34%
-    2  ffn.gate_up_proj     DRAM_BW_BOUND    28%   AI 0.9
-    3  attn.qkv_proj        DRAM_BW_BOUND    14%   AI 0.9
-    4  attn.scores          DRAM_BW_BOUND     9%   AI 2.1   →  already flash2
+  TTFT      44.6 ms
+  TPOT      6.05 ms   165.4 tok/s
+  total     1.59 s
+  achieved  18.7 TOP/s of 989 TOP/s (1.89%)
 
-  Confidence: medium (±20%) — decode weight traffic dominates; assumes no weight caching in L2
+              Memory
+  item                     bytes
+ ────────────────────────────────
+  weights                16.1 GB
+  KV cache                302 MB
+  peak activations        265 kB
+  total                  16.4 GB
+  usable DRAM              72 GB
+  on-chip                83.8 MB
+  weight residency         0.52%
+  double buffered            yes
+
+Why  (confidence: low)
+  • Compute-bound by 8.29x over DRAM_BW_BOUND; DRAM takes over above 5.74 POP/s of
+    effective throughput. (rests on an estimated input)
+  • DRAM-bound by 6.78x over LATENCY_BOUND; latency bound takes over above 19.3 TB/s
+    of effective bandwidth. (rests on an estimated input)
+  → Shape utilisation bottoms out at 5.93%: operands do not fill the (16, 16) array.
+    Larger batches or fused projections help.
+  → Reduce bytes moved: quantise the weights further, or raise the batch size so each
+    weight read serves more tokens.
+  → Utilisation is 0.27% of peak — the compute array is nearly idle. A cheaper chip
+    with the same bandwidth would perform identically.
 ```
+
+**Two phases, two different machines.** Prefill is compute-bound at 67% of an H100; decode is
+DRAM-bound at 0.27%, because a batch-1 token has to drag all 16.1 GB of weights across the bus to
+produce one row of arithmetic. The `Why` block is not commentary — each line is a **flip margin**,
+the factor by which the binding input would have to move before the verdict changes, and it says
+which of them rest on a calibration constant nobody has fitted. That is why the confidence is
+`low` and stays `low` until `docs/CALIBRATION.md` has reference points in it.
+
+Add `--show-ops N` for the N most expensive operations, `--json` for the raw `Report`.
 
 Interrogate the machine rather than a network — one matrix multiply, in matmul vocabulary
 (operands A and B, result C — no weights, no activations, no batch or context knobs; `M` folds the
@@ -114,18 +145,21 @@ uv run bwz matmul -M 10000 -N 10000 -K 10000 --chip a100_80gb --dtype fp16 --ide
   arithmetic runs at        fp16     tensor_core peak 312 TOP/s
   intensity        3333.3 OP/byte    operations / compulsory traffic
   ridge point       153.0 OP/byte    above it the chip is compute-bound
-  shape utilisation        99.84%    systolic tail on a 16x16 array — geometry, not a derating
-  DRAM reads               370 MB    A and B, less whatever stays on chip
+  stationarity                os     C resident, 625 x 625 tiles (M x N) each sweeping K
+  shape utilisation        99.91%    shape padded to the 16x16 tile — geometry, not a derating
+  DRAM reads               400 MB    A and B, less whatever stays on chip
   DRAM writes              200 MB    C in full — nothing on chip consumes it
-  t_dram                   279 µs
+  t_dram                   294 µs
   t_compute               6.42 ms
-  latency                 6.43 ms
+  latency                 6.42 ms
   verdict           COMPUTE_BOUND
 ```
 
 `--ideal` sets both efficiency de-ratings to 1.0, so every number above can be checked against the
-datasheet by hand. Drop `-M` to 1 and the same matmul reports 5.88% utilisation — `1/17` of the
-array — and flips to DRAM-bound.
+datasheet by hand. Drop `-M` to 1 and the same matmul reports **4.52%** utilisation and flips to
+DRAM-bound: one row of work pays for a whole 16-row instruction tile (`1/16` of the array), and the
+625 output tiles that remain cannot fill 432 tensor cores evenly. Both losses are geometry, not a
+fudge factor, and `--ideal` does not remove either.
 
 **To see that same run instead of reading it** — one row per hardware resource, zoomable:
 
@@ -198,8 +232,8 @@ uv run bwz matmul -M 10000 -N 10000 -K 10000 --chip a100_80gb --dtype fp16 --ide
 
 `-M -N -K` the dimensions · `-c/--chip` · `-d/--dtype` both operands · `--a`/`--b` per-operand
 widths · `--out` the **result** width, i.e. the accumulator · `--ideal` · `--pipeline/--no-pipeline`
-· `--a-strategy`/`--b-dataflow` and `--a-residency-tiles`/`--a-prefetch-depth`/`--iterations` —
-dataflow strategy, next section · `--json`.
+· `--stationarity`/`--split-k` and `--a-strategy`/`--b-dataflow` with
+`--a-residency-tiles`/`--a-prefetch-depth`/`--iterations` — dataflow, next two sections · `--json`.
 
 `M` folds the batch in — a batch of 128 rows is `-M 128`. There is no `--batch`, no context and no
 phase, because one matmul has none of those.
@@ -214,20 +248,80 @@ uv run bwz matmul -M 4096 -N 4096 -K 4096 -c a100_80gb --a fp16 --b int8        
 All four do the same 137.4 GOP. The result width changes bytes only, never operations; a mixed
 matmul runs at the **wider** operand, because both share one datapath.
 
+### Stationarity: which operand stays resident
+
+**The first dataflow question, and the one the other two live inside.** Which operand stays put
+decides the whole decomposition: which dimensions form the parallel tile grid, which one each tile
+sweeps, and whether partial sums have to be reduced afterwards. For a matmul the operands map as
+**input = A, weight = B, output = C**.
+
+| `--stationarity` | resident | parallel grid | swept per tile | reduction |
+|---|---|---|---|---|
+| `os` output-stationary | C's accumulator | `⌈M/rows⌉ × ⌈N/cols⌉` | K | none |
+| `ws` weight-stationary | a B tile | `⌈K/rows⌉ × ⌈N/cols⌉` | M | over K |
+| `is` input-stationary | an A tile | `⌈M/rows⌉ × ⌈K/rows⌉` | N | over K |
+| `rs` row-stationary | one A row per PE | `⌈M/rows⌉ × ⌈N/cols⌉` | K, spread spatially | inside the array |
+
+**The default is the chip's own.** Every matrix core here declares `os`, because that is what cuBLAS
+and CUTLASS do — K accumulates in registers inside one output tile, so no partial sum ever leaves a
+core. The in-memory-compute profiles declare `ws`: their weights *are* their memory, so an
+accumulator-resident dataflow is not something they could run. `rs` is implemented after Eyeriss and
+labelled unvalidated, since no shipped profile declares it.
+
+**Every stationarity issues the same `2·M·N·K` operations.** They differ in how the work is cut up —
+so in quantisation loss, in how the operands are staged, and in whether a reduction is owed.
+
+**A chip asked for one it cannot run is refused, not clamped** — the one place this tool returns
+`feasible: false` for a *strategy* rather than a capacity problem:
+
+```bash
+$ uv run bwz matmul -M 512 -N 512 -K 4096 -c a100_80gb --stationarity ws
+Infeasible.
+  • stationarity='ws' is not supported by tensor_core, which declares os. tensor_core declares
+    weight_sets=1, i.e. no weight residency at all: both operands are re-read per instruction
+    (D30), so there is nothing for a weight to stay stationary in. Drop the flag to use the
+    chip's own dataflow, or pick one it declares.
+```
+
+The A/B knobs below clamp instead, and the difference is deliberate: `stage`/`stream`/`whole` are
+orderings of the same work, so falling back still answers the question you asked. A stationarity is
+a *different decomposition*, so substituting one would quietly report a number for hardware you
+never asked about.
+
+**`--split-k` cuts the contraction when the output grid alone cannot fill the chip**, which is the
+one thing that makes `os` owe a reduction. CUTLASS runs it as two kernels — a partitioned GEMM and a
+batched reduction — and the model charges both:
+
+```bash
+uv run bwz matmul -M 512 -N 512 -K 4096 -c a100_80gb --ideal --split-k 8
+```
+
+|  | tiles | waves | occupancy | DRAM traffic | latency |
+|---|---|---|---|---|---|
+| default | 1 024 | 3 | 79.0% | 4.72 MB | 8.71 µs |
+| `--split-k 8` | 8 192 | 19 | 99.8% | **13.1 MB** | 6.99 µs |
+
+The extra 8.4 MB is eight full `512×512` partials written by the first kernel and read back by the
+second. Push the factor higher and `t_dram` overtakes `t_compute` — the flag is there to find where.
+Full derivation in `docs/CLI.md` §2.5.
+
 ### A and B: how a matmul's operands move
 
 Two more flags on `bwz matmul` (and `bwz run`, and `plot_pipeline.py`), answering two different
-questions about a lone matmul's DRAM traffic — full derivation in `docs/CLI.md` §2.5:
+questions about a lone matmul's DRAM traffic *within* the grid the stationarity chose — full
+derivation in `docs/CLI.md` §2.5:
 
 ```bash
 uv run bwz matmul -M 8192 -N 8192 -K 8192 -c metis_aipu -d int8 --ideal --a-strategy stream
 ```
 
-**`--a-strategy` is a byte-amount knob** — how often A crosses DRAM. `stage` (default) reads each
-k-slice once and feeds every tile that needs it; `stream` re-reads A per tile instead — the honest
-picture for a GPU, whose GEMMs genuinely refetch operands — which is **16x** the traffic on this
-shape (1.07 GB against 67.1 MB staged); `whole` stages all of A before the first tile, same bytes as
-`stage`, only the timing changes.
+**`--a-strategy` is a byte-amount knob** — how often A crosses DRAM. `stage` (default) reads one
+*grid row's* slice of A once and feeds every tile of that row; `stream` re-reads A per tile instead
+— the honest picture for a GPU, whose GEMMs genuinely refetch operands — which is **16x** the
+traffic on this shape (1.07 GB against 67.1 MB staged); `whole` stages all of A before the first
+tile, same bytes as `stage`, only the timing changes. (What a "row" is follows from the
+stationarity: a slice of K under `ws`, a band of M rows under `os`. Either way A crosses DRAM
+exactly once under `stage`.)
 
 **`--b-dataflow` is a timing knob** — B is fetched exactly once either way (D30), so
 `write-ahead`/`on-demand`/`persistent` only move *when* the write lands relative to compute, never
@@ -277,9 +371,11 @@ uv run bwz run --model single_layer_encoder_toy --chip a100_80gb --input-tokens 
 ```
 
 `-m/--model` · `-c/--chip` · `-b/--batch` · `--input-tokens` · `--output-tokens` · `--context` ·
-`--weights` · `--phase` · `--attention` · `--show-ops N` · `--ideal` · `--json` · the [dataflow
-strategy flags](#a-and-b-how-a-matmuls-operands-move) too, accepted for parity with `bwz matmul` but
-inert here — a model's graph is never one bare matmul.
+`--weights` · `--phase` · `--attention` · `--show-ops N` · `--ideal` · `--json` ·
+[`--stationarity`/`--split-k`](#stationarity-which-operand-stays-resident), which **do** apply here
+— every matmul in the graph is decomposed the same way — plus the [A/B strategy
+flags](#a-and-b-how-a-matmuls-operands-move), accepted for parity with `bwz matmul` but inert on a
+network, whose graph is never one bare matmul.
 
 `--show-ops N` lists the N most expensive operations with their arithmetic, DRAM bytes and time —
 `20` simply asks for more lines than the encoder's 14 operations.
@@ -362,10 +458,10 @@ there is no second, coarser register to keep legible) · `--out` apply to all th
 · `--model ID` · `--encoder` (with `--dmodel --nheads --ffn --vocab` and `-S/--tokens`)
 pick the workload — passing two of them is rejected, not resolved by silent priority.
 
-The dataflow strategy flags (`--a-strategy`, `--b-dataflow`, `--a-residency-tiles`,
-`--a-prefetch-depth`, `--iterations` — [what they mean](#a-and-b-how-a-matmuls-operands-move),
-`docs/CLI.md` §2.5) belong to the default matmul workload the same way the shape flags belong to
-`--encoder`: passing either set with the wrong workload is an error naming the flag and why, not one
+The dataflow flags (`--stationarity`, `--split-k`, `--a-strategy`, `--b-dataflow`,
+`--a-residency-tiles`, `--a-prefetch-depth`, `--iterations` — [what they
+mean](#stationarity-which-operand-stays-resident), `docs/CLI.md` §2.5) belong to the default matmul
+workload the same way the shape flags belong to `--encoder`: passing either set with the wrong workload is an error naming the flag and why, not one
 that quietly did nothing —
 
 ```bash
@@ -380,17 +476,17 @@ plot_pipeline.py: error: --nheads only applies to --encoder; pass --encoder or d
 ```
 
 The time axis is **shared and absolute**, so a bar three times as long took three times as long —
-here A100 9.1 ms against Metis 119 ms, stated as 13.04x rather than left to be measured off the
+here A100 8.95 ms against Metis 119 ms, stated as 13.26x rather than left to be measured off the
 ticks. Rows are **banded by chip** rather than aligned, because the two profiles declare different
 resources (A100: 3 memory levels, 2 engines; Metis: 4 and 2) and no correspondence between
 `cuda_core` and `dpu` exists to draw. Each band header also states its chip's **achieved
-throughput** — `622 TOP/s achieved · 100% of peak` against `186 TOP/s achieved · 89% of peak` on an
-8192³ INT8 matmul, the same 3.34x the latency ratio is, inverted. Everything the per-chip figure
+throughput** — `436 TOP/s achieved · 70% of peak` against `186 TOP/s achieved · 89% of peak` on an
+8192³ INT8 matmul, the same 2.34x the latency ratio is, inverted. Everything the per-chip figure
 does survives inside each band.
 
 Below the timeline, both rooflines on one chart. Both chips do the same 3.33 TOP over the same
 ~3.8 GB — ~870 OP/byte — and land on **opposite sides of their own ridge point**: A100's ridge is
-306 OP/byte so it is compute-bound, Metis's is 6145 so it is DRAM-bandwidth-bound. Identical
+252 OP/byte so it is compute-bound, Metis's is 6145 so it is DRAM-bandwidth-bound. Identical
 arithmetic, identical traffic, different limiter. That is what the head-to-head table in
 `bwz compare` cannot show.
 
@@ -413,7 +509,7 @@ both views are kept because they answer different questions.
 ### What gets written
 
 ```bash
-make plots        # → docs/plots/, the committed figures
+make plots        # → docs/plots/
 ```
 
 All computed by calling `analyze()` rather than drawn by hand, each carrying the command that
@@ -421,16 +517,17 @@ produced it and the commit it came from:
 
 | | |
 |---|---|
-| `roofline-<chip>-<dtype>.png` | the two ceilings, the ridge point, the M=1 tail, and workloads placed on them |
+| `roofline-<chip>-<dtype>.png` | the two ceilings, the ridge point, the M=1 line, and workloads placed on them |
 | `machine-<chip>.png` | the three-element machine — which link carries a bandwidth number and which does not |
 | `timeline-<chip>-<dtype>.html` | where the time went, one row per hardware resource, **zoomable**, with the roofline and the arithmetic below it |
 | `timeline-compare-<a>-vs-<b>-….html` | two chips, one workload, one shared absolute axis, both rooflines |
+| `animate-<chip>-<dtype>.html` | the same schedule played back — blocks moving between stations, the loop nest lighting up debugger-style, and the A/B/C tile geometry (`--animate`) |
 
-None of them is committed — they are outputs of the engine, regenerable in one command, and a
+**None of them is committed.** They are outputs of the engine, regenerable in one command, and a
 750 kB PNG per run is churn nobody can review (the timeline dropped its PNG form entirely for this
 reason — it could not zoom, so it needed a second "first N steps" figure just to stay legible, and
 the HTML page needs none of that, D37). `make plots` writes the set above into `docs/plots/`, which
-`.gitignore` covers.
+`.gitignore` covers; the README that documents the set stays tracked.
 
 **Rows are hardware resources**, read off the chip profile — every memory level and every compute
 unit it declares, each with its own quantity: bytes moved and at what rate, operations retired and
@@ -477,24 +574,37 @@ t_memory    = bytes_moved / (bandwidth × bandwidth_efficiency)
 t_op        = max(t_compute, t_memory)            # or sum, if the chip can't overlap
 ```
 
-Four things would make it more than a textbook roofline. **Two are implemented and two are not** —
-`docs/MODEL.md` says which formula is live:
+Five things would make it more than a textbook roofline. **Three are implemented and two are
+not** — `docs/MODEL.md` says which formula is live:
 
-1. **`utilization_efficiency` is derived, not assumed.** *(implemented)* The systolic tail effect,
-   `[K/padded(K)]·[N/padded(N)]·[M/(M+rows)]`. This is why a matmul with M=1 on a 128×128 array
-   gets ~1/128 of peak — and why LLM decode looks the way it does. Pipeline fill/drain is
-   **not** folded in here: it is reported separately by the tile schedule (§6.5), because the
+1. **`utilization_efficiency` is derived, not assumed.** *(implemented)* Two independent losses,
+   multiplied. **Shape**, the rule of multiples — `[K/padded(K)]·[N/padded(N)]·[M/padded(M)]` — is
+   why a matmul with M=1 on a 128×128 array gets ~1/128 of peak, and why LLM decode looks the way it
+   does. It is *area*: an instruction tile is issued whether or not its rows carry work, so one row
+   pays for a whole tile. (It is **not** a pipeline fill — a tensor core has no M-serial pipeline to
+   drain, which cost this project a correction, `docs/CORRECTIONS.md` D52.) **Wave occupancy** is
+   the second: a chip with `count` arrays runs that many tiles at once, so an operation with fewer
+   tiles than that leaves the rest idle and the last wave of any operation is partly empty. Pipeline
+   fill/drain is folded into neither — the tile schedule reports it separately (§6.5), because the
    roofline's `max(load, compute)` is the many-tiles limit and hiding the difference inside a
    utilisation figure would make it unfalsifiable.
-2. **On-chip capacity decides overlap and residency.** *(implemented)* Capacity is allocated
+2. **The tile grid follows the chip's declared dataflow.** *(implemented)* Which operand stays
+   resident decides which dimensions are cut, how many tiles there are, and whether partial sums
+   need reducing — so it decides the wave-occupancy term above and the operand staging below.
+   `analysis/stationarity.py` is the single place that decides it, and every site that needs a tile
+   index goes through the grid it returns rather than re-deriving one. Selectable per run, refused
+   rather than clamped when a chip cannot run the choice (`docs/CORRECTIONS.md` D53).
+3. **On-chip capacity decides overlap and residency.** *(implemented)* Capacity is allocated
    double buffer → activations → weights, and whether two tiles fit is what earns
    `max(load, compute)` instead of `load + compute`.
-3. **`bytes_moved` from a tile-reuse search.** *(not implemented — v1 charges compulsory traffic.)*
+4. **`bytes_moved` from a tile-reuse search.** *(not implemented — v1 charges compulsory traffic.)*
    The target is `M·K·⌈N/Tn⌉ + K·N·⌈M/Tm⌉ + M·N` over a search of tile sizes; v1 charges each
    operand once, which is the traffic of an ideal schedule and therefore a **lower bound** once the
    working set stops fitting on chip. Quantified in `docs/MODEL.md` §6.2 — 1.5–2× at 16384³ — and
-   stated in every report's assumptions drawer.
-4. **Communication with alpha-beta costs on the real topology.** *(not implemented — M5.)* Ring
+   stated in every report's assumptions drawer. The same gap is why a weight-stationary grid's
+   partial sums are assumed to meet in an accumulator rather than spilling: pricing one horn of that
+   dilemma and not the other would be worse than naming both (D53).
+5. **Communication with alpha-beta costs on the real topology.** *(not implemented — M5.)* Ring
    allreduce as `2(N−1)α + 2(N−1)/N·S·β`, separate `(α, β)` per link class.
 
 Energy (M7) is not implemented either. Nothing in this repo has been calibrated against a published
@@ -551,6 +661,9 @@ Add your own — chips and models are plain YAML:
 name: My NPU
 clock_ghz: 1.2
 compute_units:
+  # `dataflow` is read, not decorative: it picks the tile grid every number below
+  # is computed against. `ws` says this array holds a weight tile and streams M
+  # past it; a matrix core that accumulates in registers declares `os` instead.
   - {name: systolic, count: 4, ops_per_cycle_per_unit: 16384,
      supported_dtypes: [int8, int4], systolic_dims: [128, 128], dataflow: ws}
 memory:
@@ -565,20 +678,44 @@ See [`docs/SCHEMA.md`](docs/SCHEMA.md) for the full schema.
 
 ## Accuracy
 
-Validated against published MLPerf Inference results and vendor benchmark posts. Current status
-(see `docs/CALIBRATION.md` for the full table, sources, and outlier analysis):
+**Nothing here has been checked against a measurement yet.** `make validate` runs, and currently
+selects zero reference points:
 
-| Workload class | Typical error | Confidence |
+```bash
+$ make validate
+459 deselected in 0.33s
+```
+
+That is the honest state, and it is why every report comes back `confidence: low` regardless of how
+clean the arithmetic looks. Three calibration constants — DRAM bandwidth efficiency, achieved-FLOPs
+fraction, per-dispatch overhead — are documented defaults rather than fitted values, and `--ideal`
+exists precisely so you can see what a number looks like with all three removed. What remains under
+`--ideal` follows from published quantities (MACs, clock, bandwidth, capacity) and can be checked
+against a datasheet by hand; what `--ideal` removes is the part nobody has earned yet.
+
+The **targets** for Session 5, against which the harness will be judged (`docs/PLAN.md`):
+
+| Workload class | Target error | Status |
 |---|---|---|
-| LLM decode, single chip | ±15% | medium–high |
-| LLM prefill, single chip | ±20% | medium |
-| CNN inference, large batch | ±15% | medium |
-| CNN inference, batch 1 | ±35% | low — launch overhead dominates |
-| Multi-chip TP | ±25% | low–medium |
-| Energy | ±50% | low |
+| LLM decode, single chip | ±15% | no reference point collected |
+| LLM prefill, single chip | ±20% | no reference point collected |
+| CNN inference, large batch | ±15% | no reference point collected |
+| CNN inference, batch 1 | ±35% — launch overhead dominates | no reference point collected |
+| Multi-chip TP | ±25% | not implemented (M5) |
+| Energy | ±50% | not implemented (M7) |
 
-Every report includes a `confidence` field and an assumptions list. Run `make validate` to
-reproduce the table.
+What the engine *is* checked against today is **itself and its own physics**: 459 tests, including
+the sanity checks in `CLAUDE.md` (doubling DRAM bandwidth never raises latency; INT8 never slower
+than FP16; `M=1` on a 128×128 array is `1/128` of the array; every dataflow issues the same MAC
+count), hand-computed goldens with the arithmetic written out in each test's docstring, and
+cross-checks that two independent derivations agree — the graph builder's summed weight tensors
+against `ModelSpec.parameter_count()`, the drawn schedule against the reported latency it
+decomposes. That is self-consistency, not accuracy, and the difference matters.
+
+Every report carries a `confidence` field, an assumptions drawer listing every shortcut taken, and
+a **flip margin** per verdict: how far the binding input can move before the answer changes. A
+bottleneck label with a 1.1× margin means something very different from one with a 260× margin, and
+the label alone cannot tell you which you have.
 
 ---
 
@@ -589,12 +726,13 @@ backend/bwz/
   spec/         pydantic schemas + YAML loaders
   graph/        ModelSpec → operation DAG (transformer, CNN builders)
   operators/    per-family cost models (matmul, conv, attention, norm, elementwise)
-  analysis/     roofline, tiling, memory, schedule, parallelism, collectives, power, bottleneck
+  analysis/     roofline, stationarity (the tile grid), tiling, memory, schedule,
+                parallelism, collectives, power, bottleneck
   api/, cli.py  thin shells over analyze(model, hardware, deployment) -> Report
   profiles/     chip and model YAML
 backend/scripts/  figure generation (imports the engine; the engine never imports it)
 frontend/src/   React + TS dashboard (roofline plot, Gantt, Pareto explorer)
-docs/           CLI.md · MODEL.md · CALIBRATION.md · SCHEMA.md · CORRECTIONS.md · plots/
+docs/           CLI.md · MODEL.md · SCHEMA.md · CALIBRATION.md · CORRECTIONS.md · PLAN.md · plots/
 ```
 
 The analysis core is pure and dependency-free: `analyze()` is a deterministic function of its

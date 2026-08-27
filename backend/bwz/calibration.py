@@ -47,9 +47,11 @@ DEFAULT_DRAM_BANDWIDTH_EFFICIENCY: float = 0.85
 
 # Fraction of peak arithmetic a real kernel sustains once instruction issue,
 # scheduling and thermal limits are accounted for - but NOT operand shape, which
-# the tail-effect model in analysis/tiling.py handles separately. The two are
-# multiplicative and must not be conflated: 0.7 x a 1/512 tail effect is 0.14%,
-# and that is the correct reading for a batch-1 GEMM on a 512x512 array.
+# the shape-utilisation model in analysis/tiling.py handles separately, nor how
+# many of the chip's arrays the work can reach, which wave occupancy handles.
+# All three are multiplicative and must not be conflated: 0.7 x a 1/512 shape
+# term is 0.14%, and that is the correct reading for a batch-1 GEMM on a 512x512
+# array.
 # TO BE FITTED: docs/PLAN.md Session 5.
 DEFAULT_ACHIEVED_FLOPS_FRACTION: float = 0.70
 

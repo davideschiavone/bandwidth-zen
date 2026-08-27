@@ -77,7 +77,9 @@ so a batch of 128 is `-M 128`.
 | `--pipeline` / `--no-pipeline` | lane occupancy table (default on) |
 | `--stationarity` | `os` \| `ws` \| `is` \| `rs` — which operand stays resident, §2.5a. Default: the chip's own |
 | `--split-k` | cut the contraction into N pieces (`os` only); costs CUTLASS's second kernel, §2.5a |
-| `--a-strategy` | `stage` (default, D33) \| `stream` (D31) \| `whole` — how A is loaded, §2.5 |
+| `--stationarity` | `os` \| `ws` \| `is` \| `rs` — which operand stays resident, §2.5.1. Default: the chip's own |
+| `--split-k` | cut the contraction into N pieces (`os` only); costs CUTLASS's second kernel, §2.5.1 |
+| `--a-strategy` | `stage` (default, D33) \| `stream` (D31) \| `whole` — how A is loaded, §2.5.2 |
 | `--b-dataflow` | `write-ahead` (default, D33) \| `on-demand` \| `persistent` — when B's write lands |
 | `--a-residency-tiles` | override tiles served per A staging event; power-of-2 divisor of `TILES_PER_GROUP` |
 | `--a-prefetch-depth` | override A's double-buffered staging depth (schedule-only) |
@@ -91,41 +93,54 @@ uv run bwz matmul -M 10000 -N 10000 -K 10000 -c a100_80gb -d fp16 --ideal
 ```
 
 ```
-  DRAM reads                   370 MB
+  DRAM reads                   400 MB
   DRAM writes                  200 MB
   intensity            3333.3 OP/byte
   ridge point           153.0 OP/byte
-  shape utilisation            99.84%
-  t_dram                       279 µs
+  stationarity                     os
+  shape utilisation            99.91%
+  t_dram                       294 µs
   t_compute                   6.42 ms
-  latency                     6.43 ms
+  latency                     6.42 ms
   verdict               COMPUTE_BOUND
 ```
 
-`2·10000³ = 2.000e12` OP at A100's 312 TFLOP/s is 6.41 ms; the extra 0.16% is the systolic tail.
-Every number here can be checked against the datasheet by hand — that is what `--ideal` is for.
+`2·10000³ = 2.000e12` OP at A100's 312 TFLOP/s is 6.41 ms; the extra 0.09% is quantisation — every
+dimension is a multiple of 16 here, so the only loss is wave occupancy (390 625 tiles over 432
+tensor cores is 905 waves, the last one 89% full). Every number can be checked against the datasheet
+by hand — that is what `--ideal` is for.
 
-Drop `--ideal` and the same command gives **9.18 ms**: the difference is `÷0.70`, the unfitted
+Drop `--ideal` and the same command gives **9.17 ms**: the difference is `÷0.70`, the unfitted
 `DEFAULT_ACHIEVED_FLOPS_FRACTION`. The verdict does not move, which is what the flip margin
 measures.
 
-### 2.2 The systolic tail
+### 2.2 Shape utilisation at M=1
 
 ```bash
 uv run bwz matmul -M 1 -N 10000 -K 10000 -c a100_80gb -d fp16 --ideal
 ```
 
 ```
-  shape utilisation             5.88%
-  DRAM reads                   139 MB
-  DRAM writes                   20 kB
-  latency                    71.3 µs
+  stationarity                    os   C resident, 1 x 625 tiles (M x N) each
+                                       sweeping K — tensor_core's own
+  shape utilisation            4.52%
+  DRAM reads                  139 MB
+  DRAM writes                  20 kB
+  latency                    68.3 µs
   verdict              DRAM_BW_BOUND
 ```
 
-`1/17` of peak on a 16×16 array. The arithmetic fell by 10 000× against §2.1 and the traffic did
-not fall at all, so the workload crossed the ridge. `--ideal` does **not** remove this: it is
-geometry, not a derating.
+The arithmetic fell by 10 000× against §2.1 and the traffic did not fall at all, so the workload
+crossed the ridge. `--ideal` does **not** remove the 4.52%: it is geometry, not a derating.
+
+The figure is two losses multiplied, and they live at different levels — only the first is what
+CLAUDE.md's `M=1 → ≈1/rows` sanity check is about:
+
+| | | |
+|---|---|---|
+| **array** | `1 / 16 = 6.25%` | one row of work pays for a whole 16-row instruction tile. Area, not a pipeline drain — a tensor core has no M-serial pipeline to fill (`docs/CORRECTIONS.md` D52) |
+| **chip** | `625 / (2 × 432) = 72.3%` | only 625 output tiles exist, so 432 tensor cores take two waves and the second is 45% full (D30) |
+| **reported** | `6.25% × 72.3% = 4.52%` | |
 
 ### 2.3 Widths — all integer, all float, and mixed
 
@@ -138,14 +153,16 @@ uv run bwz matmul -M 4096 -N 4096 -K 4096 -c a100_80gb --a fp16 --b int8   --ide
 
 | | operations | result C | DRAM read / written | intensity | latency |
 |---|---|---|---|---|---|
-| `int8 × int8 → int8` | 137 GOP | 16.8 MB | 0 B / 16.8 MB | 2730.7 OP/byte | 224 µs |
-| `int8 × int8 → int32` | 137 GOP | **67.1 MB** | 21.4 MB / 67.1 MB | **1365.3 OP/byte** | 224 µs |
-| `fp16 × fp16 → fp32` | 137 GOP | 67.1 MB | 46.9 MB / 67.1 MB | 1024.0 OP/byte | 445 µs |
-| `fp16 × int8 → fp16` | 137 GOP | 33.6 MB | 20 MB / 33.6 MB | 1638.4 OP/byte | **445 µs** |
+| `int8 × int8 → int8` | 137 GOP | 16.8 MB | 16.8 MB / 16.8 MB | 2730.7 OP/byte | 221 µs |
+| `int8 × int8 → int32` | 137 GOP | **67.1 MB** | 33.6 MB / 67.1 MB | **1365.3 OP/byte** | 221 µs |
+| `fp16 × fp16 → fp32` | 137 GOP | 67.1 MB | 67.1 MB / 67.1 MB | 1024.0 OP/byte | 442 µs |
+| `fp16 × int8 → fp16` | 137 GOP | 33.6 MB | 50.3 MB / 33.6 MB | 1638.4 OP/byte | **442 µs** |
 
-The read column shrinks as operands become resident; the write column never does. `C` is the
-answer, and on the first row A100 fetches **nothing** — both operands fit on chip — yet still
-writes all 16.8 MB of it (D22).
+The read column shrinks as **B** becomes resident; the write column never does. On the first row
+A100 reads no B at all — 16.8 MB of int8 weights fit in its 60.7 MB of on-chip capacity — and the
+16.8 MB it does read is **A**, which a lone matmul always pays for in full: the residency discount
+is inter-operation reuse, and a one-operation graph has no producer to reuse from (D33). `C` is the
+answer, so all 16.8 MB of it is written whatever the capacity (D22).
 
 Two rules, both visible above:
 
@@ -164,13 +181,21 @@ uv run bwz matmul -M 4096 -N 4096 -K 4096 -c a100_80gb -d fp16
 ```
 
 ```
-  lane      busy       occupancy   what it was doing
-  dram     23 µs      4% of span   streaming operand tiles across the one modelled link
-  sram   1.25 ms   1.97 of 2 buf   tile buffers held from fetch to use
-  core    635 µs    100% of span   arithmetic, plus one dispatch
+  lane       busy       occupancy   what it was doing
+  dram    58.1 µs      9% of span   operand tiles in, results out, across the one modelled link
+  sram    1.25 ms   1.97 of 2 buf   tile buffers held from fetch to use
+  core     634 µs    100% of span   matrix arithmetic, plus the dispatches
+  vector      0 s      0% of span   norms, activations, residuals — not the matrix engine
 
-  64 steps drawn, coalesced from 65536 tiles, double buffered.
+  64 steps drawn, coalesced from 152 tiles, double buffered. Span 635 µs against a
+  reported 634 µs: the extra 908 ns (0.1%) is pipeline fill/drain, which
+  max(load, compute) omits.
 ```
+
+**"152" is waves, not tiles.** The grid here is `⌈4096/16⌉ × ⌈4096/16⌉ = 65 536` output tiles, and
+A100 has 432 tensor cores, so the schedule steps through `⌈65536/432⌉ = 152` waves of them — a step
+is a wave, because drawing one bar per tile would show a 432-core chip working through tiles in
+series when it does 432 at a time (D30). The 64 rows drawn coalesce those 152 and say so.
 
 **The occupancy column carries a different unit per row, on purpose.** DRAM and the array are
 single serial resources — their spans never overlap — so theirs is a duty cycle and cannot exceed
@@ -179,7 +204,14 @@ counts how many were occupied: `1.97 of 2` means both halves of the double buffe
 almost all the time. That is capacity, not bandwidth, which is the whole of what SRAM contributes
 in this model.
 
-### 2.5a Stationarity — `--stationarity`, `--split-k`
+### 2.5 Dataflow — which operand stays resident, and how the other two move
+
+Three questions, in the order they have to be answered. **Stationarity** picks the decomposition:
+which dimensions form the tile grid and which one each tile sweeps. **A's strategy** decides how
+often A crosses DRAM within that grid, and **B's dataflow** decides when B's write lands relative to
+compute. The defaults reproduce every number in §2.1–2.4 exactly.
+
+#### 2.5.1 Stationarity — `--stationarity`, `--split-k`
 
 **Which operand stays resident decides the whole decomposition** (D53): which dimensions form the
 parallel tile grid, which one each tile sweeps, and whether partial sums are owed. `--stationarity`
@@ -250,14 +282,16 @@ declares.
 Exit code 2, the same as any other infeasible report. `rs` is implemented but no profile declares
 it; if one ever does, `report.assumptions` labels its numbers unvalidated.
 
-Both flags exist on `bwz run` and on `plot_pipeline.py` too, where the effective grid appears in the
-page banner and the animation's geometry panel draws the resident operand's grid.
+Both flags exist on `bwz run` and on `plot_pipeline.py` too — and unlike the A/B knobs below they
+are **not** inert on a network, since every matmul in the graph is decomposed the same way. In the
+figures the effective grid appears in the page banner, and the animation's geometry panel draws the
+resident operand's grid (`docs/plots/README.md`).
 
-### 2.5 Dataflow strategies — `--a-strategy`, `--b-dataflow`
+#### 2.5.2 A and B — `--a-strategy`, `--b-dataflow`
 
 A is a byte-amount knob; B is a timing knob (`docs/MODEL.md` §6.3a, `docs/CORRECTIONS.md` D36).
-Defaults reproduce every number above exactly — `stage` and `write-ahead` are what §2.1–2.4 already
-ran.
+Both operate *within* the grid §2.5.1 chose: "one staging event per grid row" is a k-slice under
+`ws` and a band of M rows under `os`, and A crosses DRAM exactly once under `stage` either way.
 
 ```bash
 uv run bwz matmul -M 8192 -N 8192 -K 8192 -c metis_aipu -d int8 --ideal \
@@ -422,11 +456,11 @@ uv run bwz encoder-layer --chip a100_80gb --ideal
 
   phase     latency   bound            util    t_dram   t_compute   t_fixed
  ─────────────────────────────────────────────────────────────────────────
-  prefill    122 ns   COMPUTE_BOUND   0.01%   31.4 ps      122 ns       0 s
+  prefill   97.9 ns   COMPUTE_BOUND   0.02%   31.4 ps     97.9 ns       0 s
 
-  TTFT      122 ns
-  total     122 ns
-  achieved  43.1 GOP/s of 312 TOP/s (0.01%)
+  TTFT      97.9 ns
+  total     97.9 ns
+  achieved  53.9 GOP/s of 312 TOP/s (0.02%)
 ```
 
 664 parameters, 5280 operations at the defaults — the golden numbers that `tests/unit/test_kernels.py`
@@ -434,7 +468,7 @@ and the bundled `single_layer_encoder_toy` profile both pin to (`docs/CORRECTION
 probe and the frozen teaching profile agree exactly because they run through the same
 `encoder_layer_kernel` factory (`bwz/kernels.py`), the way `bwz matmul` runs through `matmul_kernel`.
 
-Shape utilisation bottoms out at 0.01% — 8-wide operands do not begin to fill a 16×16 array — which
+Shape utilisation bottoms out at 0.02% — 8-wide operands do not begin to fill a 16×16 array — which
 is the point of the default: every number here is checkable by hand, not representative of a real
 workload.
 
@@ -469,17 +503,18 @@ never a placeholder.
 | `--attention` | `vanilla` \| `flash2` \| `paged` \| `sliding_window` |
 | `--show-ops N` | the N most expensive operations |
 | `--ideal`, `--json` | as for `matmul` |
-| `--a-strategy`, `--b-dataflow`, `--a-residency-tiles`, `--a-prefetch-depth`, `--iterations` | accepted for parity with `matmul` (§2.5), but inert here — a network's graph is never one bare matmul, so `analysis/schedule.py` never reaches the single-matmul branch these read |
+| `--stationarity`, `--split-k` | as for `matmul` (§2.5.1), and **not** inert here: every matmul in the graph is decomposed the same way |
+| `--a-strategy`, `--b-dataflow`, `--a-residency-tiles`, `--a-prefetch-depth`, `--iterations` | accepted for parity with `matmul` (§2.5.2), but inert here — a network's graph is never one bare matmul, so `analysis/schedule.py` never reaches the single-matmul branch these read |
 
 ```bash
 uv run bwz run -m llama3_8b -c a100_80gb --input-tokens 2048 --output-tokens 128
 ```
 
 ```
-  TTFT      139 ms
+  TTFT      138 ms
   TPOT      9.49 ms   105.4 tok/s
   total     1.35 s
-  achieved  22 TOP/s of 312 TOP/s (7.04%)
+  achieved  22 TOP/s of 312 TOP/s (7.05%)
 ```
 
 Prefill compute-bound, decode DRAM-bound — two different machines out of one model, which is why
@@ -511,7 +546,7 @@ uv run bwz compare --chips chip_a,chip_b --models gemma3_4b
 ```
   model       chip     params   resident     TTFT   tok/s   bound            util
   gemma3_4b   chip_a   3.88 G      1.40%   114 ms     8.7   DRAM_BW_BOUND   0.03%
-  gemma3_4b   chip_b   3.88 G     25.75%   144 ms    11.0   DRAM_BW_BOUND   0.17%
+  gemma3_4b   chip_b   3.88 G     25.75%    87 ms    11.0   DRAM_BW_BOUND   0.17%
 
 Prefill crossover
   gemma3_4b: no crossover in [1, 100000] — chip_b is faster throughout
@@ -634,10 +669,12 @@ bwz: --compare puts two or more chips in one figure and got 1; pass --chip twice
 Rows are **banded by chip**, not aligned across them: A100 declares 3 memory levels and 2 compute
 units, Metis 4 and 2, `chip_a` 2 and 1, and no correspondence between `cuda_core` and `dpu` exists
 to draw. Each band opens with a header row carrying that machine's peak, DRAM bandwidth, on-chip
-capacity, its row counts, its total span **and its achieved throughput** — `622 TOP/s achieved ·
-100% of peak` on A100 against `186 TOP/s achieved · 89% of peak` on Metis for an 8192³ INT8 matmul,
-the same 3.34x the latency ratio is, inverted, because both come from the one reported latency
-(D35). Everything the single-chip page does survives inside the band — grey rows for
+capacity, its row counts, its total span **and its achieved throughput** — `436 TOP/s achieved ·
+70% of peak` on A100 against `186 TOP/s achieved · 89% of peak` on Metis for an 8192³ INT8 matmul,
+the same 2.34x the latency ratio is (2.52 ms against 5.9 ms), inverted, because both come from the
+one reported latency (D35). Note which chip is nearer *its own* ceiling: A100 is at 70% because the
+unfitted `DEFAULT_ACHIEVED_FLOPS_FRACTION` says so, Metis at 89% because its shape utilisation says
+so — the same figure meaning two different things is exactly why the band states both. Everything the single-chip page does survives inside the band — grey rows for
 declared-and-unused resources, matrix and vector lanes on separate rows, filled loads against
 hollow stores, named bars, and the three info boxes, now one set per chip.
 
@@ -722,8 +759,8 @@ cd backend && uv run pytest tests/unit/test_pipeline.py::test_double_buffering_h
 
 | Claim | Command | Derivation |
 |---|---|---|
-| 6.42 ms, compute-bound by 24× | §2.1 | `docs/MODEL.md` §5b, §6.3 |
-| 5.88% = 1/17 at M=1 | §2.2 | `docs/MODEL.md` §6.1 |
+| 6.42 ms, compute-bound by 21.8× | §2.1 | `docs/MODEL.md` §5b, §6.3 |
+| 4.52% at M=1 (`1/16` array x `72.3%` occupancy) | §2.2 | `docs/MODEL.md` §6.1 |
 | result width changes bytes only | §2.3 | `docs/CORRECTIONS.md` D18 |
 | mixed operands run at the wider | §2.3 | `docs/CORRECTIONS.md` D18 |
 | SRAM depth 1.97 of 2 buffers | §2.4 | `docs/MODEL.md` §6.5, D19 |
@@ -732,6 +769,9 @@ cd backend && uv run pytest tests/unit/test_pipeline.py::test_double_buffering_h
 | no Konata, no Kanata | — | `docs/CORRECTIONS.md` D21 |
 | 1.40% residency on chip_a | §4 | `docs/CORRECTIONS.md` D8, D15 |
 | traffic is a lower bound when the working set does not fit | every report's assumptions | `docs/MODEL.md` §6.2 |
-| stream is 16x the staged total | §2.5 | `docs/MODEL.md` §6.3a, `docs/CORRECTIONS.md` D36 |
-| whole/persistent clamp rather than raise | §2.5 | `docs/CORRECTIONS.md` D36, CLAUDE.md #8 |
-| 622/186 TOP/s achieved, 3.34x inverted | §6.1 | `docs/CORRECTIONS.md` D35, D37 |
+| stream is 16x the staged total | §2.5.2 | `docs/MODEL.md` §6.3a, `docs/CORRECTIONS.md` D36 |
+| whole/persistent clamp rather than raise | §2.5.2 | `docs/CORRECTIONS.md` D36, CLAUDE.md #8 |
+| the matrix cores decompose output-stationary | §2.5.1 | `docs/MODEL.md` §6.1, `docs/CORRECTIONS.md` D53 |
+| an unsupported stationarity is refused, not clamped | §2.5.1 | `docs/CORRECTIONS.md` D53, CLAUDE.md #8 |
+| split-K trades DRAM traffic for wave occupancy | §2.5.1 | `docs/MODEL.md` §6.1, `docs/CORRECTIONS.md` D53 |
+| 436/186 TOP/s achieved, 2.34x inverted | §6.1 | `docs/CORRECTIONS.md` D35, D37 |

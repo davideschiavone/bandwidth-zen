@@ -111,7 +111,7 @@ later cross-checks against its summed weight tensors.
 **Done when:** the CLAUDE.md sanity checks hold, and the D8 acceptance demo is reproduced.
 Achieved — see `docs/MODEL.md` §6.7 for the full table. Llama-3-8B fp16 decode on H100 →
 DRAM_BW_BOUND at **165 tok/s** (not the 35–55 CLAUDE.md pairs with its own 16 GB figure: see D12);
-prefill @2k → COMPUTE_BOUND at 67.7%; Gemma-3-4B batch 1 → 0.24% utilisation but **DRAM-bound**,
+prefill @2k → COMPUTE_BOUND at 67.3% (67.7% before D53); Gemma-3-4B batch 1 → 0.24% utilisation but **DRAM-bound**,
 with MobileNetV3 on H100 as the LATENCY_BOUND case instead (D13). D8: ridge points 6165 / 1541;
 residency 1.40 / 2.73 / 5.71% and 25.76 / 50.15 / 100%; chip_a decode 8.4 / 16.8 / 37.0 tok/s;
 chip_a TTFT @512 114.6 ms. All self-consistency goldens in `tests/unit` and
@@ -157,6 +157,37 @@ collectives as though implemented.
 Also fixed: `backend/pyproject.toml` carried `readme = "../README.md"`, which hatchling rejects as
 outside the project directory — `make venv` failed on a fresh clone.
 
+## Session 4c — Unplanned, user-driven (2026-08-27)
+
+Also not in the original plan. Both items came out of the same question — *what decomposition is the
+engine actually modelling?* — and both were found by the user challenging a claim the code made.
+
+- **D52: the M-tail was a systolic pipeline the tensor cores do not have.** The utilisation model
+  charged `M/(M+rows)`, a rows-deep pipeline fill borrowed from a conventional systolic pump. No
+  profile here *is* such a pump: every non-bit-serial unit is a 16×16 MMA core issuing fixed
+  instruction tiles (`m16n8k16` and friends), where M is a *spatial* dimension and the only loss is
+  the ragged last tile. Mid-M utilisation had been understated by up to 2× (M=16 read 50%, not
+  100%). Its addendum fixed the loop-nest listing, which was still narrating "M streams past a tile
+  held by the array" for a unit that D30 says holds nothing.
+- **D53: dataflow stationarity became a real, selectable strategy.** `Dataflow` had declared
+  `ws`/`os`/`rs` since M1 with a docstring promising the profile's declaration was honoured; nothing
+  read the field, so every chip got one hardcoded weight-stationary split-K decomposition. The
+  matrix cores now declare and run `os` — what cuBLAS and CUTLASS do — `analysis/stationarity.py`
+  became the single place a tile grid is decided, and split-K is costed as the two kernels it
+  actually is. An unsupported request is **refused**, not clamped.
+
+Utilisation figures moved, and in the direction that looks wrong until you check what the tiles
+were: M=1 on A100 went from 6.24% to 4.52%, because the weight-stationary grid's 390 625 tiles were
+parallelism that only existed as partial sums nothing was reducing. Llama-3-8B on H100 barely moved
+(prefill 67.7% → 67.3%, decode TPOT unchanged), which is the sanity check that this was a tiling
+correction rather than a rate one.
+
+Documentation debt cleared alongside, since both corrections invalidated prose in several files: the
+README's headline `bwz run` output was a mock-up the tool had never printed, and its Accuracy table
+quoted error bars against MLPerf that no test had ever computed — `make validate` selects zero
+points. Both replaced with the real thing, and `docs/CALIBRATION.md` now states the empty state
+rather than implying a full one.
+
 ## Session 5 — Calibration + backtest (early M7 slice)
 
 - Collect **published** reference points into `tests/validation/reference_points.yaml`, each with
@@ -187,8 +218,12 @@ and each item is kept only if it improves `make validate` MAPE over the flat mod
 - **Hierarchical multi-level roofline** — per-level (L1/SRAM, L2, DRAM) byte accounting and
   "which level binds" reporting. Needed only if the flat model mispredicts working-set-in-L2 cases
   (activation-heavy CNNs, small models with big batches).
-- **ws/os/rs loop-order search** — derive which operand stays put per op instead of honouring the
-  profile's declared dataflow.
+- **Dataflow *search*** — derive which operand stays put per op, and which split-K factor, instead
+  of taking the profile's declaration and the user's flag. **Honouring the declaration landed in
+  Session 4c (D53)**: `ws`/`os`/`is`/`rs` each produce a real tile grid, the four matrix-core
+  profiles declare `os`, and `--stationarity`/`--split-k` select per run. What remains is the
+  *search* — an autotuner's job, and only worth building against `make validate`, since its whole
+  output is a claim about which decomposition is fastest.
 - **Winograd F(2×2,3×3) / F(4×4,3×3) and FFT convolution** — FLOP-reduced algorithm selection.
 - **L2 reuse effects** refinement for CNN activations.
 - **SRAM/NoC split** (D5b) — separate `sram_read_bytes_per_s` (local weight feed) from

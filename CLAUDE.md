@@ -47,8 +47,8 @@ Backend only: `cd backend && uv run uvicorn bwz.api.app:app --reload`
 `spec/` parses YAML/JSON into validated pydantic objects (`ModelSpec`, `HardwareSpec`,
 `DeploymentSpec`). `graph/` expands a `ModelSpec` into a DAG of `Operation`s. `operators/` attaches
 a cost model to each op, producing FLOPs and per-memory-level byte counts. `analysis/` runs the
-roofline, tiling search, memory planner, scheduler, parallelism rewrites, and collective cost model,
-then classifies bottlenecks and emits a `Report`. `api/` and `cli.py` are thin shells over
+roofline, the stationarity that decides the tile grid, the tiling search, memory planner, scheduler,
+parallelism rewrites, and collective cost model, then classifies bottlenecks and emits a `Report`. `api/` and `cli.py` are thin shells over
 `analyze(model, hardware, deployment) -> Report`. The frontend only ever consumes `Report`.
 
 **The dependency arrow points one way:** `spec → graph → operators → analysis → report → {api, cli}`.
@@ -102,6 +102,7 @@ Nothing in `analysis/` may import from `api/`. Nothing in `graph/` may import fr
 | A new empirical constant | `calibration.py` only | `docs/CALIBRATION.md` |
 | A new report field | `report.py` | `docs/report.schema.json`, TS types, snapshot tests |
 | A new parallelism strategy | `analysis/parallelism.py` + `collectives.py` | `docs/MODEL.md` |
+| A new dataflow / stationarity | `analysis/stationarity.py` — the one place a tile grid is decided | `docs/MODEL.md` §6.1, `docs/SCHEMA.md`, unit test |
 | A new model family | `spec/model_spec.py` + `graph/<family>.py`, dispatched in `graph/builder.py` | `docs/SCHEMA.md`, `docs/MODEL.md`, golden test |
 | A new dtype | `spec/dtypes.py` only — widths are definitions, not calibration | `docs/SCHEMA.md` dtype lists |
 | A figure | `backend/scripts/plot_*.py`, never inside `bwz/` | `docs/plots/README.md`, `make plots` |
@@ -123,8 +124,21 @@ These are known-good behaviours. If a change breaks one, the change is wrong.
 - Gemma-4, batch 1, H100 → **latency/launch-bound**, single-digit % utilization. Batch 128 → good
   utilization. A model that shows 80% utilization at batch 1 is broken.
 - MobileNetV3 depthwise layers → **memory-bound**, poor utilization on a large systolic array.
-- GEMM with M=1 on a 128×128 systolic array → utilization ≈ 1/128 from the tail effect. If your
-  utilization model doesn't reproduce this, it isn't modelling the array.
+- GEMM with M=1 on a 128×128 array → **array-level** utilization ≈ 1/128, from padding M to a whole
+  instruction tile (D52 — it is area, not a pipeline drain). If your utilization model doesn't
+  reproduce this, it isn't modelling the array. **The chip-level figure is this times wave
+  occupancy** and is legitimately lower: at M=1 there are few output tiles, so most of a
+  many-core chip idles. Don't "fix" the second by breaking the first.
+- **Every stationarity issues the same `M*N*K` MACs.** `os` and `ws` disagree about how many tiles
+  there are, which dimension each sweeps, and whether partial sums are owed — never about the flop
+  count. A change that moves the arithmetic when only the dataflow changed is wrong (D53).
+- A chip asked for a dataflow it does not declare returns `feasible: false` naming the field and the
+  capability — **refused, not clamped**, unlike the A/B strategy knobs. A clamp there would answer a
+  different question than the one asked.
+- A more accurate decomposition may report *lower* utilization. Flipping the matrix cores from `ws`
+  to `os` (D53) cut M=1 chip utilization on A100 from 6.24% to 4.52%, because the parallelism `ws`
+  claimed only existed as 390 625 partial sums nothing was reducing. Lower is not automatically a
+  regression — check what the tiles *were*.
 - FlashAttention changes bytes, never FLOPs. So does GQA, and so does a matmul's result width: an
   `int8 x int8 -> int32` matmul does the same `2*M*N*K` as `int8 x int8 -> int8` and writes four
   times the bytes.
@@ -190,8 +204,11 @@ config store, Tailwind for layout, D3 for scales/axes and canvas for anything dr
   `3.35e12` loads as the *string* `"3.35e12"`, while `3.35e+12` loads as a float. `parse_or_pass`
   rescues the unsigned form by reading it as a unitless SI value, but profile YAML should still
   write the signed exponent — that is what the format means.
-- `ceil` in the tail-effect model must operate on the *padded* dimension, not the tile count, or
-  small-M GEMMs report >100% utilization.
+- `ceil` in the shape-utilisation model must operate on the *padded* dimension, not the tile count,
+  or small-M GEMMs report >100% utilization.
+- `analysis/stationarity.py` must stay the only place a tile grid is computed. It was duplicated in
+  `pipeline.tile_count` and `tiling.systolic_utilisation` once, and the two drifted — the schedule
+  drew a decomposition the utilisation figure was not costing (D53).
 - The sweep process pool must receive plain dicts, not pydantic objects — pickling validated models
   across processes is measurably slower than re-validating in the worker.
 - Vite dev server needs `server.proxy['/api'] = 'http://localhost:8000'`; do not hardcode the
