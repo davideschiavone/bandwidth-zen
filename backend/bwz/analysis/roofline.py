@@ -32,7 +32,7 @@ from bwz.graph.ops import Operation, OpType
 from bwz.operators.base import OpCost
 from bwz.report import Bound, OpResult
 from bwz.spec.dtypes import DType
-from bwz.spec.hardware_spec import ComputeUnit, HardwareSpec
+from bwz.spec.hardware_spec import ComputeUnit, Dataflow, HardwareSpec
 
 MATRIX_OP_TYPES = frozenset({OpType.MATMUL, OpType.ATTENTION, OpType.CONV})
 """Operations a systolic array or tensor core can execute. Everything else —
@@ -65,6 +65,13 @@ class MachineModel:
     effective_vector_flops_per_s: float
     effective_bandwidth_bytes_per_s: float
     per_op_overhead_s: float
+    stationarity: Dataflow = Dataflow.WEIGHT_STATIONARY
+    """The *effective* dataflow — the unit's own unless a deployment overrode it
+    with one the unit supports. Carried here so the tile grid, the utilisation
+    term, the trace and the listing all read the same choice and cannot
+    disagree (D53)."""
+    k_partitions: int = 1
+    """Split-K slices, from ``DeploymentSpec.split_k`` (D53)."""
 
     def rate_for(self, op_type: OpType) -> float:
         """Effective throughput available to *op_type*."""
@@ -128,8 +135,20 @@ def idealised(chip: HardwareSpec) -> HardwareSpec:
     )
 
 
-def machine_model(chip: HardwareSpec, dtype: DType) -> MachineModel:
-    """Derive effective rates, honouring per-chip overrides over defaults (D6)."""
+def machine_model(
+    chip: HardwareSpec,
+    dtype: DType,
+    *,
+    stationarity: Dataflow | None = None,
+    k_partitions: int = 1,
+) -> MachineModel:
+    """Derive effective rates, honouring per-chip overrides over defaults (D6).
+
+    *stationarity* defaults to the matrix unit's own declared dataflow, so a
+    caller that does not care about the decomposition gets the chip's native one
+    (D53). Validating a requested override against what the unit can actually
+    run is :func:`analysis.dataflow.resolve_stationarity`'s job, not this one.
+    """
     efficiency = (
         chip.dram_bandwidth_efficiency
         if chip.dram_bandwidth_efficiency is not None
@@ -168,6 +187,8 @@ def machine_model(chip: HardwareSpec, dtype: DType) -> MachineModel:
         effective_vector_flops_per_s=vector.peak_flops_per_s(chip.clock_hz, dtype) * achieved,
         effective_bandwidth_bytes_per_s=chip.dram.bandwidth_bytes_per_s * efficiency,
         per_op_overhead_s=overhead,
+        stationarity=stationarity if stationarity is not None else unit.dataflow,
+        k_partitions=max(1, k_partitions),
     )
 
 
@@ -221,7 +242,13 @@ def op_roofline(
     dram_bytes = read_bytes + write_bytes
     t_dram = dram_bytes / machine.effective_bandwidth_bytes_per_s
 
-    utilisation = operation_utilisation(op, machine.unit, machine.dtype)
+    utilisation = operation_utilisation(
+        op,
+        machine.unit,
+        machine.dtype,
+        stationarity=machine.stationarity,
+        k_partitions=machine.k_partitions,
+    )
     rate = machine.rate_for(op.op_type)
     t_compute = cost.flops / (rate * utilisation) if cost.flops > 0 and utilisation > 0 else 0.0
 

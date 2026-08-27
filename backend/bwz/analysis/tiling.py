@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import math
 
+from bwz.analysis.stationarity import grid_for
 from bwz.graph.ops import (
     AttentionAttrs,
     ConvAttrs,
@@ -17,7 +18,7 @@ from bwz.graph.ops import (
     Operation,
 )
 from bwz.spec.dtypes import DType
-from bwz.spec.hardware_spec import ComputeUnit
+from bwz.spec.hardware_spec import ComputeUnit, Dataflow
 
 
 def padded(extent: int, tile: int) -> int:
@@ -69,6 +70,7 @@ def systolic_utilisation(
     units: int = 1,
     independent: int = 1,
     fill_cycles: int | None = None,
+    tiles: int | None = None,
 ) -> float:
     """Fraction of a ``rows x cols`` array a ``[M,K]x[K,N]`` GEMM keeps busy.
 
@@ -140,11 +142,32 @@ def systolic_utilisation(
         # active row of 512 — not a pipeline drain".
         m_efficiency = m / padded(m, rows)
         k_efficiency = k / padded(k, rows)
-    tiles = (padded(k, rows) // rows) * (padded(n, cols) // cols) * max(independent, 1)
-    return k_efficiency * n_efficiency * m_efficiency * wave_occupancy(tiles, units)
+    # How many independent tiles the chip's units have to get through. The
+    # default is the weight-stationary grid this function has always assumed;
+    # a caller that knows the machine's stationarity passes the real count so
+    # this and `pipeline.tile_count` cannot disagree about the decomposition
+    # (D53). The three efficiency terms above are unaffected: they measure how
+    # each dimension fits an array-sized tile, which is true whichever operand
+    # stays resident.
+    grid_tiles = (
+        tiles if tiles is not None else (padded(k, rows) // rows) * (padded(n, cols) // cols)
+    )
+    return (
+        k_efficiency
+        * n_efficiency
+        * m_efficiency
+        * wave_occupancy(grid_tiles * max(independent, 1), units)
+    )
 
 
-def operation_utilisation(op: Operation, unit: ComputeUnit, dtype: DType | None = None) -> float:
+def operation_utilisation(
+    op: Operation,
+    unit: ComputeUnit,
+    dtype: DType | None = None,
+    *,
+    stationarity: Dataflow | None = None,
+    k_partitions: int = 1,
+) -> float:
     """Shape-induced utilisation for *op* on *unit*.
 
     Returns 1.0 when the profile declares no array geometry — there is then no
@@ -161,6 +184,12 @@ def operation_utilisation(op: Operation, unit: ComputeUnit, dtype: DType | None 
     Neither model has an M-serial pipeline any more; both reproduce the
     batch-1 ~1/rows golden, and they differ only in whether K carries a
     sub-cycle fill.
+
+    *stationarity* decides which dimensions form the parallel grid, and so how
+    many tiles the units must get through — the wave-occupancy term (D53). It
+    defaults to the unit's own declared dataflow. The three padding terms do
+    not depend on it: they measure how each dimension fits an array-sized
+    tile, which holds whichever operand stays resident.
     """
     if unit.systolic_dims is None:
         return 1.0
@@ -173,6 +202,13 @@ def operation_utilisation(op: Operation, unit: ComputeUnit, dtype: DType | None 
     fill = round(1 / multiplier) if 0 < multiplier < 1 else None
 
     if isinstance(op.attrs, MatmulAttrs):
+        grid = grid_for(
+            stationarity if stationarity is not None else unit.dataflow,
+            op.attrs,
+            rows,
+            cols,
+            k_partitions=k_partitions,
+        )
         return systolic_utilisation(
             op.attrs.m,
             op.attrs.k,
@@ -181,6 +217,7 @@ def operation_utilisation(op: Operation, unit: ComputeUnit, dtype: DType | None 
             cols,
             units=unit.count,
             fill_cycles=fill,
+            tiles=grid.tiles,
         )
 
     if isinstance(op.attrs, ConvAttrs):

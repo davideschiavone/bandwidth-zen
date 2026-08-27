@@ -34,13 +34,30 @@ from bwz.spec.quantities import Bytes, BytesPerSecond, Fraction, Seconds, Watts
 class Dataflow(StrEnum):
     """Which operand stays resident in the PE array.
 
-    v1 honours the profile's declaration; the loop-order search that would
-    *derive* it is deferred to M8 (docs/CORRECTIONS.md D5).
+    For a matmul the operand names map as **input = A, weight = B, output = C**,
+    and the choice decides the whole decomposition (D53): which dimensions form
+    the parallel tile grid, which one each tile sweeps, and whether partial sums
+    have to be reduced across cores afterwards. ``analysis/stationarity.py``
+    turns a member of this enum into that grid.
+
+    The declaration is the chip's *native* dataflow and a unit may support more
+    than one (``ComputeUnit.supported_dataflows``); asking for one it does not
+    support is refused, not clamped, because a clamp would silently answer a
+    different question than the one asked. The loop-order search that would
+    *derive* the best choice is still deferred to M8 (docs/CORRECTIONS.md D5).
     """
 
     WEIGHT_STATIONARY = "ws"
+    """B resident, M swept past it. Partial sums span K, so they need reducing."""
     OUTPUT_STATIONARY = "os"
+    """C resident in the accumulator, K swept inside each tile — cuBLAS/CUTLASS's
+    default, and the only one needing no cross-core reduction (D53)."""
+    INPUT_STATIONARY = "is"
+    """A resident, N swept past it. Partial sums span K, so they need reducing."""
     ROW_STATIONARY = "rs"
+    """Eyeriss-style: one A row per PE with K spread spatially, so partial sums
+    reduce inside the array rather than across cores. Defined for completeness —
+    no shipped profile declares it, so its numbers are unvalidated (D53)."""
 
 
 class Topology(StrEnum):
@@ -75,6 +92,31 @@ class ComputeUnit(SpecModel):
         description="Array-sized weight tiles ONE unit holds at once. Metis declares 4.",
     )
     dataflow: Dataflow = Dataflow.WEIGHT_STATIONARY
+    """This unit's *native* dataflow — the one it uses unless asked otherwise."""
+    supported_dataflows: tuple[Dataflow, ...] = Field(
+        default=(),
+        description=(
+            "Every dataflow this unit can physically run. Empty means just its "
+            "native one, which is the honest default: a tensor core has no weight "
+            "storage (D30) and an in-memory array's weights ARE its memory, so "
+            "neither can run an arbitrary dataflow (D53)."
+        ),
+    )
+
+    def dataflows(self) -> tuple[Dataflow, ...]:
+        """The declared set, or the native dataflow alone when none is declared."""
+        return self.supported_dataflows or (self.dataflow,)
+
+    @model_validator(mode="after")
+    def _check_dataflows(self) -> ComputeUnit:
+        if self.supported_dataflows and self.dataflow not in self.supported_dataflows:
+            declared = ", ".join(sorted(d.value for d in self.supported_dataflows))
+            raise ValueError(
+                f"{self.name}: native dataflow {self.dataflow.value!r} is not in "
+                f"supported_dataflows ({declared}); a unit must support the dataflow it "
+                f"declares as its own"
+            )
+        return self
 
     @model_validator(mode="after")
     def _check_multipliers(self) -> ComputeUnit:

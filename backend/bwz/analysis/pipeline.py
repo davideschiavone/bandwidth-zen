@@ -52,7 +52,7 @@ from enum import StrEnum
 from typing import TYPE_CHECKING
 
 from bwz.analysis.roofline import MATRIX_OP_TYPES, MachineModel
-from bwz.analysis.tiling import padded
+from bwz.analysis.stationarity import TileGrid, grid_for
 from bwz.graph.ops import ComputeGraph, GraphPhase, MatmulAttrs, Operation
 from bwz.report import OpResult, PhaseResult
 from bwz.spec.deployment import AStrategy, BDataflow
@@ -267,20 +267,34 @@ class PipelineTrace:
         return out
 
 
-def tile_count(op: Operation, machine: MachineModel) -> int:
-    """Weight tiles a matmul walks: ``ceil(K/rows) * ceil(N/cols)``.
+def grid_of(op: Operation, machine: MachineModel) -> TileGrid | None:
+    """The tile grid this machine's stationarity implies for *op* (D53).
 
-    The same decomposition ``systolic_utilisation`` costs, so a trace built from
-    it cannot disagree with the utilisation the report quotes. Returns 1 when the
-    profile declares no array geometry — there is then no tile to speak of.
+    ``None`` when there is nothing to tile — a non-matmul, or a profile that
+    declares no array geometry. Every caller that needs to know how the work is
+    cut up goes through here, so the trace, the utilisation term, the listing
+    and the renderers cannot disagree about the decomposition.
     """
     if not isinstance(op.attrs, MatmulAttrs):
-        return 1
+        return None
     dims = machine.unit.systolic_dims
     if dims is None:
-        return 1
+        return None
     rows, cols = dims
-    return (padded(op.attrs.k, rows) // rows) * (padded(op.attrs.n, cols) // cols)
+    return grid_for(machine.stationarity, op.attrs, rows, cols, k_partitions=machine.k_partitions)
+
+
+def tile_count(op: Operation, machine: MachineModel) -> int:
+    """Independent tiles a matmul walks, per the machine's stationarity (D53).
+
+    Weight-stationary walks ``ceil(K/rows) * ceil(N/cols)`` weight tiles;
+    output-stationary walks ``ceil(M/rows) * ceil(N/cols)`` result tiles and
+    sweeps K inside each. The same decomposition ``systolic_utilisation``
+    costs, so a trace built from it cannot disagree with the utilisation the
+    report quotes. Returns 1 when there is no array geometry to tile against.
+    """
+    grid = grid_of(op, machine)
+    return grid.tiles if grid is not None else 1
 
 
 def ntiles_per_kslice(op: Operation, machine: MachineModel) -> int:

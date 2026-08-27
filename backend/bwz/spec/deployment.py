@@ -17,6 +17,7 @@ from pydantic import Field, model_validator
 
 from bwz.spec.base import SpecModel
 from bwz.spec.dtypes import DType
+from bwz.spec.hardware_spec import Dataflow
 from bwz.spec.quantities import Bytes, Fraction, Seconds, Watts
 
 
@@ -178,6 +179,28 @@ class DeploymentSpec(SpecModel):
     num_chips: int = Field(default=1, gt=0)
     optimize_for: OptimizeFor = OptimizeFor.LATENCY
     constraints: Constraints = Constraints()
+    stationarity: Dataflow | None = Field(
+        default=None,
+        description=(
+            "Which operand stays resident, deciding the whole decomposition "
+            "(D53): input=A, weight=B, output=C. None uses the chip's own "
+            "declared dataflow, which for an NVIDIA/AMD matrix core is 'os' — "
+            "what cuBLAS does. Asking for one the unit cannot run is REFUSED "
+            "with feasible: false, not clamped: a clamp would silently answer a "
+            "different question than the one asked."
+        ),
+    )
+    split_k: int = Field(
+        default=1,
+        gt=0,
+        description=(
+            "Cut the contraction into this many independent slices, for when the "
+            "output grid alone cannot fill the chip. Only meaningful under "
+            "stationarity=os, where it is the one thing that makes a reduction "
+            "necessary; ws/is already put K on the grid. Costs CUTLASS's second "
+            "kernel — see report.assumptions (D53)."
+        ),
+    )
     a_strategy: AStrategy = AStrategy.STAGE
     b_dataflow: BDataflow = BDataflow.WRITE_AHEAD
     a_residency_tiles: int | None = Field(
