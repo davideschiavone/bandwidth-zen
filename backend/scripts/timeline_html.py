@@ -141,6 +141,7 @@ array-sized tiles, how many arrays take a wave of them at once, whether a tile h
 into the array before it can compute, and where the loads and stores sit around it. Every constant
 is read back out of the schedule drawn above, so this and the timeline cannot disagree.</p>
 {deployments}
+{programs}
 
 <h2 class="section">The arithmetic, operation by operation</h2>
 <p class="hint">Shapes, algebra, the flop count as an expression, and a loop nest that performs
@@ -476,6 +477,7 @@ def render(
     explanations: list[dict[str, str]],
     total_s: float,
     deployments: list[dict[str, str]] | None = None,
+    programs: list[dict[str, str]] | None = None,
     hint: str = "",
     banner: str = "",
 ) -> str:
@@ -523,6 +525,26 @@ def render(
         f'<pre class="deploy">{_escape(d["code"])}</pre>'
         for d in deployments or []
     )
+    # The whole section, heading included, is built here rather than sitting in
+    # the template: without --emit there is no program, and an empty "Run it
+    # yourself" heading would promise something the page does not carry.
+    programs_html = ""
+    if programs:
+        programs_html = (
+            '<h2 class="section">Run it yourself</h2>'
+            '<p class="hint">The same decomposition as a program you can run, edit and break '
+            "&mdash; the tile grid above, walked. It counts what it moves and checks those counts "
+            "against this page&rsquo;s own numbers, so it cannot narrate a schedule the model did "
+            "not cost. It validates <b>counts, not time</b>: timing it and comparing that to the "
+            "predicted latency is a category error. Written beside this file; regenerate with the "
+            "command in this page&rsquo;s footer, or with <code>bwz matmul --emit</code>.</p>"
+        ) + "".join(
+            f'<h3 class="deploy">{_escape(p["title"])}</h3>'
+            f'<p class="hint">Saved beside this page as <code>{_escape(p["filename"])}</code>; '
+            f"run it with <code>python {_escape(p['filename'])}</code>.</p>"
+            f'<pre class="deploy">{_escape(p["source"])}</pre>'
+            for p in programs
+        )
     return TEMPLATE.format(
         title=title,
         subtitle=subtitle,
@@ -531,6 +553,7 @@ def render(
         data=data,
         explanations=ops_html,
         deployments=deploy_html,
+        programs=programs_html,
         hint=hint,
         banner=f'<p class="banner">{banner}</p>' if banner else "",
     )

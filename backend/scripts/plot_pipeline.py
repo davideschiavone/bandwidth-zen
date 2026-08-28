@@ -59,11 +59,13 @@ from timeline_html import Box, render
 import bwz
 from bwz.analysis import analyze, idealised, machine_model
 from bwz.analysis.dataflow import DataflowPlan, plan_dataflow
-from bwz.analysis.pipeline import Lane, PipelineTrace, Span, Stage, build_trace
+from bwz.analysis.pipeline import Lane, PipelineTrace, Span, Stage, build_trace, grid_of
 from bwz.analysis.roofline import MATRIX_OP_TYPES, MachineModel, compute_dtype
 from bwz.analysis.stationarity import Dim, TileGrid
 from bwz.deploy import check as check_deployment
 from bwz.deploy import deployment_of
+from bwz.emit import EmittedProgram, emit_matmul
+from bwz.emit import check as check_program
 from bwz.explain import Explanation, explain_graph
 from bwz.graph import GraphPhase, build_graph, build_graphs
 from bwz.graph.ops import Operation
@@ -116,6 +118,12 @@ class Workload:
     """The machine this workload was analysed with, carrying the effective
     stationarity and split-K (D53). ``None`` where the defaults were used and a
     freshly derived model is identical."""
+    program: EmittedProgram | None = None
+    """The runnable version of this decomposition (D54), when ``--emit`` asked
+    for one. Built here rather than in the page so it comes from the same
+    ``Report``, grid and ``DataflowPlan`` the timeline is drawn from — a program
+    walking a different decomposition than the picture beside it would be worse
+    than no program at all."""
 
 
 @dataclass(frozen=True)
@@ -511,6 +519,38 @@ def _deployments(panels: list[Panel]) -> list[dict[str, str]]:
     return out
 
 
+def _programs(panels: list[Panel], out: Path) -> list[dict[str, str]]:
+    """Write each panel's runnable program beside the page, and carry its source.
+
+    Beside the HTML rather than inside it alone: the page is for reading, and the
+    point of D54 is that the thing can be *run*. Both, then — the file on disk to
+    run and the source in the page to read, from one ``EmittedProgram`` so the
+    two cannot differ.
+    """
+    written: list[dict[str, str]] = []
+    for panel in panels:
+        program = panel.work.program
+        if program is None:
+            continue
+        destination = out.parent / program.filename
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(program.source, encoding="utf-8")
+        print(f"wrote {destination}")
+        written.append(
+            {
+                "title": _program_title(panel, program),
+                "filename": program.filename,
+                "source": program.source,
+            }
+        )
+    return written
+
+
+def _program_title(panel: Panel, program: EmittedProgram) -> str:
+    """Chip, precision and decomposition — the three things that pick a file."""
+    return f"{panel.chip.name} — {panel.dtype.value} — {program.stationarity.value}"
+
+
 def _stationarity_banner(panels: list[Panel]) -> str:
     """The decomposition the timeline is of, for the page's banner strip (D53).
 
@@ -600,6 +640,7 @@ def write_html(panels: list[Panel], command: str, out: Path) -> None:
             for span in panel.work.trace.spans
         ],
         deployments=_deployments(panels),
+        programs=_programs(panels, out),
         total_s=total,
         hint=(
             " Rows are banded by chip and the time axis is <b>shared and absolute</b>, so a bar "
@@ -1073,6 +1114,7 @@ def build_matmul(
     iterations: int = 1,
     stationarity: Dataflow | None = None,
     split_k: int = 1,
+    emit_command: str | None = None,
 ) -> Workload:
     spec = matmul_kernel(m, n, k, a_dtype=dtype, b_dtype=dtype)
     deployment = DeploymentSpec.model_validate(
@@ -1118,6 +1160,25 @@ def build_matmul(
         dataflow=dataflow,
     )
     op = report.phases[0].ops[0]
+    program: EmittedProgram | None = None
+    if emit_command is not None:
+        grid = grid_of(graph.ops[0], machine)
+        assert grid is not None, "a matmul on a chip with declared array geometry"
+        program = emit_matmul(
+            chip,
+            machine,
+            grid,
+            dataflow,
+            op,
+            a_dtype=spec.a_dtype,
+            b_dtype=spec.b_dtype,
+            c_dtype=spec.result_dtype,
+            acc_dtype=deployment.precision.accumulate,
+            double_buffered=report.memory.double_buffered,
+            command=emit_command,
+            version=bwz.__version__,
+        )
+        check_program(program)
     return Workload(
         spec.name,
         trace,
@@ -1130,6 +1191,7 @@ def build_matmul(
         operation=graph.ops[0],
         dataflow=dataflow,
         machine=machine,
+        program=program,
     )
 
 
@@ -1426,6 +1488,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     output.add_argument("--out", type=Path, default=Path("../docs/plots"), help="Output directory")
     output.add_argument(
+        "--emit",
+        action="store_true",
+        help="Also write the decomposition as a runnable Python program next to the page, "
+        "and carry its source in a 'Run it yourself' section (matmul only, D54)",
+    )
+    output.add_argument(
         "--animate",
         action="store_true",
         help="Also write a self-contained DRAM->SRAM->Accelerator flow animation "
@@ -1501,6 +1569,12 @@ def _reject_flags_for_the_wrong_workload(
         args.iterations = 1 if args.iterations is None else args.iterations
         args.split_k = 1 if args.split_k is None else args.split_k
 
+    if args.emit and (args.model or args.encoder):
+        parser.error(
+            "--emit writes one matmul's loop nest as a program; a whole model would be a "
+            "program nobody can run on this machine. Drop --model/--encoder or drop --emit "
+            "(docs/CLI.md 2.6)"
+        )
     if args.animate and args.model:
         parser.error(
             "--animate does not support --model yet (only the default matmul and --encoder "
@@ -1557,6 +1631,7 @@ def main() -> None:
                 iterations=args.iterations,
                 stationarity=Dataflow(args.stationarity) if args.stationarity else None,
                 split_k=args.split_k,
+                emit_command=command if args.emit else None,
             )
         ]
 
