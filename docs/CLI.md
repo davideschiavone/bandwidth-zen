@@ -472,7 +472,10 @@ goes in it), or `-`.
 **What the file contains, in order.** The constants first — the shape from the command line, the
 chip from its profile, the strategy, then the grid those imply — each with a comment naming where
 its value came from and nothing anywhere that is a free parameter. Then a `PREDICTED` block, which
-is the report's own numbers. Then the runtime, and then the loop nest, which is the part to read:
+is the report's own numbers. Then the loop nest, which is the part to read. The runtime that makes
+it run — counted DRAM, the shared staging buffer, the lockstep wave loop — is at the **bottom**,
+against convention and deliberately: 400 lines of machinery between the constants and the walk
+would bury the thing you came for.
 
 ```python
 def run_tile(tile: int, dram: Dram, pad: Scratchpad) -> None:
