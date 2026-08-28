@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import shlex
+import sys
 from dataclasses import replace
 from datetime import UTC, datetime
 from enum import StrEnum
+from pathlib import Path
 
 import typer
 from pydantic import ValidationError
@@ -22,9 +25,11 @@ from bwz.analysis import (
 )
 from bwz.analysis.compare import head_to_head, prefill_crossover
 from bwz.analysis.dataflow import plan_dataflow
-from bwz.analysis.pipeline import Lane, PipelineTrace, build_trace
-from bwz.analysis.roofline import compute_dtype
+from bwz.analysis.pipeline import Lane, PipelineTrace, build_trace, grid_of
+from bwz.analysis.roofline import MachineModel, compute_dtype
 from bwz.analysis.stationarity import grid_for
+from bwz.emit import check as emit_check
+from bwz.emit import emit_matmul
 from bwz.graph import build_graph
 from bwz.graph.ops import GraphPhase, MatmulAttrs
 from bwz.kernels import encoder_layer_kernel, matmul_kernel
@@ -291,6 +296,78 @@ def _dataflow_options(
         "stationarity": stationarity,
         "split_k": split_k,
     }
+
+
+EMIT_SIZE_WARNING_BYTES = 1e9
+"""Working set above which ``--emit`` says so. It still emits: capping would be
+the tool deciding what a user may run on their own machine, and the number is in
+the emitted file's own docstring either way."""
+
+
+def _emit_program(
+    spec: MatmulSpec,
+    chip: HardwareSpec,
+    machine: MachineModel,
+    deployment: DeploymentSpec,
+    report: Report,
+    *,
+    target: str,
+) -> None:
+    """Write the matmul's decomposition out as a runnable program (D54).
+
+    Built from the objects this report was built from — the same graph, the same
+    :class:`DataflowPlan`, the same ``OpResult`` — so the program cannot walk a
+    decomposition the numbers above it do not come from. :func:`bwz.emit.check`
+    then asserts the source says what those objects say, before anything is
+    written; an emitter that wrote the wrong ``PREDICTED`` block would produce a
+    program that passes while checking the wrong thing.
+    """
+    graph = build_graph(spec, deployment, GraphPhase.STATIC)
+    op = graph.ops[0]
+    grid = grid_of(op, machine)
+    if grid is None:
+        console.print(
+            f"[red]bwz:[/red] {chip.id}: compute unit {machine.unit.name!r} declares no "
+            f"systolic_dims, so there is no tile grid to walk and nothing to emit. Pick a "
+            f"chip whose profile describes an array."
+        )
+        raise typer.Exit(code=1)
+    dataflow = plan_dataflow(
+        op, machine, chip, deployment, a_bytes=cost_of(op, graph.tensors).input_bytes
+    )
+    program = emit_matmul(
+        chip,
+        machine,
+        grid,
+        dataflow,
+        report.phases[0].ops[0],
+        a_dtype=spec.a_dtype,
+        b_dtype=spec.b_dtype,
+        c_dtype=spec.result_dtype,
+        acc_dtype=deployment.precision.accumulate,
+        double_buffered=report.memory.double_buffered,
+        command=shlex.join(["bwz", *sys.argv[1:]]),
+        version=bwz.__version__,
+    )
+    emit_check(program)
+
+    if target == "-":
+        # Nothing else may reach stdout in this mode: `--emit - | python -` is
+        # the documented way to run what was just emitted.
+        print(program.source, end="")
+        return
+
+    path = Path(target)
+    destination = path / program.filename if path.is_dir() else path
+    destination.write_text(program.source, encoding="utf-8")
+    console.print(f"\n[bold]Emitted[/bold] {destination}", highlight=False, soft_wrap=True)
+    console.print(f"  run it: [cyan]python {destination}[/cyan]", soft_wrap=True)
+    if program.working_set_bytes > EMIT_SIZE_WARNING_BYTES:
+        console.print(
+            f"  [yellow]note:[/yellow] its working set is "
+            f"{format_bytes(program.working_set_bytes)} of operands, allocated in full when "
+            f"you run it."
+        )
 
 
 STATIONARITY_HELP = (
@@ -637,6 +714,17 @@ def matmul(
         help="Show which resource is busy for how long",
         rich_help_panel=PANEL_OUTPUT,
     ),
+    emit: str | None = typer.Option(
+        None,
+        "--emit",
+        metavar="PATH",
+        help="Write this decomposition out as a RUNNABLE Python program: same tile "
+        "grid, same staging events, same core assignment, counting what it moves and "
+        "asserting those counts against this report (D54). PATH may be a file, a "
+        "directory (the default filename goes in it), or '-' for stdout — with '-' "
+        "nothing else is printed, so `--emit - | python -` works.",
+        rich_help_panel=PANEL_OUTPUT,
+    ),
     as_json: bool = typer.Option(
         False, "--json", help="Emit the raw Report as JSON", rich_help_panel=PANEL_OUTPUT
     ),
@@ -698,6 +786,13 @@ def matmul(
         stationarity=stationarity,
         k_partitions=split_k,
     )
+
+    if emit == "-":
+        # Stdout mode prints the program and nothing else, so `--emit - | python -`
+        # runs what was just emitted. The table would be a syntax error.
+        _emit_program(spec, _chip_for(chip, ideal), machine, deployment, report, target=emit)
+        return
+
     summary = report.summary
     assert summary is not None
     op = report.phases[0].ops[0]
@@ -842,6 +937,9 @@ def matmul(
     console.print(f"\n[bold]Assumptions[/bold] ({len(report.assumptions)})")
     for assumption in report.assumptions:
         console.print(f"  • {assumption}", highlight=False)
+
+    if emit is not None:
+        _emit_program(spec, _chip_for(chip, ideal), machine, deployment, report, target=emit)
 
 
 @app.command(name="encoder-layer")
