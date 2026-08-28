@@ -38,7 +38,7 @@ from bwz.emit import _harness
 from bwz.report import OpResult
 from bwz.spec.deployment import AStrategy, BDataflow
 from bwz.spec.dtypes import DType, accumulator_for, bytes_per_element, is_integer
-from bwz.spec.hardware_spec import Dataflow, HardwareSpec
+from bwz.spec.hardware_spec import ComputeUnit, Dataflow, HardwareSpec
 from bwz.units import format_bytes
 
 COMMENT_COLUMN = 40
@@ -397,30 +397,36 @@ def _constants(
         ),
         "",
         _rule("3. the strategy"),
+        "# Where each of these came from, since they come from four different",
+        "# places: a flag you passed, the default of one you did not, the chip's",
+        "# own declaration, or a capacity calculation. Only DEPTH is computed.",
         *_constant(
-            f'STATIONARITY = "{grid.stationarity.value}"',
-            f"{grid.resident.value} resident, {grid.swept_dim.value} swept",
+            f'STATIONARITY = "{grid.stationarity.value}"', *_stationarity_note(grid, dataflow, unit)
         ),
-        *_constant(
-            f"SPLIT_K = {grid.k_partitions}",
-            "CUTLASS's two kernels (D53)" if grid.k_partitions > 1 else "one kernel",
-        ),
-        *_constant(f'A_STRATEGY = "{dataflow.a_strategy.value}"', _a_strategy_note(dataflow)),
-        *_constant(
-            f"A_RESIDENCY_TILES = {dataflow.residency_tiles}",
-            f"tiles one staging serves, of the {dataflow.tiles_per_a_event}",
-            f"in a {dataflow.group_name}",
-        ),
+        *_constant(f"SPLIT_K = {grid.k_partitions}", *_split_k_note(grid)),
+        *_constant(f'A_STRATEGY = "{dataflow.a_strategy.value}"', *_a_strategy_note(dataflow)),
+        *_constant(f"A_RESIDENCY_TILES = {dataflow.residency_tiles}", *_residency_note(dataflow)),
         *_constant(
             f'B_DATAFLOW = "{dataflow.b_dataflow.value}"',
-            _b_dataflow_note(dataflow, unit.weight_sets),
+            *_b_dataflow_note(dataflow, unit.weight_sets),
         ),
         *_constant(
-            f"ITERATIONS = {dataflow.iterations}", "invocations the report's bytes stand for"
+            f"ITERATIONS = {dataflow.iterations}",
+            _flag("--iterations", str(dataflow.iterations), is_default=dataflow.iterations == 1)
+            + ": invocations the report's",
+            "bytes stand for. Only b_dataflow=persistent reads it",
         ),
         *_constant(
             f"DEPTH = {2 if double_buffered else 1}",
-            "capacity fits two tiles" if double_buffered else "no room for a second tile",
+            "COMPUTED, not asked for: on-chip capacity fits two"
+            if double_buffered
+            else "COMPUTED: no room for a second tile, so the report's",
+            "tiles, so the report's latency is max(load, compute)"
+            if double_buffered
+            else "latency is load + compute rather than the max (D5a)",
+            "rather than their sum (D5a). Annotated here, not executed."
+            if double_buffered
+            else "Annotated here, not executed: this counts bytes.",
         ),
         "",
         _rule("4. the grid"),
@@ -491,7 +497,7 @@ def _accumulator_note(operand: DType) -> tuple[str, ...]:
     return (
         "what cuBLAS accumulates in by default",
         "(CUBLAS_COMPUTE_32F). fp16 accumulate is a real mode and",
-        "not modelled here; bf16 and tf32 have no narrower one at all",
+        "not modelled here; bf16 and tf32 have no narrower one",
     )
 
 
@@ -499,12 +505,88 @@ def _tile_of(dim: Dim) -> str:
     return "COLS" if dim is Dim.N else "ROWS"
 
 
-def _a_strategy_note(dataflow: DataflowPlan) -> str:
+def _flag(name: str, value: str, *, is_default: bool) -> str:
+    """How a strategy constant got its value, in one phrase.
+
+    The distinction the emitted file has to keep is between *you asked for this*
+    and *nobody asked, this is the default* — they look identical in the value
+    and mean different things to a reader deciding what to try next (D57).
+    """
+    return f"{name}, not passed" if is_default else f"{name} {value}"
+
+
+def _stationarity_note(
+    grid: TileGrid, dataflow: DataflowPlan, unit: ComputeUnit
+) -> tuple[str, ...]:
+    """Where the decomposition came from: the chip, or the command line."""
+    what = f"{grid.resident.value} resident, {grid.swept_dim.value} swept"
+    if dataflow.requested_stationarity is None:
+        return (
+            f"{unit.name}'s OWN declared dataflow, not a choice made",
+            f"here: {what}, straight off the chip profile.",
+            "--stationarity picks another the unit declares; one it",
+            "does not is refused, never clamped — it would be a",
+            "different decomposition, not a slower one (D53)",
+        )
+    return (
+        f"--stationarity {grid.stationarity.value}, requested: {what}.",
+        f"{unit.name} declares it, or the run would have been",
+        "refused rather than quietly given the chip's own (D53)",
+    )
+
+
+def _split_k_note(grid: TileGrid) -> tuple[str, ...]:
+    """Where the split factor came from — which is never a search."""
+    if grid.k_partitions > 1:
+        return (
+            f"--split-k {grid.k_partitions}: the contraction is cut that many",
+            "ways, so its partials cross DRAM and CUTLASS's second",
+            "kernel sums them (D53). Chosen by you, not searched for",
+        )
+    return (
+        "--split-k, not passed. NOT computed: nothing here looks",
+        "for a good split factor — the flag selects, it does not",
+        "optimise (D53). 1 means one GEMM kernel and no reduction",
+    )
+
+
+def _a_strategy_note(dataflow: DataflowPlan) -> tuple[str, ...]:
+    """Where A's strategy came from, including a clamp if there was one."""
+    if dataflow.a_requested is not dataflow.a_strategy:
+        return (
+            f"--a-strategy {dataflow.a_requested.value} did not fit and was",
+            f"clamped to {dataflow.a_strategy.value} — the header says why (D36)",
+        )
+    flag = _flag(
+        "--a-strategy", dataflow.a_strategy.value, is_default=dataflow.a_strategy is AStrategy.STAGE
+    )
     if dataflow.a_strategy is AStrategy.STREAM:
-        return f"re-read per tile (D31): {dataflow.tiles_per_a_event}x the staged total"
+        return (
+            f"{flag}: A is re-read per tile (D31),",
+            f"{dataflow.tiles_per_a_event}x the staged total",
+        )
     if dataflow.a_strategy is AStrategy.WHOLE:
-        return "ramped in before wave 0; same bytes as stage"
-    return f"staged once per {dataflow.group_name} (D33)"
+        return (f"{flag}: ramped in before wave 0;", "the same bytes as stage, only earlier (D33)")
+    return (f"{flag}:", f"A is staged once per {dataflow.group_name} (D33)")
+
+
+def _residency_note(dataflow: DataflowPlan) -> tuple[str, ...]:
+    """Where the residency came from: the strategy, the default, or an override."""
+    if dataflow.a_strategy is AStrategy.STREAM:
+        return (
+            "1 by construction: stream fetches per tile (D31), so",
+            "one staging event serves exactly one tile",
+        )
+    if dataflow.residency_tiles == dataflow.tiles_per_a_event:
+        tiles = dataflow.tiles_per_a_event
+        return (
+            f"default: one staging serves this {dataflow.group_name}'s",
+            f"{tiles} tile{'s' if tiles != 1 else ''}, so A crosses DRAM once (D33)",
+        )
+    return (
+        f"--a-residency-tiles: {dataflow.residency_tiles} of the {dataflow.group_name}'s",
+        f"{dataflow.tiles_per_a_event}, clamped to a power-of-2 divisor (D36)",
+    )
 
 
 def _sub_cycles(machine: MachineModel) -> int:
@@ -519,14 +601,28 @@ def _sub_cycles(machine: MachineModel) -> int:
     return round(1 / multiplier) if 0 < multiplier < 1 else 1
 
 
-def _b_dataflow_note(dataflow: DataflowPlan, weight_sets: int) -> str:
+def _b_dataflow_note(dataflow: DataflowPlan, weight_sets: int) -> tuple[str, ...]:
+    """Where B's placement came from, and whether it means anything here."""
+    if dataflow.b_requested is not dataflow.b_dataflow:
+        return (
+            f"--b-dataflow {dataflow.b_requested.value} did not fit and was",
+            f"clamped to {dataflow.b_dataflow.value} — the header says why (D36)",
+        )
+    flag = _flag(
+        "--b-dataflow",
+        dataflow.b_dataflow.value,
+        is_default=dataflow.b_dataflow is BDataflow.WRITE_AHEAD,
+    )
     if weight_sets <= 1:
-        return "moot: the array stores no weights (D30)"
+        return (
+            flag + ", and moot here: this array stores",
+            "no weights, so there is no write to place (D30)",
+        )
     if dataflow.b_dataflow is BDataflow.ON_DEMAND:
-        return "exposed at compute (D33) — timing only"
+        return (f"{flag}:", "the write is exposed at compute (D33) — timing only")
     if dataflow.b_dataflow is BDataflow.PERSISTENT:
-        return "written once, never displaced (D33)"
-    return "a wave early, behind compute (D33)"
+        return (f"{flag}:", "written once into the array, never displaced (D33)")
+    return (f"{flag}:", "the write lands a wave early, behind compute (D33)")
 
 
 _ACC_MANTISSA_BITS: dict[DType, int] = {

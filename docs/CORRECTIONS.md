@@ -2617,3 +2617,62 @@ its own question; it is not this one.
 accumulates in a float, so a future entry cannot break the rule); `tests/unit/test_emit.py` pins
 that an int8 program says `int32` and carries the integer rationale, that a float one says `fp32`
 and does *not* claim fp16 accumulate is impossible, and that the override still works.
+
+
+---
+
+## D57 — Section 3 said what a constant meant, not where it came from (2026-08-28)
+
+The user, reading an emitted program: *"is `SPLIT_K = 1  # one kernel` hardwired when launching
+`bwz matmul --m 16 --n 16 --k 16 --chip a100_80gb --ideal --pipeline --emit .`? is this calculated?
+can you write in the comment next to it how?"*
+
+**It is not calculated.** It is the default of `--split-k`, a flag that was not passed. Nothing in
+this engine searches for a good split factor — D53's own closing list says so: *"auto-selecting the
+best stationarity or split-K factor remains M8 work — the flags select, they do not search."* The
+old comment, `# one kernel`, was true and answered a different question.
+
+**The inconsistency behind it.** D54 required every constant in the emitted file to carry a comment
+naming where its value came from, and `test_every_constant_carries_a_comment` enforces that a comment
+*exists*. Sections 1, 2 and 4 named an origin — `-M / -N / -K`, `systolic_dims`,
+`count: tensor_core`, `ceil(M / ROWS)`. **Section 3 named a meaning instead**, and section 3 is the
+one where origin matters most, because its seven constants come from four genuinely different
+places:
+
+| | example | what it is |
+|---|---|---|
+| a flag you passed | `--split-k 4` | your choice |
+| the default of one you did not | `--split-k, not passed` | nobody's choice |
+| the chip's own declaration | `tensor_core's OWN declared dataflow` | not yours to pick, only to override |
+| a **clamp** of what you asked | `--a-strategy whole did not fit` | your choice, overruled |
+| genuinely computed | `DEPTH` | from on-chip capacity |
+
+Reading `SPLIT_K = 1` and `DEPTH = 2` side by side, nothing said that one was an unset flag and the
+other a capacity calculation.
+
+### What the section says now
+
+```
+SPLIT_K = 1               # --split-k, not passed. NOT computed: nothing here looks
+                          # for a good split factor — the flag selects, it does not
+                          # optimise (D53). 1 means one GEMM kernel and no reduction
+...
+DEPTH = 2                 # COMPUTED, not asked for: on-chip capacity fits two
+                          # tiles, so the report's latency is max(load, compute)
+                          # rather than their sum (D5a). Annotated here, not executed.
+```
+
+with a header over the block naming the four origins, so the distinction is stated once rather than
+inferred seven times. A clamp names the request it overruled — `--a-strategy whole did not fit and
+was clamped to stage` — because a reader whose flag did nothing otherwise has no thread to pull;
+the full reason is already in the file's own header, from `DataflowPlan.notes`.
+
+`"--iterations's default"` was the phrasing that killed the possessive form: every default now reads
+`<flag>, not passed`, which is both uniform and more direct about the fact that nobody chose it.
+
+### Scope
+
+Comment text only — no value, no count and no assertion changed, and the D54 output block
+`docs/CLI.md` §2.6 quotes verbatim is unaffected because it is the *program's* output, not its
+source. Three tests were added: that section 3 names its four origins, that a passed flag reads
+differently from an unpassed one, and that a clamped knob names what was asked for.

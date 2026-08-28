@@ -393,3 +393,46 @@ def test_the_accumulator_follows_the_wider_operand() -> None:
     program, _report, machine, *_ = _emit("a100_80gb", dtype="int8")
     assert machine.dtype is DType.INT8
     assert constants_of(program.source)["ACC_DTYPE"] == "int32"
+
+
+# ----------------------------------------------------- where a constant came from
+
+
+def test_the_strategy_constants_name_their_provenance() -> None:
+    """Section 3's values come from four different places, and say which (D57).
+
+    The user's question was "is SPLIT_K = 1 hardwired, or calculated?" — which the
+    old comment ("one kernel") could not answer, because it described the
+    *consequence* of the value rather than its origin. Sections 1, 2 and 4 had
+    always named an origin; section 3 was the one that did not.
+    """
+    program, *_ = _emit("a100_80gb")
+    section = program.source[
+        program.source.index("3. the strategy") : program.source.index("4. the grid")
+    ]
+    assert "--split-k, not passed" in section
+    assert "NOT computed" in section, "nothing searches for a split factor (D53)"
+    assert "OWN declared dataflow" in section, "stationarity is the chip's, not a choice"
+    assert "COMPUTED, not asked for" in section, "DEPTH is the one that is calculated"
+
+
+def test_a_flag_that_was_passed_reads_differently_from_one_that_was_not() -> None:
+    """A flag you passed and one you did not look identical in the value alone."""
+    default, *_ = _emit("a100_80gb")
+    asked, *_ = _emit("a100_80gb", split_k=4)
+    assert "--split-k, not passed" in default.source
+    assert "--split-k 4" in asked.source
+    assert "Chosen by you, not searched for" in asked.source
+
+
+def test_a_clamped_knob_says_what_was_asked_for() -> None:
+    """A value that is not the one requested must not read as if it were (D36).
+
+    `whole` that does not fit the scratchpad falls back to `stage` — same bytes,
+    different timing — and the constant has to name the request, or a reader
+    checking why their flag did nothing has no thread to pull.
+    """
+    program, *_ = _emit("metis_aipu", (8192, 8192, 8192), "int8", a_strategy="whole")
+    assert constants_of(program.source)["A_STRATEGY"] == "stage"
+    assert "--a-strategy whole did not fit" in program.source
+    assert "clamped to stage" in program.source
