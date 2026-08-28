@@ -2676,3 +2676,68 @@ Comment text only — no value, no count and no assertion changed, and the D54 o
 `docs/CLI.md` §2.6 quotes verbatim is unaffected because it is the *program's* output, not its
 source. Three tests were added: that section 3 names its four origins, that a passed flag reads
 differently from an unpassed one, and that a clamped knob names what was asked for.
+
+
+---
+
+## D58 — `DEPTH = 2` is a yes/no, and the comment called it a measurement (2026-08-28)
+
+The user, on a 16x16x16 matmul: *"`DEPTH = 2  # ... on-chip capacity fits two tiles` — why does it
+fit only two tiles for such a small matmul?"*
+
+It does not fit two. It fits **118 624**. A100 declares 60.7 MB of L1 and a 16x16 fp16 working tile
+is 512 B:
+
+```
+on-chip capacity           60,736,000 B
+resident weights                  512 B
+spare                      60,735,488 B
+one working tile                  512 B   (ROWS*COLS*2)
+tiles that fit                118,624
+```
+
+`report.memory.double_buffered` is a **bool**, and `double_buffering_fits` asks
+`spare >= 2 * working_tile` — *at least* two, because two is what overlapping one tile's load with
+the previous tile's compute requires. The cost model has exactly two states,
+`max(load, compute)` or `load + compute` (D5a); there is no DEPTH 3 to report however much capacity
+there is. Rendering the bool as the number `2` and captioning it "capacity fits two tiles" turned a
+threshold into a measurement, and invited precisely the question it should have answered.
+
+### What it says now
+
+```
+DEPTH = 2   # DERIVED, and a yes/no dressed as a number: the model asks
+            # only whether capacity holds TWO 16x16 tiles at once —
+            # what overlapping one load with one compute needs — not how
+            # many it would really hold, which here is ~118,625 before
+            # anything else is resident. There is no DEPTH 3: latency is
+            # max(load, compute) or their sum, nothing between (D5a).
+            # Not read below; this program counts bytes, not time.
+```
+
+The headroom quoted is `ON_CHIP_BYTES` over one `ROWS x COLS` tile — **all three already constants
+on the page**, so a reader can check the claim without leaving the file. It is deliberately *not*
+the planner's own spare, which subtracts resident weights and activations and which no constant here
+exposes; recomputing that in the emitter would be a second copy of `analysis/memory.py`'s arithmetic,
+free to drift, which is the failure D53 spent a session on. The wording says "before anything else is
+resident" rather than implying otherwise.
+
+`DEPTH` is also declared and never read — the fidelity table already lists double buffering as
+written-down-only, since it is a claim about *time* and this program counts bytes — so the comment
+now says so on the line itself.
+
+### The pattern behind three questions in a row
+
+D56, D57 and D58 all came from the user reading one emitted file and asking where a constant came
+from. All three found a comment describing something *adjacent* to the value: `ACC_DTYPE` named a
+deployment field whose default was wrong for the dtype, `SPLIT_K` named a consequence instead of an
+origin, `DEPTH` named a measurement instead of a threshold. One was a real model bug (D56); two were
+comments alone.
+
+The common cause is that D54 required every constant to *carry* a comment, and
+`test_every_constant_carries_a_comment` enforces that one exists — but nothing enforced that it
+describes where the value came from. The tests added across D57 and D58 check specific phrasings,
+which is weaker than a general rule and is the honest state of it: there is no way to assert that
+prose is true, only that the particular claims a reader challenged are still there.
+
+Comment text only; no value, count or assertion moved.

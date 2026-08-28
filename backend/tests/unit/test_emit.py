@@ -413,7 +413,7 @@ def test_the_strategy_constants_name_their_provenance() -> None:
     assert "--split-k, not passed" in section
     assert "NOT computed" in section, "nothing searches for a split factor (D53)"
     assert "OWN declared dataflow" in section, "stationarity is the chip's, not a choice"
-    assert "COMPUTED, not asked for" in section, "DEPTH is the one that is calculated"
+    assert "DERIVED, and a yes/no" in section, "DEPTH is the one the engine works out"
 
 
 def test_a_flag_that_was_passed_reads_differently_from_one_that_was_not() -> None:
@@ -436,3 +436,53 @@ def test_a_clamped_knob_says_what_was_asked_for() -> None:
     assert constants_of(program.source)["A_STRATEGY"] == "stage"
     assert "--a-strategy whole did not fit" in program.source
     assert "clamped to stage" in program.source
+
+
+def test_depth_is_a_yes_no_not_a_capacity_measurement() -> None:
+    """`report.memory.double_buffered` is a bool, and DEPTH renders it (D58).
+
+    The comment used to read "on-chip capacity fits two tiles", which invited
+    exactly the right question on a 16-cubed matmul: A100's 60.7 MB against a
+    512 B tile holds well over a hundred thousand of them. The model only ever
+    asks whether it holds *at least* two, because two is what overlapping one
+    load with one compute needs and there is no third state (D5a).
+    """
+    program, *_ = _emit("a100_80gb", (16, 16, 16))
+    assert constants_of(program.source)["DEPTH"] == 2
+    assert "yes/no dressed as a number" in program.source
+    assert "There is no DEPTH 3" in program.source
+    assert "capacity fits two tiles" not in program.source, "the wording that caused D58"
+    # The headroom quoted must be checkable from constants already on the page —
+    # that is the whole reason it is ON_CHIP_BYTES over a tile and not the
+    # planner's own spare, which no constant here exposes.
+    numbers = {
+        name: value
+        for name, value in constants_of(program.source).items()
+        if isinstance(value, int | float)
+    }
+    tile = numbers["ROWS"] * numbers["COLS"] * numbers["A_BYTES_PER_ELEMENT"]
+    assert f"~{int(numbers['ON_CHIP_BYTES'] / tile):,}" in program.source
+
+
+def test_depth_one_says_the_loads_serialise() -> None:
+    """The other branch, on a chip whose SRAM cannot hold two tiles.
+
+    No shipped profile produces it at any shape, so the levels are shrunk
+    directly — the same forging ``test_deploy`` used for this case before D54.
+    """
+    base = load_chip("a100_80gb")
+    chip = base.model_copy(
+        update={
+            "memory": [
+                level.model_copy(update={"capacity_bytes": 300})
+                if level.name != base.dram.name
+                else level
+                for level in base.memory
+            ]
+        }
+    )
+    program, report, *_ = _emit(shape=(600, 600, 600), chip=chip)
+    assert report.memory.double_buffered is False, "the shrink must actually flip this"
+    assert constants_of(program.source)["DEPTH"] == 1
+    assert "does NOT hold two" in program.source
+    assert "their SUM" in program.source

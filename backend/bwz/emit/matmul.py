@@ -399,7 +399,8 @@ def _constants(
         _rule("3. the strategy"),
         "# Where each of these came from, since they come from four different",
         "# places: a flag you passed, the default of one you did not, the chip's",
-        "# own declaration, or a capacity calculation. Only DEPTH is computed.",
+        "# own declaration, or a capacity test. Only DEPTH is derived, and it is",
+        "# a yes/no rather than a measurement — see its own comment.",
         *_constant(
             f'STATIONARITY = "{grid.stationarity.value}"', *_stationarity_note(grid, dataflow, unit)
         ),
@@ -418,15 +419,7 @@ def _constants(
         ),
         *_constant(
             f"DEPTH = {2 if double_buffered else 1}",
-            "COMPUTED, not asked for: on-chip capacity fits two"
-            if double_buffered
-            else "COMPUTED: no room for a second tile, so the report's",
-            "tiles, so the report's latency is max(load, compute)"
-            if double_buffered
-            else "latency is load + compute rather than the max (D5a)",
-            "rather than their sum (D5a). Annotated here, not executed."
-            if double_buffered
-            else "Annotated here, not executed: this counts bytes.",
+            *_depth_note(chip, machine, rows, cols, double_buffered),
         ),
         "",
         _rule("4. the grid"),
@@ -498,6 +491,44 @@ def _accumulator_note(operand: DType) -> tuple[str, ...]:
         "what cuBLAS accumulates in by default",
         "(CUBLAS_COMPUTE_32F). fp16 accumulate is a real mode and",
         "not modelled here; bf16 and tf32 have no narrower one",
+    )
+
+
+def _depth_note(
+    chip: HardwareSpec, machine: MachineModel, rows: int, cols: int, double_buffered: bool
+) -> tuple[str, ...]:
+    """Why DEPTH is 2, which is *not* "capacity fits exactly two tiles".
+
+    ``report.memory.double_buffered`` is a **bool**: the planner asks whether
+    spare capacity holds *at least* two working tiles, because two is what
+    overlapping one load with one compute requires, and the cost model has
+    exactly two states — ``max(load, compute)`` or ``load + compute`` (D5a).
+    There is no DEPTH 3 to report even when capacity would hold thousands, and a
+    comment reading "capacity fits two tiles" invited exactly the question it
+    should have answered (D58).
+
+    The headroom quoted is ``ON_CHIP_BYTES`` over one ``ROWS x COLS`` tile — both
+    already constants on the page, so a reader can check it — and is deliberately
+    *before* the planner's subtraction for resident weights and activations,
+    which is what the real test uses (``analysis/memory.py``).
+    """
+    tile = rows * cols * bytes_per_element(machine.dtype)
+    held = int(chip.on_chip_capacity_bytes / tile) if tile > 0 else 0
+    if not double_buffered:
+        return (
+            "DERIVED, and a yes/no: spare capacity does NOT hold two",
+            f"{rows}x{cols} tiles at once, so a load cannot overlap the",
+            "compute before it and the report's latency is their SUM,",
+            "not max(load, compute) (D5a). Not read below.",
+        )
+    return (
+        "DERIVED, and a yes/no dressed as a number: the model asks",
+        f"only whether capacity holds TWO {rows}x{cols} tiles at once —",
+        "what overlapping one load with one compute needs — not how",
+        f"many it would really hold, which here is ~{held:,} before",
+        "anything else is resident. There is no DEPTH 3: latency is",
+        "max(load, compute) or their sum, nothing between (D5a).",
+        "Not read below; this program counts bytes, not time.",
     )
 
 
