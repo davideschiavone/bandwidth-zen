@@ -14,6 +14,7 @@ from __future__ import annotations
 import ast
 import re
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -23,7 +24,7 @@ from bwz.analysis.pipeline import grid_of
 from bwz.emit import check, constants_of, default_filename, emit_matmul, predicted_for
 from bwz.graph import GraphPhase, build_graph
 from bwz.operators.base import cost_of
-from bwz.spec import DeploymentSpec, DType, MatmulSpec, load_chip
+from bwz.spec import DeploymentSpec, DType, MatmulSpec, largest_declared_array, load_chip
 from bwz.spec.hardware_spec import Dataflow, HardwareSpec
 
 SHAPE = (64, 64, 128)
@@ -486,3 +487,19 @@ def test_depth_one_says_the_loads_serialise() -> None:
     assert constants_of(program.source)["DEPTH"] == 1
     assert "does NOT hold two" in program.source
     assert "their SUM" in program.source
+
+
+def test_the_thread_warning_bar_comes_from_the_profiles(tmp_path: Path) -> None:
+    """`LARGEST_DECLARED_CORES` is read off the profiles, not picked (D59).
+
+    It replaced a hardcoded 2048, which was 3.9x above anything any profile
+    declares and 60x below the host limit that would actually bite — so it fired
+    for nothing real and meant nothing when it fired.
+    """
+    program, *_ = _emit("a100_80gb")
+    count, where = largest_declared_array()
+    assert constants_of(program.source)["LARGEST_DECLARED_CORES"] == count
+    assert where in program.source, "the remark names which profile set the bar"
+    assert "2048" not in program.source
+    # And it is wired through, not merely declared.
+    assert "warn_above=LARGEST_DECLARED_CORES" in program.source

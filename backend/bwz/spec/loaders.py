@@ -228,6 +228,28 @@ def iter_chips() -> Iterator[HardwareSpec]:
         yield load_chip(chip_id)
 
 
+def largest_declared_array() -> tuple[int, str]:
+    """The biggest array any bundled profile declares: ``(count, "chip.unit")``.
+
+    The reference point for "more cores than anything real asks for" (D59). It is
+    read off the profiles rather than guessed, so it moves when a profile with a
+    bigger array is added and cannot quietly become stale — ``test_profiles.py``
+    pins the current value so that addition is noticed.
+
+    **Array units only.** A unit with no ``systolic_dims`` has no tile grid, so
+    nothing that counts cores against it is ever emitted (``bwz.emit`` refuses
+    it); counting MI300X's 19 456 vector lanes here would set the bar against a
+    population that cannot occur.
+    """
+    candidates = [
+        (unit.count, f"{chip.id}.{unit.name}")
+        for chip in iter_chips()
+        for unit in chip.compute_units
+        if unit.systolic_dims is not None
+    ]
+    return max(candidates) if candidates else (1, "none")
+
+
 def iter_models() -> Iterator[AnyModelSpec]:
     """Every bundled model profile, in id order."""
     for model_id in available_models():

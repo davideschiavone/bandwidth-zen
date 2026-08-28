@@ -2741,3 +2741,67 @@ which is weaker than a general rule and is the honest state of it: there is no w
 prose is true, only that the particular claims a reader challenged are still there.
 
 Comment text only; no value, count or assertion moved.
+
+
+---
+
+## D59 — The thread-count remark fired at a number nobody chose (2026-08-28)
+
+The user, on the emitted harness: *"why is there a specific check on 2048?"*
+
+There was no reason. D54-CONTINUE said *"432 threads is unremarkable on Linux; the largest shipped
+profile is H100's 528. Warn, do not cap, above a few thousand"*, and "a few thousand" got rounded to
+a power of two. Measured against anything real it is meaningless in both directions:
+
+```
+array 'count' across every shipped profile:
+    528  h100_sxm.tensor_core      <- the largest that can ever become USED_CORES
+    432  a100_80gb.tensor_core
+    304  mi300x.matrix_core
+     64  jetson_orin.tensor_core
+      4  metis_aipu.d_imc / chip_a.npu_core
+      1  chip_b.npu_core
+
+this host:  ulimit -u 126,394   ·   threads-max 252,789
+```
+
+2048 is **3.9x above** anything a bundled profile can ask for and **62x below** the limit that would
+actually bite. It could only fire for a hand-written profile, and when it fired it said nothing
+useful — not "you are near a limit", just "this is a lot, by a standard nobody set".
+
+CLAUDE.md #2 does not literally cover it: it is not a calibration constant, it touches no predicted
+number, and it *cannot* live in `calibration.py` because `_harness.py` imports nothing from `bwz`
+(it is inlined into standalone programs). The spirit applies anyway — an unexplained magic number
+that looks derived and is not.
+
+### Derived from the profiles instead
+
+`spec.loaders.largest_declared_array()` returns the biggest array any bundled profile declares,
+`(528, "h100_sxm.tensor_core")`. The emitter reads it and writes it into the file as a constant with
+its provenance, and `run_waves` takes it as `warn_above` rather than hardcoding a bar:
+
+```
+LARGEST_DECLARED_CORES = 528            # the biggest array any bundled profile declares
+                                        # (h100_sxm.tensor_core). Only used to decide whether
+                                        # starting one thread per core is worth remarking on
+```
+
+```
+note: starting 4,096 threads, one per modelled core — more than the largest array any
+profile here declares (528, h100_sxm.tensor_core). Not capped to this host's CPUs on
+purpose; see the docstring above.
+```
+
+The remark now says something true and specific: you are past everything this repository describes.
+It is still **not a limit** — nothing is capped, which was the whole point of D54's trap 2.
+
+**Array units only.** MI300X declares 19 456 vector lanes and H100 16 896 CUDA cores, but a unit
+with no `systolic_dims` has no tile grid and `bwz.emit` refuses it, so those can never become
+`USED_CORES`. Counting them would set the bar against a population that cannot occur and the remark
+would never fire for anything.
+
+**Pinned, so it cannot go stale the way 2048 did.** `test_profiles.py` asserts the pair is
+`(528, "h100_sxm.tensor_core")`, so adding a profile with a bigger array fails there and the author
+re-reads the emitted constant rather than absorbing the change silently. A second test asserts the
+figure ignores geometry-less units, since that is the part a future reader is most likely to
+"simplify".

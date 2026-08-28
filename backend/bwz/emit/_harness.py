@@ -512,6 +512,9 @@ def run_waves(
     tiles: int,
     counters: Counters,
     run_tile: Callable[[int], None],
+    *,
+    warn_above: int = 0,
+    warn_source: str = "",
 ) -> None:
     """Run *tiles* tiles as *waves* lockstep waves across *used_cores* cores.
 
@@ -525,11 +528,22 @@ def run_waves(
     count: this program is about structure, not speed, and a
     modelled-core-to-host-thread mapping would be a third concept with no
     counterpart in the model.
+
+    *warn_above* is the core count past which that choice is worth remarking on,
+    and the emitter derives it from the profiles rather than inventing a round
+    number: it is the largest array any of them declares (D59). 0 disables the
+    remark. It is not a limit — nothing here caps anything.
     """
-    if used_cores > 2048:
+    if warn_above and used_cores > warn_above:
+        # The bar is the largest array any bundled profile declares, passed in
+        # by the emitter — not a round number picked here (D59). Above it you
+        # are past anything the repository describes, which is worth saying
+        # once; it is not a limit, and nothing is capped.
         print(
-            f"note: starting {used_cores:,} threads, one per modelled core. "
-            f"Not capped to this host's CPUs on purpose — see the docstring.",
+            f"note: starting {used_cores:,} threads, one per modelled core — more "
+            f"than the largest array any profile here declares ({warn_above:,}, "
+            f"{warn_source}). Not capped to this host's CPUs on purpose; see the "
+            f"docstring above."
         )
     barrier = threading.Barrier(used_cores)
     failures: list[BaseException] = []

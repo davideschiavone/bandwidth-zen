@@ -16,6 +16,8 @@ from bwz.spec import (
     HardwareSpec,
     available_chips,
     available_models,
+    iter_chips,
+    largest_declared_array,
     load_chip,
     load_model,
     profiles_root,
@@ -193,3 +195,33 @@ def test_to_document_omits_nothing_that_matters() -> None:
     assert document["id"] == "chip_a"
     assert "source_url" not in document, "chip_a has none; exclude_none should drop it"
     assert document["hypothetical"] is True
+
+
+def test_the_largest_declared_array_is_h100s() -> None:
+    """Pinned so that adding a bigger array is noticed, not absorbed (D59).
+
+    ``largest_declared_array`` is a *reference point*, not a limit: the emitted
+    program quotes it to decide whether starting one OS thread per modelled core
+    is worth remarking on. Deriving it from the profiles is what keeps it from
+    going stale the way the hardcoded 2048 it replaced had — but only if a new,
+    larger profile fails here and the author re-reads the emitted constant.
+    """
+    count, where = largest_declared_array()
+    assert (count, where) == (528, "h100_sxm.tensor_core")
+
+
+def test_the_largest_array_ignores_units_with_no_geometry() -> None:
+    """MI300X declares 19 456 vector lanes; they can never become USED_CORES.
+
+    ``bwz.emit`` refuses a unit without ``systolic_dims`` — no tile grid, nothing
+    to walk — so counting those lanes would set the bar against a population that
+    cannot occur, and the remark would then never fire for anything real.
+    """
+    biggest_of_any_kind = max(unit.count for chip in iter_chips() for unit in chip.compute_units)
+    assert biggest_of_any_kind > largest_declared_array()[0], "the two must differ"
+    assert all(
+        unit.systolic_dims is not None
+        for chip in iter_chips()
+        for unit in chip.compute_units
+        if unit.count == largest_declared_array()[0] and unit.name in largest_declared_array()[1]
+    )

@@ -39,6 +39,7 @@ from bwz.report import OpResult
 from bwz.spec.deployment import AStrategy, BDataflow
 from bwz.spec.dtypes import DType, accumulator_for, bytes_per_element, is_integer
 from bwz.spec.hardware_spec import ComputeUnit, Dataflow, HardwareSpec
+from bwz.spec.loaders import largest_declared_array
 from bwz.units import format_bytes
 
 COMMENT_COLUMN = 40
@@ -391,6 +392,12 @@ def _constants(
             "annotated here and never executed",
         ),
         *_constant(
+            f"LARGEST_DECLARED_CORES = {_largest_array()[0]}",
+            "the biggest array any bundled profile declares",
+            f"({_largest_array()[1]}). Only used to decide whether",
+            "starting one thread per core is worth remarking on",
+        ),
+        *_constant(
             f"SLOTS_PER_MMA = {rows * rows * cols:_}",
             "ROWS * ROWS * COLS — MAC positions one",
             "instruction tile issues, used or not (D52)",
@@ -471,6 +478,16 @@ def _constants(
         out.append(f'    "{key}": {rendered},')
     out.append("}")
     return out
+
+
+def _largest_array() -> tuple[int, str]:
+    """The biggest array any bundled profile declares, cached for one emission.
+
+    Read from the profiles rather than hardcoded, so the bar moves with the
+    repository instead of going stale (D59). Cached because emitting a comparison
+    page calls this once per chip and it walks every profile on disk.
+    """
+    return largest_declared_array()
 
 
 def _accumulator_note(operand: DType) -> tuple[str, ...]:
@@ -1064,7 +1081,11 @@ def _main(
         ]
     lines += [
         "",
-        f"    run_waves(USED_CORES, WAVES, TILES, counters, lambda tile: {call})",
+        "    run_waves(",
+        f"        USED_CORES, WAVES, TILES, counters, lambda tile: {call},",
+        "        warn_above=LARGEST_DECLARED_CORES,",
+        f'        warn_source="{_largest_array()[1]}",',
+        "    )",
     ]
     out: list[Line] = _plain(lines)
     if needs_partials:
