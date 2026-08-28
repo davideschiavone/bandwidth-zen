@@ -57,6 +57,7 @@ def _emit(  # type: ignore[no-untyped-def]
     a_strategy: str = "stage",
     stationarity: Dataflow | None = None,
     chip: HardwareSpec | None = None,
+    accumulate: str | None = None,
 ):
     """Emit one program, exactly the way ``bwz matmul --emit`` does."""
     m, n, k = shape
@@ -81,6 +82,7 @@ def _emit(  # type: ignore[no-untyped-def]
             "split_k": split_k,
             "a_strategy": a_strategy,
             "stationarity": stationarity,
+            "precision": {"weights": dtype, "activations": dtype, "accumulate": accumulate},
         }
     )
     hardware = chip if chip is not None else load_chip(chip_id)
@@ -346,3 +348,48 @@ def test_the_emitted_program_imports_nothing_but_the_standard_library() -> None:
         "types",
         "typing",
     }
+
+
+# ------------------------------------------------------------------ accumulator
+
+
+def test_an_integer_matmul_accumulates_in_int32() -> None:
+    """D56, and the regression test for the bug that made it.
+
+    The harness's own ``mma`` docstring says the widening is "that rule made
+    executable" — but the width came from ``precision.accumulate``, a deployment
+    field defaulting to ``fp32`` for every dtype, so the emitted int8 program
+    accumulated in floating point and said so in a comment. The dyadic operands
+    hid it: fp32 holds a sum of small integers exactly, so the numerics check
+    passed while the demonstrated format was wrong.
+    """
+    program, _report, machine, *_ = _emit("metis_aipu", dtype="int8")
+    constants = constants_of(program.source)
+    assert machine.dtype is DType.INT8
+    assert constants["ACC_DTYPE"] == "int32"
+    assert "int32, always" in program.source
+    assert "CUBLAS" not in program.source, "the float rationale must not follow an int8 run"
+
+
+def test_a_float_matmul_accumulates_in_fp32_and_says_why() -> None:
+    """fp32 for fp16 on a tensor core is right — it is what cuBLAS does by
+    default — but the file must not claim fp16 accumulate is impossible, because
+    it is a real MMA mode nothing here models (D56)."""
+    program, *_ = _emit("a100_80gb")
+    assert constants_of(program.source)["ACC_DTYPE"] == "fp32"
+    assert "CUBLAS_COMPUTE_32F" in program.source
+    assert "fp16 accumulate is a real mode" in program.source
+
+
+def test_the_accumulator_can_still_be_overridden() -> None:
+    """`precision.accumulate` is an override, not the source of truth (D56)."""
+    program, *_ = _emit("a100_80gb", accumulate="fp16")
+    assert constants_of(program.source)["ACC_DTYPE"] == "fp16"
+
+
+def test_the_accumulator_follows_the_wider_operand() -> None:
+    """Mixed widths run at the wider operand through one datapath (D18), and it
+    is that datapath that accumulates — so the accumulator follows it, not A."""
+    program, _report, machine, *_ = _emit("a100_80gb", dtype="int8")
+    assert machine.dtype is DType.INT8
+    assert constants_of(program.source)["ACC_DTYPE"] == "int32"

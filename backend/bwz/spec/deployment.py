@@ -98,7 +98,13 @@ class Precision(SpecModel):
 
     weights: DType = DType.FP16
     activations: DType = DType.FP16
-    accumulate: DType = DType.FP32
+    accumulate: DType | None = None
+    """``None`` means *derive it from the operands*, which is the honest default:
+    the accumulator width is a property of the arithmetic, not a knob, and
+    ``spec.dtypes.accumulator_for`` is the one place that mapping lives. It used
+    to default to ``fp32`` for every dtype, which said an ``int8 x int8`` matmul
+    accumulated in floating point (docs/CORRECTIONS.md D56). Set it to override —
+    ``fp16`` is a real MMA mode, just not anyone's default."""
     kv_cache: DType = DType.FP16
 
 

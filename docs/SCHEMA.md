@@ -248,7 +248,7 @@ kv_context_tokens: 4096    # optional; defaults to input_tokens + output_tokens
 precision:
   weights: int8            # fp32 | tf32 | fp16 | bf16 | fp8 | int8 | int4 | int32
   activations: fp16
-  accumulate: fp32         # DECLARED BUT NOT READ -- see below
+  accumulate: null         # derived from the operands unless set -- see below
   kv_cache: fp16
 per_layer_precision_overrides:
   "layer.0.attn.qkv": {weights: fp16}
@@ -288,10 +288,18 @@ inter-operation residency (D15). Feasibility here is a **clamp, not a validation
 `write-ahead` — both noted in `report.assumptions`, never raised. See `docs/MODEL.md` §6.3a and
 `docs/CORRECTIONS.md` D36.
 
-**`precision.accumulate` is not read by anything.** The transformer and CNN builders size output
-tensors at the activation dtype, so declaring `accumulate: fp32` against `activations: fp16` does
-not add the bytes an fp32 accumulator would move. Only `family: matmul` models a widening
-accumulator, through its own `out_dtype` (§2.4). Closing the gap for networks means changing every
+**`precision.accumulate` is an override, and defaults to `null` — "derive it".** The accumulator
+width is a property of the arithmetic rather than a choice: integers accumulate in `int32` and
+floats in `fp32`, and `spec/dtypes.accumulator_for` is the one place that mapping lives. It used to
+default to `fp32` for *every* dtype, which described an `int8 x int8` matmul as accumulating in
+floating point — see `docs/CORRECTIONS.md` D56. Setting it explicitly still works; `fp16` accumulate
+is a real MMA mode, just not anyone's default.
+
+**It still changes no traffic number.** The transformer and CNN builders size output tensors at the
+activation dtype, so declaring an accumulator against `activations: fp16` does not add the bytes an
+fp32 accumulator would move. Only `family: matmul` models a widening accumulator, through its own
+`out_dtype` (§2.4), and only `bwz matmul --emit` reads `accumulate` at all — to decide the format
+the emitted program computes in (D54). Closing the gap for networks means changing every
 activation-traffic number in the repo and has not been done.
 
 **Not validated here.** Whether the chip supports the requested dtype, or whether the weights fit,

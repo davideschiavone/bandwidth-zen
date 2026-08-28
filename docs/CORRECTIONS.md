@@ -2546,3 +2546,74 @@ whole argument that a 3200-line move of untested code changed nothing.
 - **`bwz compare` still prints only a table.** Teaching it to draw the shared-axis page would need a
   whole workload surface added to a command that takes `--models`; `--compare-with` covers the same
   ground from the command that already has one.
+
+
+---
+
+## D56 — The accumulator width followed a knob, not the arithmetic (2026-08-28)
+
+The user asked: *"are you sure `ACC_DTYPE = "fp32"` in the NVIDIA chips for tensor cores?"*
+
+For **fp16 on a tensor core, yes.** That is what cuBLAS computes by default
+(`CUBLAS_COMPUTE_32F`) and the mode a datacenter part's headline fp16 figure is quoted at. fp16
+accumulate is a real MMA shape — PTX `mma.sync...f16.f16.f16.f16`, cuBLAS `CUBLAS_COMPUTE_16F`, and
+on GeForce parts it is the *faster* path because fp32-accumulate is deliberately half-rate there —
+but it is nobody's default, and no profile here declares the two rates separately, so modelling it
+would mean inventing a number.
+
+**But the question found a bug, because the emitter printed `fp32` for every dtype.** An `int8`
+matmul emitted `ACC_DTYPE = "fp32"` and accumulated in floating point:
+
+```
+ACC_DTYPE = "fp32"        # deployment.precision.accumulate — wider than the
+                          # operands on purpose: a product of two int8s
+                          # does not fit one of them
+```
+
+`int8 x int8 -> int32` is the only integer MMA shape any of these arrays issues. `spec/dtypes.py`
+has said so since M1 — *"an int8 x int8 product accumulates in int32 at the int8 rate"* — and D54's
+own harness docstring claims the emitted code is **"that rule made executable"**. It was not.
+
+### Why nothing caught it
+
+`Precision.accumulate` defaulted to `DType.FP32` unconditionally, and nothing derived it. Until D54
+nothing *read* it either — `docs/SCHEMA.md` said in as many words *"`precision.accumulate` is not
+read by anything"* — so a field that had never mattered acquired a consumer without anyone checking
+that its default was right for the consumer.
+
+The emitted program's own self-check could not see it. D54 draws operands from the dyadic grid
+`{-7..7}` precisely so every partial sum is exact, and fp32 holds a sum of small integers exactly —
+so `max |C - A@B| = 0` and every tier-1 count matched while the demonstrated *format* was wrong.
+The design that made the walk unambiguous also hid a format error, which is worth remembering: an
+exactness check is not a fidelity check.
+
+### The fix
+
+`accumulator_for(dtype)` in `spec/dtypes.py`, beside the widths, because it is the same kind of
+thing — a definition, not calibration (CLAUDE.md's "a new dtype goes in `spec/dtypes.py` only"):
+
+| operand | accumulates in | why |
+|---|---|---|
+| `int8`, `int4`, `int32` | `int32` | the only integer MMA shape these arrays issue; an 8-bit accumulator overflows after three or four terms |
+| `fp16`, `bf16`, `tf32`, `fp8`, `fp32` | `fp32` | cuBLAS's default; `bf16` and `tf32` have no narrower accumulate on NVIDIA hardware at all |
+
+`Precision.accumulate` becomes `DType | None = None` — *derive it* — and stays available as an
+override. `emit_matmul` resolves it from `machine.dtype`, the dtype the arithmetic actually runs at,
+which for mixed widths is the wider operand (D18): both enter one datapath and it is that datapath
+that accumulates.
+
+The emitted comment now says something different per format, because the two claims have different
+force. Saying "a product does not fit one operand" of `fp16` implies fp16 accumulate is impossible,
+and it is not.
+
+### What did not change
+
+No byte count and no reported number. Split-K's partials are still sized at **C's** width rather
+than the accumulator's — a separate, deliberate choice `roofline._reduction_for` makes and the
+emitted file already flags on its own `PARTIAL_BYTES_PER_ELEMENT` line. Whether *that* is right is
+its own question; it is not this one.
+
+`tests/unit/test_dtypes.py` pins the table and the property behind it (an integer operand never
+accumulates in a float, so a future entry cannot break the rule); `tests/unit/test_emit.py` pins
+that an int8 program says `int32` and carries the integer rationale, that a float one says `fp32`
+and does *not* claim fp16 accumulate is impossible, and that the override still works.

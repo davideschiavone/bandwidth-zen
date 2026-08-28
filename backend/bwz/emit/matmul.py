@@ -37,7 +37,7 @@ from bwz.analysis.tiling import padded
 from bwz.emit import _harness
 from bwz.report import OpResult
 from bwz.spec.deployment import AStrategy, BDataflow
-from bwz.spec.dtypes import DType, bytes_per_element, is_integer
+from bwz.spec.dtypes import DType, accumulator_for, bytes_per_element, is_integer
 from bwz.spec.hardware_spec import Dataflow, HardwareSpec
 from bwz.units import format_bytes
 
@@ -153,13 +153,23 @@ def emit_matmul(
     a_dtype: DType,
     b_dtype: DType,
     c_dtype: DType,
-    acc_dtype: DType,
+    acc_dtype: DType | None,
     double_buffered: bool,
     command: str,
     version: str,
     seed: int = 20240501,
 ) -> EmittedProgram:
-    """Build the runnable program for this chip, dtype and strategy."""
+    """Build the runnable program for this chip, dtype and strategy.
+
+    *acc_dtype* is ``None`` for "whatever this arithmetic accumulates into",
+    which is the normal case and the only correct one for an integer matmul: the
+    width follows from the operand format, not from a deployment knob
+    (:func:`~bwz.spec.dtypes.accumulator_for`, D56). Pass one to override.
+    """
+    # machine.dtype rather than either operand's: mixed widths run at the wider
+    # one, through a single datapath, and it is that datapath that accumulates
+    # (docs/CORRECTIONS.md D18).
+    accumulate = acc_dtype if acc_dtype is not None else accumulator_for(machine.dtype)
     unit = machine.unit
     if unit.systolic_dims is None:
         raise ValueError(
@@ -194,7 +204,7 @@ def emit_matmul(
             a_dtype=a_dtype,
             b_dtype=b_dtype,
             c_dtype=c_dtype,
-            acc_dtype=acc_dtype,
+            acc_dtype=accumulate,
             double_buffered=double_buffered,
             seed=seed,
         )
@@ -339,12 +349,7 @@ def _constants(
         "# profile, or derived from the two — nothing here is a free parameter.",
         *_constant(f"M, N, K = {grid.m}, {grid.n}, {grid.k}", "-M / -N / -K"),
         *_constant(f"A_DTYPE, B_DTYPE, C_DTYPE = {widths}", "-d, --a, --b, --out"),
-        *_constant(
-            f'ACC_DTYPE = "{acc_dtype.value}"',
-            "deployment.precision.accumulate — wider than the",
-            f"operands on purpose: a product of two {a_dtype.value}s",
-            "does not fit one of them",
-        ),
+        *_constant(f'ACC_DTYPE = "{acc_dtype.value}"', *_accumulator_note(machine.dtype)),
         *_constant(
             f"A_BYTES_PER_ELEMENT = {bytes_per_element(a_dtype)}",
             "spec/dtypes.py — a definition, not a fit",
@@ -467,6 +472,27 @@ def _constants(
         out.append(f'    "{key}": {rendered},')
     out.append("}")
     return out
+
+
+def _accumulator_note(operand: DType) -> tuple[str, ...]:
+    """Why the accumulator is the width it is, in this dtype's own terms.
+
+    Not one sentence for every format: the integer rule and the float one are
+    different claims with different force. Saying "a product does not fit one
+    operand" of ``fp16`` would imply fp16 accumulate is impossible, and it is a
+    real MMA mode — just not anyone's default (D56).
+    """
+    if is_integer(operand):
+        return (
+            f"{operand.value} x {operand.value} -> int32, always: the sum",
+            "of K products does not fit 8 bits, and int32 is the",
+            "only integer MMA shape these arrays issue (spec/dtypes.py)",
+        )
+    return (
+        "what cuBLAS accumulates in by default",
+        "(CUBLAS_COMPUTE_32F). fp16 accumulate is a real mode and",
+        "not modelled here; bf16 and tf32 have no narrower one at all",
+    )
 
 
 def _tile_of(dim: Dim) -> str:
