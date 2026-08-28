@@ -2315,3 +2315,112 @@ remains M8 work — the flags select, they do not search.
 
 [cutlass]: https://github.com/NVIDIA/cutlass/blob/main/media/docs/cpp/efficient_gemm.md
 [eyeriss]: https://people.csail.mit.edu/emer/papers/2016.06.isca.eyeriss_architecture.pdf
+
+---
+
+## D54 — The pseudo-C becomes a program that runs, counts and checks itself (2026-08-28)
+
+`deploy.py` prints a pseudo-C loop nest, and `deploy.check` asserts its constants against the
+schedule the figure drew — as far as a *listing* can go. It cannot be run, so nothing verified that
+the decomposition it narrates computes a matmul at all, and nothing verified that the bytes the
+roofline charged are the bytes such a schedule would really move. The user's verdict on it: *"the
+pseudo code that is useless and too high level"*.
+
+`bwz matmul --emit PATH` (and `plot_pipeline.py --emit`) now writes a self-contained Python program
+that walks the same tile grid, stages A on the same events, hands tiles to cores by the same
+`wave · used_cores + core_id` rule, **counts what it moves**, and asserts those counts against a
+`PREDICTED` block that is the report's own numbers. `docs/CLI.md` §2.6 has the output;
+`docs/MODEL.md` §6.8 has what it does and does not model.
+
+Two things follow that a listing could not give. It is a better teaching artifact — the goal of this
+project is that a reader can see how a workload maps onto an architecture, and a program they can
+run, edit and break shows that better than a description of one. And it is an **executable
+specification of the cost model's own bookkeeping**: when the program and the report disagree, one
+of them is wrong, and until now there was no way to find that out.
+
+### The design decisions, and why
+
+**Real Python, kernels only.** A whole model would be a program nobody can run on this machine, so
+`--emit` is refused for `--model`/`--encoder` with a message saying that.
+
+**Constants first, each with its provenance.** The shape from the command line, the chip from its
+profile, the strategy, then the grid those imply. A unit test asserts that no constant in that
+region is written without a trailing comment naming where its value came from — the only way a rule
+like that survives.
+
+**Two core counts, and one OS thread per modelled core.** `AVAILABLE_CORES` is `unit.count`;
+`USED_CORES` is `min(AVAILABLE_CORES, TILES)`. The gap between them is the whole of wave occupancy.
+An earlier draft capped the thread count at `os.cpu_count()`; that was rejected, and the reason
+generalises — it optimises for a speedup nobody asked for, invents a modelled-core-to-host-thread
+mapping with no counterpart in the model, and demotes `USED_CORES` to decoration. 432 threads is
+unremarkable on Linux and the largest shipped profile is H100's 528; the harness warns above a few
+thousand and does not cap.
+
+**Persistent threads and a `threading.Barrier`, not a pool.** A pool is a task queue;
+`waves = ceil(tiles / units)` is *lockstep*, and a core is a persistent thing that takes one tile
+per wave. The `if tile < TILES` inside `run_waves` **is** wave occupancy (D30), executable.
+
+**`ws` needs a lock, and `os` does not — which is the finding.** Under `ws` two tiles `(kt, nt)` and
+`(kt', nt)` accumulate into the same output block and the wave scheduler can hand them to two cores
+at once. The emitted program takes **a lock per output block**: an atomic on-chip accumulate,
+costing no bytes, which is exactly what the cost model charges for it. Per-core private partials
+merged at the end would silently *be* split-K, which the model does charge for. That the program
+needs a lock at all is evidence about where `ws`'s partial sums live; under `os` the question never
+arises, and that absence is D53's claim in one line of code.
+
+**Operands are dyadic, so the tolerance is zero.** Values are drawn from `{-7..7}`, divided by 8 for
+a float format, so every product and every partial sum is exact in the accumulator. A difference is
+then a *walk* error and never a rounding one. This deviates from the plan's "fp16 needs a tolerance
+against an fp32 reference" deliberately: the program checks a decomposition, and letting rounding
+share the same tolerance would make a failure ambiguous. The achieved error is printed either way,
+and `_tolerance` still derives a real bound for shapes large enough to need one.
+
+**The harness is a real module, inlined by source.** `bwz/emit/_harness.py` is ruff-clean,
+mypy-strict and unit-tested, and the emitter inlines `inspect.getsource` of it, so there is one copy
+and it is the checked one. A test asserts it imports nothing from `bwz`; another asserts an emitted
+program imports nothing but the standard library. numpy is optional — it is not a `bwz` dependency —
+so every operation has a pure-Python fallback, tested by shadowing numpy with an unimportable
+module.
+
+### Two tiers, and what tier 2 found
+
+Tier 1 is asserted and matches today on every decomposition the shipped chips declare: `tiles`,
+`waves`, useful MACs (`M·N·K` under all four stationarities), MAC slots issued, idle core-waves, A's
+staging events, A's bytes, C's bytes, split-K's partial round trip, and `C == A @ B`. Occupancy and
+shape padding are pinned as **integers** (`idle_core_waves`, `mac_slots`) rather than as floats, and
+the ratios are printed from counts already checked — the same claim without a float comparison.
+
+Tier 2 is printed and not asserted, and it is where the interesting disagreement lives. **B's
+traffic has three defensible values and no two of them agree.** At 1000×2000×3000 fp16 on A100:
+
+| | bytes | what it is |
+|---|---|---|
+| the report charges | **0** | compulsory traffic, discounted by §6.2's residency fraction — B fits on chip |
+| first touch, measured | **12 MB** | B crossing the bus exactly once |
+| fetched, measured | **756 MB** | what an `os` walk asks for: each of the 63 row-bands of M re-reads all of B |
+
+The 756 MB against 12 MB is the tiling re-read `docs/MODEL.md` §6.2 already declines to model and
+names as the reason a DRAM-bound latency there is a lower bound. The 0 is new information: the
+weight-residency discount (D8, D15) was written for a network, where a weight held on chip across
+many operations genuinely need not be re-streamed, and applying it to a **one-operation graph**
+says B never crosses the bus at all — which cannot be true of an operand that starts in DRAM.
+
+That is a model bug, not an emitter bug, and it is deliberately not fixed here: it would move
+documented figures in four files and belongs in its own change with its own goldens, exactly as D53
+argued. What this change does is make it *visible* — printed side by side on every emitted run,
+rather than an unexamined term in a residency formula.
+
+### Not done, flagged only
+
+- **`b_dataflow`, double buffering and sub-cycles are annotated, not executed.** All three are
+  claims about *time* — a write's placement, an overlap, a rate — and this program measures counts.
+  D54-PLAN proposed a real prefetch queue of `DEPTH`; it would move no byte and change no result,
+  so it is written down in the file's own header instead of simulated.
+- **The pseudo-C stays.** The animation's line-highlighting points at `Deployment.stage_lines`
+  (D41/D43). Re-targeting it at the emitted Python is strictly better and is what the user's
+  complaint points at, but it touches tested behaviour and is its own change.
+- **`--used-cores N` is descriptive, not a knob.** `USED_CORES` is `min(AVAILABLE, TILES)` and the
+  file shows the idle remainder. Making it a user-settable *cap* would change reported latency
+  (fewer cores → more waves → lower occupancy) and needs its own goldens.
+- **Other kernels.** Attention, convolution and the encoder come later; the harness is shaped so
+  they slot in, but one kernel done properly beats three sketched.

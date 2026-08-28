@@ -688,3 +688,53 @@ deferred refinements safe to defer.
 | INT8 vs FP16 | CLAUDE.md | never slower on hardware supporting both |
 | MACs under every stationarity | D53 | identical — only the tiling, staging and reduction differ |
 | `tile_count` vs the utilisation model's grid | D53 | the same object; they cannot drift |
+| the emitted program's tier-1 counts | D54 | every shipped decomposition agrees with the report |
+| `os` and `ws` on one shape | D54 | the same C, from different grids and different traffic |
+
+### 6.8 The emitted program — the bookkeeping, made executable
+
+`bwz matmul --emit` (`bwz/emit/`, `docs/CLI.md` §2.6, D54) writes the decomposition §6.1 chose as a
+self-contained Python program. It walks the same tile grid, stages A on the same events, hands
+tiles to cores by the same `wave * used_cores + core_id` rule, counts what it moves, and asserts
+those counts against a `PREDICTED` block that is the report's own numbers.
+
+**What that buys the model.** §6.1's grid, §6.3a's staging events and §6.5's wave structure were
+previously checked only against each other. An emitted program is an *independent* account of the
+same schedule: it computes `A @ B` and it counts bytes, so a decomposition that could not do the
+arithmetic, or that would move different traffic, fails rather than being believed. Where the two
+disagree, one of them is wrong, and the disagreement is now findable.
+
+**Tier 1 — asserted.** Quantities the model computes structurally:
+
+| quantity | the model's formula | what the program counts |
+|---|---|---|
+| tiles | `grid.tiles` (§6.1) | calls to `run_tile` |
+| waves | `ceil(tiles / used_cores)` | the wave loop's own bound |
+| MACs | `M·N·K`, invariant across stationarity (D53) | the operands' real extents, per `mma` |
+| MAC slots | `padded(M,rows)·padded(N,cols)·padded(K,rows)` | `ROWS·ROWS·COLS` per `mma` issued |
+| idle core-waves | `waves · available_cores − tiles` (§6.1, D30) | the `else` branch of `if tile < TILES` |
+| A staging events | `a_events · TILES_PER_GROUP / residency_tiles` (§6.3a) | first touch of each staging key |
+| A bytes | `|A| · TILES_PER_GROUP / residency_tiles` | bytes through `Dram.read_a` |
+| C bytes | `M·N·` result width | bytes through `Dram.write_c` |
+| partial bytes | `2·p·M·N·` accumulator width (§6.1, split-K) | the two crossings, counted separately |
+
+Wave occupancy and shape utilisation are asserted through the two *integer* rows rather than as
+floats: `occupancy = 1 − idle_core_waves / (waves · available_cores)` and
+`padding = macs / mac_slots` are then printed from counts already checked. On a bit-serial array
+(§6.1's crossbar branch) the printed `padding × occupancy` is deliberately **above** the report's
+utilisation, by the sub-cycle row of fill D34 charges on K — a rate, which a program counting bytes
+and MACs cannot see, and which the file says so rather than papering over.
+
+**Tier 2 — printed, not asserted.** B's traffic. The report charges compulsory traffic (§6.2) and
+then discounts it by the residency fraction §6.2's capacity planner supplies; for a lone matmul
+whose B fits on chip that discount is total, so the charged figure is zero. The program reports two
+numbers instead: every byte the walk fetched, and every byte on its first touch. At
+1000×2000×3000 fp16 on A100 those are **756 MB** and **12 MB** against **0 MB** charged. The 12 MB
+is B once; the 63× gap above it is the tiling re-read this section already declines to model, and
+the 0 is §6.2's residency discount applied to a one-operation graph it was written for networks to
+describe. All three are defensible in their own terms and no two agree, which is exactly the
+finding worth having (D54).
+
+**What the program does not model**, and says in its own header: `b_dataflow` and double buffering
+are placements in *time* and move no byte within one pass (D30/D33, D40), and sub-cycles are a
+rate. It validates counts, not time; its wall clock has no relationship to the predicted latency.

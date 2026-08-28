@@ -62,6 +62,13 @@ a **new tab in an existing window** rather than a new window.
   kernel when there is one. And where the loads and stores sit around it. Every constant is read back out of the schedule drawn above and checked against it, so
   the listing and the timeline cannot disagree (D32). Rendered once per chip, unlike the arithmetic,
   because the mapping is exactly what differs between two machines
+- with `--emit`, **run it yourself** — the same decomposition as a runnable Python program, written
+  beside the page and carried in it (`../CLI.md` §2.6, D54). It walks the grid the timeline draws,
+  counts what it moves and asserts those counts against this page's own numbers, so it cannot
+  narrate a schedule the model did not cost. A `--compare` page emits one per chip, which is where
+  it earns its keep: the same matmul on two machines gives two different loop nests, two different
+  staging counts and the same `C`. It validates **counts, not time** — timing it against the
+  predicted latency is a category error, and the file says so before anything else
 - below that, **the arithmetic operation by operation** — operand shapes, the algebra, the flop
   count as an expression (`2·M·N·K = 2·4·8·8 = 512`) and a pseudo-C loop nest with the real extents,
   so the model can be back-tested against code rather than trusted

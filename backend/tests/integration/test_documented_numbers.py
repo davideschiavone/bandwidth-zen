@@ -333,3 +333,68 @@ def test_the_validation_suite_is_empty_and_the_docs_say_so() -> None:
         f"reference points appeared ({collected}) — update docs/CALIBRATION.md and the "
         f"README's Accuracy section, which both say none have been collected"
     )
+
+
+def test_cli_2_6_the_emitted_programs_counts() -> None:
+    """``docs/CLI.md`` §2.6 and ``docs/MODEL.md`` §6.8 — the emitted program's tables.
+
+    Both quote the tier-1 counts for the 64-cubed example and the three B figures
+    for the 1000x2000x3000 one, which is the whole point of that section: 12 MB
+    is B once, 756 MB is what an ``os`` walk fetches, 0 is what the report
+    charges. Derived through the same ``predicted_for`` the emitter uses, so a
+    change to the grid, the staging model or the residency fraction fails here
+    first.
+    """
+    from bwz.analysis import machine_model
+    from bwz.analysis.dataflow import plan_dataflow
+    from bwz.analysis.pipeline import grid_of
+    from bwz.emit import predicted_for
+    from bwz.graph import GraphPhase, build_graph
+    from bwz.operators.base import cost_of
+
+    def predicted(m: int, n: int, k: int) -> dict[str, float]:
+        report, spec = _matmul(m, n, k, ideal=False)
+        chip = load_chip("a100_80gb")
+        machine = machine_model(chip, spec.operand_dtype)
+        graph = build_graph(spec, MATMUL_DEPLOYMENT, GraphPhase.STATIC)
+        op = graph.ops[0]
+        grid = grid_of(op, machine)
+        assert grid is not None
+        dataflow = plan_dataflow(
+            op,
+            machine,
+            chip,
+            MATMUL_DEPLOYMENT,
+            a_bytes=cost_of(op, graph.tensors).input_bytes,
+        )
+        return predicted_for(machine, grid, dataflow, report.phases[0].ops[0])
+
+    small = predicted(64, 64, 128)
+    assert small["tiles"] == 16
+    assert small["waves"] == 1
+    assert small["macs"] == 524_288
+    assert small["mac_slots"] == 524_288
+    assert small["idle_core_waves"] == 416
+    assert small["staging_events"] == 4
+    assert small["a_dram_bytes"] == 16_384
+    assert small["c_dram_bytes"] == 8_192
+    assert f"{small['utilization']:.4f}" == "0.0370"
+
+    big = predicted(1000, 2000, 3000)
+    assert big["tiles"] == 7_875
+    assert big["waves"] == 19
+    assert big["idle_core_waves"] == 333
+    assert big["staging_events"] == 63
+    assert big["a_dram_bytes"] == 6_000_000
+    assert big["c_dram_bytes"] == 4_000_000
+    # The three B figures §2.6 puts side by side. Only the charged one is the
+    # report's; the other two are what an `os` walk measures — B once, and B
+    # re-read per row-band of M — computed here the way the program counts them.
+    assert big["b_dram_bytes_charged"] == 0
+    assert format_bytes(3000 * 2000 * 2) == "12 MB"
+    assert format_bytes(63 * 3000 * 2000 * 2) == "756 MB"
+    occupancy = 1 - big["idle_core_waves"] / (big["waves"] * big["available_cores"])
+    padding = big["macs"] / big["mac_slots"]
+    assert f"{occupancy:.4f}" == "0.9594"
+    assert f"{padding:.4f}" == "0.9894"
+    assert f"{big['utilization']:.4f}" == "0.9493"

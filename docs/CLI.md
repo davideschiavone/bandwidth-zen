@@ -75,8 +75,6 @@ so a batch of 128 is `-M 128`.
 | `--out` | result width — the **accumulator**. Defaults to the wider operand |
 | `--ideal` | set both efficiency de-ratings to 1.0: a datasheet ceiling, not a prediction |
 | `--pipeline` / `--no-pipeline` | lane occupancy table (default on) |
-| `--stationarity` | `os` \| `ws` \| `is` \| `rs` — which operand stays resident, §2.5a. Default: the chip's own |
-| `--split-k` | cut the contraction into N pieces (`os` only); costs CUTLASS's second kernel, §2.5a |
 | `--stationarity` | `os` \| `ws` \| `is` \| `rs` — which operand stays resident, §2.5.1. Default: the chip's own |
 | `--split-k` | cut the contraction into N pieces (`os` only); costs CUTLASS's second kernel, §2.5.1 |
 | `--a-strategy` | `stage` (default, D33) \| `stream` (D31) \| `whole` — how A is loaded, §2.5.2 |
@@ -84,6 +82,7 @@ so a batch of 128 is `-M 128`.
 | `--a-residency-tiles` | override tiles served per A staging event; power-of-2 divisor of `TILES_PER_GROUP` |
 | `--a-prefetch-depth` | override A's double-buffered staging depth (schedule-only) |
 | `--iterations` | invocations this report represents; only `persistent` reads it |
+| `--emit PATH` | write this decomposition as a **runnable Python program**, §2.6. `-` for stdout |
 | `--json` | the raw `Report` as JSON |
 
 ### 2.1 The datasheet check
@@ -413,6 +412,172 @@ to `write-ahead` — not a rounding-error difference, an exact one: `write-ahead
 buffering already achieves this model's best-case overlap, so there is no reordering of B's fixed
 loads that makes a same-pass `persistent` trace faster (D40). `persistent`'s real effect stays the
 cross-`--iterations` amortisation §2.5 already documents above, a byte story, not a schedule one.
+
+### 2.6 `--emit` — the decomposition as a program you can run
+
+Everything above §2.5 describes a schedule. `--emit` writes it as **real Python** that walks the
+same tile grid, stages A on the same events, hands tiles to cores the same way, counts what it
+moves, and asserts those counts against the report it came from (D54).
+
+```bash
+uv run bwz matmul -M 64 -N 64 -K 128 --chip a100_80gb --emit /tmp/k.py
+python /tmp/k.py
+```
+
+```
+NVIDIA A100 SXM4 80GB · fp16 · output-stationary
+backend: numpy;  16 threads, one per modelled core in use
+
+quantity                         predicted              measured  status
+--------------------------------------------------------------------------
+tiles                                   16                    16  OK
+waves                                    1                     1  OK
+MACs                               524,288               524,288  OK
+MAC slots issued                   524,288               524,288  OK
+idle core-waves                        416                   416  OK
+    a core with no tile this wave. This IS wave occupancy (D30).
+A staging events                         4                     4  OK
+A bytes                             16,384                16,384  OK
+C bytes                              8,192                 8,192  OK
+partial bytes                            0                     0  OK
+B bytes fetched                          0                65,536  differs
+    tier 2. The report charges compulsory traffic and then discounts it by a
+    residency fraction a capacity heuristic supplies; this walk fetches what
+    the tile order asks for. The gap above it is the tiling re-read that
+    docs/MODEL.md 6.2 declines to model, measured rather than argued about.
+B bytes, first touch                     0                16,384  differs
+    tier 2. What B costs if every byte of it crosses the bus exactly once.
+
+wave occupancy   0.0370   1 - idle core-waves / (WAVES * AVAILABLE_CORES)
+shape padding    1.0000   useful MACs / MAC slots issued (D52)
+utilisation      0.0370   against the report's 0.0370
+
+numerics: max |C - A@B| = 0   (tolerance 0)
+C checksum: 38
+
+every tier-1 count matches the report, and C == A @ B.
+```
+
+`--emit -` writes to stdout and suppresses everything else, so the whole loop is one line:
+
+```bash
+uv run bwz matmul -M 64 -N 64 -K 128 --chip a100_80gb --emit - | python -
+```
+
+`PATH` may be a file, a directory (the default name `matmul-<chip>-<dtype>-<stationarity>[-splitk<N>].py`
+goes in it), or `-`.
+
+**What the file contains, in order.** The constants first — the shape from the command line, the
+chip from its profile, the strategy, then the grid those imply — each with a comment naming where
+its value came from and nothing anywhere that is a free parameter. Then a `PREDICTED` block, which
+is the report's own numbers. Then the runtime, and then the loop nest, which is the part to read:
+
+```python
+def run_tile(tile: int, dram: Dram, pad: Scratchpad) -> None:
+    """One output tile. C stays in the accumulator; K is swept INSIDE it.
+
+    The whole contraction for this output block happens in one core's own
+    accumulator, which is exactly why output-stationary owes no reduction: no
+    partial sum ever leaves this function (D53).
+    """
+    mt, nt, part = tile_row(tile), tile_col(tile), partition_of(tile)
+    ...
+    acc = zeros(m1 - m0, n1 - n0, ACC_DTYPE)     # the accumulator that stays put
+    for kt in range(kt0, kt1):                   # K is swept INSIDE this tile
+        k0, k1 = kt * ROWS, min(kt * ROWS + ROWS, K)
+        a = sub(band, 0, m1 - m0, k0 - k_lo, k1 - k_lo)   # already on chip
+        b = dram.read_b(k0, k1, n0, n1)                   # crosses DRAM
+        mma(acc, a, b, COUNTERS, SLOTS_PER_MMA)
+
+    dram.write_c(m0, n0, acc)                    # finished, not a partial
+```
+
+Ask the same shape for weight-stationary and the nest is a different shape, because the
+decomposition is:
+
+```python
+    b = dram.read_b(k0, k1, n0, n1)              # the operand that stays put
+    band = stage_a(tile, dram, pad)
+
+    for mt in range(M_TILES):                    # M streams past the resident tile
+        ...
+        partials.accumulate(m0, n0, product)     # a PARTIAL over K; nothing is stored
+```
+
+That `partials` object has to exist under `ws` and does not under `os`, which is D53's claim in one
+line of code. Two cores can own `(kt, nt)` and `(kt', nt)` in the same wave, so it takes **a lock
+per output block** — an atomic on-chip accumulate, costing no bytes, which is what the cost model
+charges for it. Private per-core copies merged at the end would silently *be* split-K, which the
+model does charge for.
+
+**It is not a benchmark, and the file says so before anything else.** It validates counts, not
+time: it runs one OS thread per modelled core whatever the host has, makes no attempt to be fast,
+and its wall clock has no relationship to the predicted latency.
+
+#### Two tiers, and why the B rows are not asserted
+
+Tier 1 is asserted and must match exactly: `tiles`, `waves`, the useful MAC count, the MAC slots
+issued, the idle core-waves, A's staging events, A's bytes, C's bytes, split-K's partial round
+trip, and `C == A @ B`. These are quantities the model computes *structurally*, so a mismatch is a
+real bug on one side or the other.
+
+Wave occupancy and shape padding are pinned as **integers** — `idle_core_waves` and `mac_slots` —
+rather than as floats, and the program prints the ratios from the counts it asserted. Same claim,
+no float comparison. The `if tile < TILES` inside `run_waves` *is* wave occupancy (D30), executable.
+
+Tier 2 is printed and not asserted, and the B rows above are it. The report charges compulsory
+traffic — each operand crosses the bus once — and then discounts it by a residency fraction that
+comes from a capacity heuristic this file deliberately does not imitate; on a lone matmul whose B
+fits on chip, that discount is total and the charged figure is **zero**. The walk fetches what the
+tile order asks for. At 1000×2000×3000 on A100 the three numbers are far apart, and the gap is the
+point:
+
+```bash
+uv run bwz matmul -M 1000 -N 2000 -K 3000 --chip a100_80gb --emit /tmp/big.py && python /tmp/big.py
+```
+
+```
+(excerpt)
+A bytes                          6,000,000             6,000,000  OK
+C bytes                          4,000,000             4,000,000  OK
+B bytes fetched                          0           756,000,000  differs
+B bytes, first touch                     0            12,000,000  differs
+
+wave occupancy   0.9594   1 - idle core-waves / (WAVES * AVAILABLE_CORES)
+shape padding    0.9894   useful MACs / MAC slots issued (D52)
+utilisation      0.9493   against the report's 0.9493
+```
+
+12 MB is B crossing the bus once. 756 MB is what an `os` walk actually fetches, because each of the
+63 row-bands of M re-reads the whole of B — the tiling re-read `docs/MODEL.md` §6.2 declines to
+model and names as the reason a DRAM-bound latency there is a lower bound. 0 is what the report
+charges. Promoting these rows to tier 1 needs the model changed, not the assertion loosened; D54
+records the finding.
+
+#### What is executed and what is only written down
+
+| choice | in the emitted program |
+|---|---|
+| `--stationarity` | **real** — a different loop nest, a different resident buffer, different counters |
+| `--split-k` | **real** — per-partition partials and a second reduction kernel |
+| `--a-strategy` | **real** — changes how often A is staged, and A's measured bytes |
+| `--a-residency-tiles` | **real** — the staging buffer serves that many tiles before refill |
+| `--b-dataflow` | annotation — a placement in *time*, moving no byte within one pass (D30/D33) |
+| double buffering | annotation — "latency is `max(load, compute)`" is a claim about time |
+| sub-cycles (bit-serial) | annotation — a rate, not a structure |
+
+The last three are named in the file's own header rather than left to be inferred. On a bit-serial
+array the program prints why its utilisation figure is *higher* than the report's: D34 charges a
+sub-cycle row of fill on K, which is a rate, and this program measures no rates.
+
+**numpy is optional.** It is not a `bwz` dependency, so every operation has a pure-Python fallback
+and the emitted file prints which backend it took. That is also what makes the artifact portable:
+it runs on a machine that has never heard of this repository.
+
+**Operands are dyadic on purpose.** Values are drawn from `{-7..7}`, divided by 8 for a float
+format, so every product and every partial sum is exact in the accumulator and the tolerance is
+`0`. A difference at the end is then a *walk* error and never a rounding one — this program checks
+a decomposition, and letting rounding share the same tolerance would make a failure ambiguous.
 
 ---
 
@@ -775,3 +940,5 @@ cd backend && uv run pytest tests/unit/test_pipeline.py::test_double_buffering_h
 | an unsupported stationarity is refused, not clamped | §2.5.1 | `docs/CORRECTIONS.md` D53, CLAUDE.md #8 |
 | split-K trades DRAM traffic for wave occupancy | §2.5.1 | `docs/MODEL.md` §6.1, `docs/CORRECTIONS.md` D53 |
 | 436/186 TOP/s achieved, 2.34x inverted | §6.1 | `docs/CORRECTIONS.md` D35, D37 |
+| the emitted program's tier-1 counts | §2.6 | `docs/MODEL.md` §6.8, `docs/CORRECTIONS.md` D54 |
+| B fetched 756 MB against 12 MB compulsory and 0 charged | §2.6 | `docs/MODEL.md` §6.2, `docs/CORRECTIONS.md` D54 |

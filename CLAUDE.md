@@ -46,7 +46,10 @@ This is the frame for every judgement call below, and it changes what counts as 
   occupancy-against-traffic trade are all for. A model that says *what* without *why* has failed at
   the only job that matters here.
 - **Prefer the artifact a reader can check by hand or run.** `single_layer_encoder_toy` is sized to
-  be countable on paper for this reason; the emitted kernel code (D54) exists for the same one.
+  be countable on paper for this reason; `bwz matmul --emit` (D54) exists for the same one — it
+  writes the decomposition as a program that walks the grid, counts what it moves, and asserts
+  those counts against the report. When the program and the model disagree, one of them is wrong,
+  and that is the point rather than an embarrassment.
 - **Two architectures differing on the same workload is the most valuable output the tool has.**
   Identical arithmetic and identical traffic landing on opposite sides of two ridge points teaches
   more than either number alone, which is why `compare`, the banded timeline and the shared roofline
@@ -138,6 +141,7 @@ Nothing in `analysis/` may import from `api/`. Nothing in `graph/` may import fr
 | A new dtype | `spec/dtypes.py` only — widths are definitions, not calibration | `docs/SCHEMA.md` dtype lists |
 | A figure | `backend/scripts/plot_*.py`, never inside `bwz/` | `docs/plots/README.md`, `make plots` |
 | An interactive view | `backend/scripts/timeline_html.py` / `dataflow_html.py` — one self-contained file each, no CDN, no server, no third-party viewer | `docs/plots/README.md` |
+| A runnable emitted kernel | `bwz/emit/<kernel>.py`, with its runtime in `bwz/emit/_harness.py` — one module, inlined by source, importing nothing from `bwz` and never requiring numpy | `docs/CLI.md` §2.6, `docs/MODEL.md` §6.8, unit + subprocess test |
 | A CLI command or flag | `cli.py` | `docs/CLI.md` — with real output, not a description |
 | A new UI panel | `frontend/src/components/` | `Dashboard.tsx`, vitest |
 
