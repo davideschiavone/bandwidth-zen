@@ -85,8 +85,9 @@ roofline, the stationarity that decides the tile grid, the tiling search, memory
 parallelism rewrites, and collective cost model, then classifies bottlenecks and emits a `Report`. `api/` and `cli.py` are thin shells over
 `analyze(model, hardware, deployment) -> Report`. The frontend only ever consumes `Report`.
 
-**The dependency arrow points one way:** `spec → graph → operators → analysis → report → {api, cli}`.
-Nothing in `analysis/` may import from `api/`. Nothing in `graph/` may import from `analysis/`.
+**The dependency arrow points one way:** `spec → graph → operators → analysis → report → {api, cli,
+emit, figures}`. Nothing in `analysis/` may import from `api/`, `emit/` or `figures/`. Nothing in
+`graph/` may import from `analysis/`.
 
 ---
 
@@ -132,15 +133,16 @@ Nothing in `analysis/` may import from `api/`. Nothing in `graph/` may import fr
 | A new operator cost model | `operators/<family>.py`, registered via `@register_op` | `docs/MODEL.md`, unit test |
 | A new chip | `profiles/chips/<id>.yaml` with `source_url` | `tests/unit/test_profiles.py` |
 | A new model | `profiles/models/<id>.yaml` with `source_url` | golden param-count test |
-| An ad-hoc kernel-probe factory (`matmul_kernel`, `encoder_layer_kernel`) | `bwz/kernels.py` | `cli.py`, `scripts/plot_pipeline.py`, `docs/CLI.md` |
+| An ad-hoc kernel-probe factory (`matmul_kernel`, `encoder_layer_kernel`) | `bwz/kernels.py` | `cli.py`, `bwz/figures/timeline.py`, `docs/CLI.md` |
 | A new empirical constant | `calibration.py` only | `docs/CALIBRATION.md` |
 | A new report field | `report.py` | `docs/report.schema.json`, TS types, snapshot tests |
 | A new parallelism strategy | `analysis/parallelism.py` + `collectives.py` | `docs/MODEL.md` |
 | A new dataflow / stationarity | `analysis/stationarity.py` — the one place a tile grid is decided | `docs/MODEL.md` §6.1, `docs/SCHEMA.md`, unit test |
 | A new model family | `spec/model_spec.py` + `graph/<family>.py`, dispatched in `graph/builder.py` | `docs/SCHEMA.md`, `docs/MODEL.md`, golden test |
 | A new dtype | `spec/dtypes.py` only — widths are definitions, not calibration | `docs/SCHEMA.md` dtype lists |
-| A figure | `backend/scripts/plot_*.py`, never inside `bwz/` | `docs/plots/README.md`, `make plots` |
-| An interactive view | `backend/scripts/timeline_html.py` / `dataflow_html.py` — one self-contained file each, no CDN, no server, no third-party viewer | `docs/plots/README.md` |
+| A **matplotlib** figure (PNG) | `backend/scripts/plot_*.py`, never inside `bwz/` | `docs/plots/README.md`, `make plots` |
+| A self-contained **HTML** view | `bwz/figures/`, reached by a `--timeline`/`--animate` flag on the report command that draws it — stdlib only, no plotting library (D55) | `docs/CLI.md` §6, `docs/plots/README.md`, `make plots` |
+| A new page in an interactive view | `bwz/figures/timeline_html.py` / `dataflow_html.py` — one self-contained file each, no CDN, no server, no third-party viewer | `docs/plots/README.md` |
 | A runnable emitted kernel | `bwz/emit/<kernel>.py`, with its runtime in `bwz/emit/_harness.py` — one module, inlined by source, importing nothing from `bwz` and never requiring numpy | `docs/CLI.md` §2.6, `docs/MODEL.md` §6.8, unit + subprocess test |
 | A CLI command or flag | `cli.py` | `docs/CLI.md` — with real output, not a description |
 | A new UI panel | `frontend/src/components/` | `Dashboard.tsx`, vitest |

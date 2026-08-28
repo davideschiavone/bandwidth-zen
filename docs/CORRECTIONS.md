@@ -2457,3 +2457,92 @@ staged-once-per-group claim, the swept dimension, the bit-serial tax — is stil
 that would fail to run if it were wrong rather than by a substring search over prose. Four
 pre-existing `mypy` errors in `scripts/plot_pipeline.py` went with the retired `a_strategy`/
 `b_dataflow` parameters.
+
+
+---
+
+## D55 — One command per workload: the figures move onto `bwz` (2026-08-28)
+
+Two entry points drew one workload. `bwz matmul -M 16 -N 16 -K 16 -c a100_80gb` printed the table;
+`python scripts/plot_pipeline.py --matmul 16,16,16 --chip a100_80gb` drew the picture. The user's
+verdict: *"I want to use `uv run bwz matmul`, else it's confusing"* — and they were right about more
+than the spelling. The two had different flag names for the same inputs, different defaults (the
+script's `--encoder` defaulted to `-S 512` against the command's `-S 4`, a mismatch `docs/CLI.md`
+had to carve out and explain), and **two separate `analyze()` calls** whose `DeploymentSpec`s
+differed (`output_tokens: 1` and no phase against `0` and prefill). Identical for a matmul today,
+by luck rather than by construction.
+
+Now `--timeline`, `--animate`, `--compare-with`, `--out`, `--steps` and `-q/--quiet` are flags on
+`bwz matmul`, `bwz run` and `bwz encoder-layer`, each drawing its own workload from the report it
+just printed.
+
+### Where the code went, and the rule that had to change
+
+`scripts/plot_pipeline.py` → `bwz/figures/timeline.py`, with `timeline_html.py` and
+`dataflow_html.py` beside it. `git mv`, so the history follows.
+
+CLAUDE.md said *"a figure goes in `backend/scripts/plot_*.py`, never inside `bwz/`"*. The reason,
+stated in `pyproject.toml`, is that the engine must never import a plotting library and `make test`
+must not pull one in. That reason does not apply to these three files: the timeline and the flow
+animation are hand-written SVG and JavaScript, standard library only — D37 removed the last
+matplotlib import from them. The rule is now split by what it was actually protecting: **matplotlib
+figures** stay in `scripts/`, **self-contained HTML views** live in `bwz/figures/`. The dependency
+arrow gains `figures` beside `api`, `cli` and `emit`, all consumers, none of them imported by
+`analysis/`.
+
+Keeping the code in `scripts/` and importing it from `cli.py` was considered and is not possible:
+`scripts/` is not a package and does not ship in a wheel.
+
+### What this bought beyond the spelling
+
+- **One analysis per run.** `build_matmul` and `build_phases` take the caller's own `Report` and
+  `DeploymentSpec` instead of rebuilding them, so the picture and the table above it cannot describe
+  different runs. `bwz matmul --stationarity ws --timeline` draws the decomposition the numbers came
+  from because there is only one.
+- **Tests, for the first time.** Nothing imported `plot_pipeline.py`, so 3200 lines had no coverage
+  at all: a broken page was found by opening one in a browser, or not at all.
+  `tests/unit/test_figures.py` now pins self-containment (no fetchable reference, no network call in
+  any `<script>` — checked over the script blocks alone, because the page also *displays* the
+  emitted program, whose `Scratchpad.band(key, fetch)` callback is a false positive for a
+  whole-page search), the sections the docs promise, the no-tile-grid fallback, and that the drawn
+  trace sums to the reported latency.
+- **`mypy`'s configured `files = ["bwz", "tests"]` now covers them permanently**, rather than only
+  when someone typed `mypy .`.
+- **A pre-existing crash, found by the move.** `bwz matmul -d fp32 -c a100_80gb` raised
+  `ZeroDivisionError`: the tile grid was built unconditionally with `*(dims or (0, 0))`, and A100
+  runs fp32 on its CUDA cores, which declare no array geometry. It had never worked. The grid is now
+  built only where there is an array to tile against — an exception is never an acceptable output
+  (CLAUDE.md #8).
+
+### The decisions
+
+**`--compare-with CHIP`, not a repeatable `--chip`.** `plot_pipeline --compare` drew one workload on
+N chips; `bwz compare` is a different command entirely, a chips × models table with the prefill
+crossover. Rather than overload the word or make `--chip` repeatable on every report command — which
+raises the question of what *table* to print for two chips — the primary chip stays `--chip` and the
+figure gains the others. The table stays single-chip; only the page compares.
+
+**`--quiet` rather than silence by default.** A report command reports; the figure is extra. But
+`make plots` would then print a wall of tables, which is what the two-command split was avoiding, so
+`-q` drops the report. It never silences an error: infeasibility and a refused flag combination
+print regardless, since they are the answer rather than a table.
+
+**Filenames are unchanged** — `timeline-<chip>-<dtype>.html` and the rest — so links to
+`docs/plots/` still resolve and `make plots` produces the same pages. The phase is in the name only
+where there is more than one to tell apart, which is why `bwz run` has it and the encoder does not.
+
+### Verified by byte-for-byte reproduction
+
+Ten reference pages were generated from the script before the move — matmul, encoder, model,
+comparison, animation, fp32, `--a-strategy stream`, the emitted program — and reproduce **byte for
+byte** through the new CLI, modulo the invocation each page records in its own footer. That is the
+whole argument that a 3200-line move of untested code changed nothing.
+
+### Not done, flagged only
+
+- **`scripts/plot_roofline.py` stays a script.** It is the one thing that genuinely needs
+  matplotlib. Folding it in would mean either an optional import inside the package or a hard
+  dependency, and neither is worth it for a PNG.
+- **`bwz compare` still prints only a table.** Teaching it to draw the shared-axis page would need a
+  whole workload surface added to a command that takes `--models`; `--compare-with` covers the same
+  ground from the command that already has one.

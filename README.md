@@ -63,7 +63,7 @@ validated, rather than trusting this README's snapshot of them:
 ```bash
 uv run bwz --help                                       # the subcommands, in typical order
 uv run bwz matmul --help                                 # every matmul flag, incl. dataflow strategy
-uv run python scripts/plot_pipeline.py --help            # the figure script: workload / chip / strategy / output
+uv run bwz matmul --help                                # add --timeline / --animate to any report command
 ```
 
 **[`docs/CLI.md`](docs/CLI.md) is the full command reference** — every flag, and the exact
@@ -164,8 +164,7 @@ fudge factor, and `--ideal` does not remove either.
 **To see that same run instead of reading it** — one row per hardware resource, zoomable:
 
 ```bash
-uv run python scripts/plot_pipeline.py \
-  --chip a100_80gb --matmul 10000,10000,10000 --ideal --out ..
+uv run bwz matmul -M 10000 -N 10000 -K 10000 --chip a100_80gb --ideal --timeline --out ..
 xdg-open ../timeline-a100_80gb-fp16.html
 ```
 
@@ -307,7 +306,7 @@ Full derivation in `docs/CLI.md` §2.5.
 
 ### A and B: how a matmul's operands move
 
-Two more flags on `bwz matmul` (and `bwz run`, and `plot_pipeline.py`), answering two different
+Two more flags on `bwz matmul` (and `bwz run`), answering two different
 questions about a lone matmul's DRAM traffic *within* the grid the stationarity chose — full
 derivation in `docs/CLI.md` §2.5:
 
@@ -424,9 +423,8 @@ fudge factor.
 # 1. the numbers
 uv run bwz matmul -M 10000 -N 10000 -K 10000 --chip a100_80gb --dtype fp16 --ideal
 
-# 2. the picture of that same run
-uv run python scripts/plot_pipeline.py \
-  --chip a100_80gb --matmul 10000,10000,10000 --ideal --out ..
+# 2. the picture of that same run — same command, one more flag
+uv run bwz matmul -M 10000 -N 10000 -K 10000 --chip a100_80gb --ideal --timeline --out ..
 
 # 3. open it
 xdg-open ../timeline-a100_80gb-fp16.html
@@ -436,43 +434,36 @@ xdg-open ../timeline-a100_80gb-fp16.html
 hands the file to a browser that may already be running, so look for a **new tab in an existing
 window**.
 
-### `plot_pipeline.py` — where the time went
+### `--timeline` — where the time went
 
-It draws one of three things, and the flags mirror the report commands above:
+It is a flag on the command that already prints the numbers, so there is one place to say what to
+run and one set of defaults (D55):
 
 ```bash
-# a matmul (the default)
-… plot_pipeline.py --chip a100_80gb --matmul 10000,10000,10000 --ideal --out ..
+# a matmul
+bwz matmul -M 10000 -N 10000 -K 10000 -c a100_80gb --ideal --timeline --out ..
 
 # a profile — one page per phase
-… plot_pipeline.py --chip a100_80gb --model llama3_8b -S 512 --out ..
+bwz run --model llama3_8b -c a100_80gb --input-tokens 512 --timeline --out ..
 
-# an ad-hoc single-layer encoder, sized like `bwz encoder-layer`
-… plot_pipeline.py --chip a100_80gb --encoder --dmodel 4096 --nheads 64 --ffn 16384 -S 4096 \
-    --ideal --out ..
+# an ad-hoc single-layer encoder
+bwz encoder-layer -c a100_80gb --dmodel 4096 --nheads 64 --ffn 16384 -S 4096 --ideal \
+    --timeline --out ..
 ```
 
-`--help` groups every flag by which workload it belongs to. `--chip` (repeatable) · `--compare` ·
-`--weights` · `--ideal` · `--steps` (default 256 — the only resolution knob; the page zooms, so
-there is no second, coarser register to keep legible) · `--out` apply to all three. `--matmul M,N,K`
-· `--model ID` · `--encoder` (with `--dmodel --nheads --ffn --vocab` and `-S/--tokens`)
-pick the workload — passing two of them is rejected, not resolved by silent priority.
+The shape and dataflow flags are the ones that command already had — `--stationarity`,
+`--split-k`, `--a-strategy` and the rest ([what they
+mean](#stationarity-which-operand-stays-resident), `docs/CLI.md` §2.5) draw the decomposition the
+table above them was computed from, because there is only one analysis. `--animate` adds the
+playback page (matmul and encoder; a full model's per-operation trace is past what a station
+diagram can show). `--out` · `--steps` (default 256 — the only resolution knob; the page zooms) ·
+`-q/--quiet` (drop the table, keep the `wrote …` lines) apply to all three.
 
-The dataflow flags (`--stationarity`, `--split-k`, `--a-strategy`, `--b-dataflow`,
-`--a-residency-tiles`, `--a-prefetch-depth`, `--iterations` — [what they
-mean](#stationarity-which-operand-stays-resident), `docs/CLI.md` §2.5) belong to the default matmul
-workload the same way the shape flags belong to `--encoder`: passing either set with the wrong workload is an error naming the flag and why, not one
-that quietly did nothing —
+### `--compare-with` — two chips, one workload, one picture
 
 ```bash
-$ … plot_pipeline.py --chip a100_80gb --nheads 64
-plot_pipeline.py: error: --nheads only applies to --encoder; pass --encoder or drop it
-```
-
-### `--compare` — two chips, one workload, one picture
-
-```bash
-… plot_pipeline.py --chip a100_80gb --chip metis_aipu --compare --model gemma3_4b -S 512
+bwz run --model gemma3_4b -c a100_80gb --compare-with metis_aipu \
+    --weights int8 --input-tokens 512 --output-tokens 1 --timeline
 ```
 
 The time axis is **shared and absolute**, so a bar three times as long took three times as long —

@@ -444,8 +444,8 @@ def _draw(
             # An error outlives --quiet, for the same reason infeasibility does.
             console.quiet = False
             console.print(
-                "[red]bwz:[/red] --animate plays one chip's schedule back; drop --compare-with "
-                "or drop --animate."
+                "[red]bwz:[/red] --animate plays back one chip; drop --compare-with or "
+                "drop --animate."
             )
             raise typer.Exit(code=1)
         destination = out / f"animate-{stem}.html"

@@ -146,7 +146,7 @@ arrow, no milestone re-ordering.
   into a latency. **Folding it in is Session 5 work**, since it moves every double-buffered result.
 - **`--ideal`** (both efficiency de-ratings to 1.0), so a number can be checked against a datasheet
   by hand and the unfitted part of a prediction is visible rather than baked in.
-- **`scripts/plot_roofline.py`, `scripts/plot_pipeline.py`, `make plots`** — figures computed by
+- **`scripts/plot_roofline.py`, `bwz/figures/`, `make plots`** — figures computed by
   calling `analyze()`, outside the package, in their own dependency group.
 - **Docs**: `docs/CLI.md` (every command, with real output), `docs/plots/README.md`, SCHEMA §2.4.
 

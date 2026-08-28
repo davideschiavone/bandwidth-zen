@@ -281,7 +281,7 @@ declares.
 Exit code 2, the same as any other infeasible report. `rs` is implemented but no profile declares
 it; if one ever does, `report.assumptions` labels its numbers unvalidated.
 
-Both flags exist on `bwz run` and on `plot_pipeline.py` too — and unlike the A/B knobs below they
+Both flags exist on `bwz run` too, and reach its figures — and unlike the A/B knobs below they
 are **not** inert on a network, since every matmul in the graph is decomposed the same way. In the
 figures the effective grid appears in the page banner, and the animation's geometry panel draws the
 resident operand's grid (`docs/plots/README.md`).
@@ -419,7 +419,7 @@ Everything above §2.5 describes a schedule. `--emit` writes it as **real Python
 same tile grid, stages A on the same events, hands tiles to cores the same way, counts what it
 moves, and asserts those counts against the report it came from (D54). This is what a chip's
 deployment listing *is* now: the pseudo-C loop nest the figures used to print was retired for it in
-the same change, and `plot_pipeline.py`'s pages and its `--animate` code pane both show this file.
+the same change, and `--timeline`'s page and `--animate`'s code pane both show this file.
 
 ```bash
 uv run bwz matmul -M 64 -N 64 -K 128 --chip a100_80gb --emit /tmp/k.py
@@ -729,68 +729,80 @@ Flags: `--chips`, `--models` (comma-separated), `--batch`, `--input-tokens`, `--
 
 ## 6. Figures
 
-**The figures are not the report.** `bwz matmul` and `bwz run` print the numbers, their derivations
-and the assumptions drawer (§2, §4); the plot scripts write files and print only `wrote …`. Two
-commands, on purpose — `make plots` runs the scripts several times and a wall of tables per chip
-would drown it.
+The figures come from **the same commands that print the numbers** — one command per workload, so
+there is no second spelling of `-M`/`-N`/`-K` and no second set of defaults to keep in step (D55).
+Add `--timeline` for the zoomable page, `--animate` for the playback, `--out` for where they go:
+
+```bash
+uv run bwz matmul -M 16 -N 16 -K 16 -c a100_80gb --ideal --timeline --animate --out ~/figs
+uv run bwz run --model llama3_8b -c a100_80gb --input-tokens 512 --timeline --out ~/figs
+uv run bwz encoder-layer -c a100_80gb -S 512 --timeline --animate --out ~/figs
+```
+
+```
+wrote ~/figs/timeline-a100_80gb-fp16.html
+wrote ~/figs/animate-a100_80gb-fp16.html
+```
+
+| flag | on | meaning |
+|---|---|---|
+| `--timeline` | `matmul`, `run`, `encoder-layer` | the zoomable page: where the time went, per hardware resource, with the roofline and the runnable loop nest below it |
+| `--animate` | `matmul`, `encoder-layer` | a second page playing the same schedule back as DRAM → SRAM → Accelerator motion. Not on `run`: a full model's per-operation trace coalesces hundreds of operations, past what a station diagram can usefully show (D42) |
+| `--compare-with CHIP` | all three | draw that chip alongside `--chip` on **one** page with a shared, absolute time axis. Repeatable. Refused with `--animate`, which plays one chip back |
+| `--out DIR` | all three | where the pages go (default `.`) |
+| `--steps N` | all three | resolution of the drawn trace (default 256) — the only such knob, since the page zooms rather than needing a second, coarser register (D37) |
+| `-q`, `--quiet` | all three | drop the report table; the `wrote …` lines still print |
+
+Everything else is the command's own: the shape flags, the dataflow strategy flags of §2.5, and
+`--ideal`. That is the point — `bwz matmul --stationarity ws --timeline` draws the decomposition
+the table above it was computed from, because there is only one analysis (D55).
+
+**`--quiet` never silences an error.** An infeasible configuration and a refused flag combination
+print regardless, since they are the answer rather than a table (CLAUDE.md #8). That is what makes
+it safe for `make plots`, which passes it to avoid a wall of tables per chip.
+
+**`--compare-with` insists on one precision every chip supports**, and says which they share when
+they do not — per-chip defaults would put a run that moved half the bytes on the same time axis as
+one that did not (D29, §6.1):
+
+```bash
+uv run bwz matmul -M 512 -N 512 -K 512 -c a100_80gb -d fp16 --compare-with metis_aipu --timeline
+```
+
+```
+bwz: metis_aipu has no fp16 datapath, so --compare-with cannot run the same workload on every
+chip. Supported by all: int8
+```
+
+### The PNG figures still have a script
+
+`scripts/plot_roofline.py` is the one thing left in `scripts/`, because it is the one thing that
+needs matplotlib — kept in its own `plots` dependency group so `make test` never pulls it in, and
+so nothing in `bwz/` ever imports a plotting library. The HTML pages import nothing beyond the
+standard library, which is why they could move into the package at all (D55).
+
+```bash
+uv run --group plots python scripts/plot_roofline.py --chip a100_80gb --model llama3_8b
+uv run --group plots python scripts/plot_roofline.py --chip chip_a --weights int8 \
+  --model gemma3_4b --tokens 512 \
+  --matmul 512,4096,4096 --matmul 128,4096,4096 --matmul 1,4096,4096
+```
+
+`plot_roofline.py`: `--chip`, `--weights`, `--matmul M,N,K` (repeatable), `--model ID`
+(repeatable), `--tokens`, `--out`.
 
 ```bash
 make plots        # from the repo root — regenerates all of docs/plots/
 ```
 
-or individually, from `backend/`:
+### 6.1 `--compare-with` — two chips, one workload, one page
+
+Run the command twice and each chip gets its own page, x normalised to that chip's own span. Add
+`--compare-with` and they land in **one** page on a **shared, absolute** axis:
 
 ```bash
-# roofline + the three-element machine diagram (roofline-*.png, machine-*.png) — needs matplotlib
-uv run --group plots python scripts/plot_roofline.py --chip a100_80gb --model llama3_8b
-uv run --group plots python scripts/plot_roofline.py --chip chip_a --weights int8 \
-  --model gemma3_4b --tokens 512 \
-  --matmul 512,4096,4096 --matmul 128,4096,4096 --matmul 1,4096,4096
-
-# resource timeline, one self-contained zoomable HTML page per chip — pure stdlib,
-# no --group plots needed: nothing here imports a plotting library at all
-uv run python scripts/plot_pipeline.py
-uv run python scripts/plot_pipeline.py --chip h100_sxm --matmul 8192,8192,8192
-```
-
-`plot_roofline.py`: `--chip`, `--weights`, `--matmul M,N,K` (repeatable), `--model ID`
-(repeatable), `--tokens`, `--out`.
-`plot_pipeline.py` draws one of three things, and the flags mirror the report commands:
-
-| what | flags | if you pass none of them |
-|---|---|---|
-| a matmul (default) | `--matmul M,N,K`, plus the dataflow strategy flags of §2.5 | `4096,4096,4096`, `stage`/`write-ahead`/1 iteration — the same defaults as `bwz matmul` |
-| a profile | `--model ID`, `--tokens/-S` — one page per phase | no default `--model`; `-S` defaults to **512** |
-| an ad-hoc single-layer encoder | `--encoder --dmodel --nheads --ffn --vocab --tokens/-S` | `--dmodel 8 --nheads 2 --ffn 16 --vocab 16`, `-S` **512** |
-
-**`--ffn`'s default is conditional, same as `bwz encoder-layer`'s (D45): 16 only when `--dmodel`
-is also left at its default; pass `--dmodel` explicitly with no `--ffn` and it becomes `4 x --dmodel`
-instead, so `--dmodel 4096` alone gives `--ffn 16384`, not 16. An explicit `--ffn` always wins.
-
-**The encoder's `-S` default does not match `bwz encoder-layer`'s own default.** The report
-command defaults to `-S 4` (`bwz encoder-layer`'s whole point is a shape small enough to count by
-hand, §3.1); this script defaults to `-S 512`, the same default every `--model`/`--encoder` figure
-uses, because a 4-token trace has almost nothing to draw a picture of. Pass `-S 4` explicitly if you
-want the figure to match the hand-countable numbers §3 prints.
-
-Plus `--chip` (repeatable; **defaults to `a100_80gb` and `chip_a` together** — two pages — when
-omitted entirely, not one), `--compare`, `--weights` (defaults **per chip**: the first it supports
-of fp16, int8, bf16, fp32, in that order — so two chips can default to two different precisions,
-which is exactly why `--compare` refuses to run without picking one shared dtype, §6.1), `--ideal`,
-`--steps` (default 256 — the only resolution knob; the page zooms, so there is no separate
-static-figure register to keep legible), `--out` (default `../docs/plots`, i.e. relative to
-`backend/`), and `--animate` — matmul or `--encoder`, opt-in, `--model`/`--compare` still rejected;
-writes a second self-contained page playing the same schedule back as DRAM -> SRAM -> Accelerator
-motion instead of a static strip (`docs/plots/README.md` "Playing the flow animation", D40, D42).
-
-### 6.1 `--compare` — two chips, one workload, one page
-
-Without it, `--chip A --chip B` writes one page per chip, each with x normalised to that chip's own
-span. With it, they land in **one** page on a **shared, absolute** axis:
-
-```bash
-uv run python scripts/plot_pipeline.py \
-  --chip a100_80gb --chip metis_aipu --compare --model gemma3_4b -S 512
+uv run bwz run --model gemma3_4b -c a100_80gb --compare-with metis_aipu \
+  --weights int8 --input-tokens 512 --output-tokens 1 --timeline -q --out ../docs/plots
 ```
 
 ```
@@ -802,38 +814,35 @@ Both views are kept on purpose (`docs/CORRECTIONS.md` D29). Absolute is the axis
 faster and by how much"; normalised is the axis for "how is *this* machine's time distributed", and
 at 13x the faster chip's whole run is 7% of a shared axis.
 
-It works for all three workload kinds and for more than two chips:
+It works on all three commands and for more than two chips — the flag repeats:
 
 ```bash
-… --chip a100_80gb --chip metis_aipu --compare --matmul 4096,4096,4096
-… --chip a100_80gb --chip metis_aipu --compare --encoder --dmodel 4096 --nheads 64 --ffn 16384 -S 1024
-… --chip a100_80gb --chip metis_aipu --chip jetson_orin --compare --matmul 2048,2048,2048
+bwz matmul -M 4096 -N 4096 -K 4096 -c a100_80gb -d int8 --compare-with metis_aipu --timeline
+bwz encoder-layer -c a100_80gb --dmodel 4096 --nheads 64 --ffn 16384 -S 1024 \
+  --compare-with metis_aipu --weights int8 --timeline
+bwz matmul -M 2048 -N 2048 -K 2048 -c a100_80gb -d int8 \
+  --compare-with metis_aipu --compare-with jetson_orin --timeline
 ```
 
-A `--model` comparison pairs prefill against prefill and decode against decode, never across.
+A `bwz run` comparison pairs prefill against prefill and decode against decode, never across.
 
 **Every chip runs the same workload at the same precision**, which has to be enforced rather than
 assumed — A100 defaults to fp16 and Metis has no fp16 datapath, so per-chip defaults would compare
-two different amounts of traffic. `--compare` picks one dtype every chip supports and otherwise
-refuses:
+two different amounts of traffic. `--compare-with` refuses a precision any chip on the page cannot run:
 
 ```bash
-uv run python scripts/plot_pipeline.py \
-  --chip metis_aipu --chip a100_80gb --compare --weights fp16
+uv run bwz matmul -M 512 -N 512 -K 512 -c a100_80gb -d fp16 --compare-with metis_aipu --timeline
 ```
 
 ```
-bwz: metis_aipu has no fp16 datapath, so --compare cannot run the same workload on every chip.
-Supported by all: int8
+bwz: metis_aipu has no fp16 datapath, so --compare-with cannot run the same workload on every
+chip. Supported by all: int8
 ```
 
-```bash
-uv run python scripts/plot_pipeline.py --chip a100_80gb --compare
-```
+`--animate` is refused alongside it, since a playback follows one chip's schedule:
 
 ```
-bwz: --compare puts two or more chips in one figure and got 1; pass --chip twice, or drop
---compare for the per-chip view
+bwz: --animate plays back one chip; drop --compare-with or drop --animate.
 ```
 
 Rows are **banded by chip**, not aligned across them: A100 declares 3 memory levels and 2 compute
@@ -852,27 +861,22 @@ Below the two registers the comparison adds a **roofline register**: both chips'
 points and M=1 lines on one chart, with each chip's workload point on it. Inside that panel colour
 means *chip* rather than *resource*, which the panel says on itself. The arithmetic section is
 rendered **once** — it is a property of the workload, and the workload is the same on both
-machines — but the **deployment listing is rendered once per chip**, because how the work reaches
-the silicon is exactly what differs between them (D32).
+machines — but the **deployment section is rendered once per chip**, because how the work reaches
+the silicon is exactly what differs between them (D32/D54) — two loop nests, not one.
 
-The shape flags belong to `--encoder`; passing them with `--model` is an error, because a profile
-already carries its dimensions:
+Each command draws its own workload, so the shape flags are the ones that command already has:
+`bwz encoder-layer --dmodel …`, `bwz run --model …`. There is no way left to pass an encoder's
+dimensions to a profile, because they are different commands.
 
-```bash
-uv run python scripts/plot_pipeline.py --chip a100_80gb \
-  --encoder --dmodel 4096 --nheads 64 --ffn 16384 -S 4096 --ideal --out ..
-```
-
-`--model` draws a network instead of a matmul, one page per phase — which is where the
+`bwz run --timeline` draws a network, one page per phase — which is where the
 `COMPUTED — matmul 98% · attention 2%` breakdown earns itself:
 
 ```bash
-uv run python scripts/plot_pipeline.py \
-  --chip a100_80gb --model llama3_8b --tokens 512 --out ..
+uv run bwz run --model llama3_8b -c a100_80gb --input-tokens 512 --timeline --out ~/figs
 # timeline-a100_80gb-llama3_8b-{prefill,decode}-fp16.html
 ```
 
-`--out` is relative to where you run the script, so from `backend/` a bare `--out ..` lands in the
+`--out` is relative to where you run the command, so from `backend/` a bare `--out ..` lands in the
 repo root and from the repo root it lands *outside* the repo — with a `wrote ../timeline-….html`
 line that looks right either way. Pass an absolute path when it matters.
 
@@ -880,8 +884,7 @@ line that looks right either way. Pass an absolute path when it matters.
 
 ```bash
 cd backend
-uv run python scripts/plot_pipeline.py \
-  --chip a100_80gb --matmul 10000,10000,10000 --ideal \
+uv run bwz matmul -M 10000 -N 10000 -K 10000 -c a100_80gb --ideal --timeline \
   --out /absolute/path/you/want
 
 xdg-open /absolute/path/you/want/timeline-a100_80gb-fp16.html

@@ -280,7 +280,7 @@ and is inert, not an error, elsewhere; `report.assumptions` says so. Unlike the 
 also apply to a network, since every matmul in it is decomposed the same way.
 
 **`a_strategy`, `b_dataflow` and `iterations` are single-matmul-only knobs** (`bwz matmul`,
-`scripts/plot_pipeline.py --matmul`): `analysis/schedule.py` reads them only when the graph is one
+`bwz matmul --timeline`): `analysis/schedule.py` reads them only when the graph is one
 bare matmul, so they are silently inert on a network, whose activations are already governed by
 inter-operation residency (D15). Feasibility here is a **clamp, not a validation error**
 (CLAUDE.md #8): `a_strategy: whole` that does not fit the scratchpad falls back to `stage`, and
