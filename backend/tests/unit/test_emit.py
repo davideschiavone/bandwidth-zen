@@ -345,6 +345,7 @@ def test_the_emitted_program_imports_nothing_but_the_standard_library() -> None:
         "dataclasses",
         "importlib",
         "math",
+        "sys",
         "threading",
         "types",
         "typing",
@@ -503,3 +504,71 @@ def test_the_thread_warning_bar_comes_from_the_profiles(tmp_path: Path) -> None:
     assert "2048" not in program.source
     # And it is wired through, not merely declared.
     assert "warn_above=LARGEST_DECLARED_CORES" in program.source
+
+
+# ------------------------------------------------------------------------ --debug
+
+
+def test_debug_is_off_unless_asked_for() -> None:
+    """The narration is guarded at every call site, not filtered inside `log` (D60).
+
+    Volume is the whole reason it is optional: a 1000x2000x3000 matmul issues
+    1.5 million instruction tiles, and building a line for each one that nobody
+    reads would dominate the run. `if DEBUG:` costs a bool test.
+    """
+    program, *_ = _emit("a100_80gb")
+    source = program.source
+    assert 'DEBUG = "--debug" in sys.argv' in source
+
+    # Every log() call sits inside an `if DEBUG:` block. Checked with ast rather
+    # than by looking a few lines back, so a guard further up still counts and a
+    # coincidental "if DEBUG:" in a comment does not.
+    tree = ast.parse(source)
+    guarded = {
+        line
+        for node in ast.walk(tree)
+        if isinstance(node, ast.If) and isinstance(node.test, ast.Name) and node.test.id == "DEBUG"
+        for line in range(node.lineno, (node.end_lineno or node.lineno) + 1)
+    }
+    calls = [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "log"
+    ]
+    assert calls, "the narration exists at all"
+    unguarded = [line for line in calls if line not in guarded]
+    assert not unguarded, f"log() outside an `if DEBUG:` block at line(s) {unguarded}"
+
+
+@pytest.mark.parametrize(
+    ("chip_id", "dtype", "expected"),
+    [
+        ("a100_80gb", "fp16", "K is swept INSIDE"),
+        ("metis_aipu", "int8", "resident, M streams past it"),
+    ],
+)
+def test_debug_narrates_the_decomposition_it_is_of(chip_id: str, dtype: str, expected: str) -> None:
+    """What the narration says differs with the stationarity, like the nest does.
+
+    `os` reports an accumulator sweeping K; `ws` reports a resident B tile with M
+    streaming past and a PARTIAL landing in the shared accumulator. A single
+    generic "processing tile N" line would have been easier and would have taught
+    nothing (D60).
+    """
+    program, *_ = _emit(chip_id, dtype=dtype)
+    assert expected in program.source
+    marker = "PARTIAL into C" if chip_id == "metis_aipu" else "useful of "
+    assert marker in program.source
+
+
+def test_debug_counts_the_lines_it_will_print_from_a_constant_on_the_page() -> None:
+    """The heads-up figure is `mac_slots / SLOTS_PER_MMA` — exactly the mma count.
+
+    Derived rather than re-counted, so it cannot disagree with the walk: every
+    instruction tile issues SLOTS_PER_MMA slots, so the quotient IS the number of
+    `mma()` calls, and therefore of narrated lines.
+    """
+    program, *_ = _emit("a100_80gb")
+    assert 'issued = PREDICTED["mac_slots"] // SLOTS_PER_MMA' in program.source
+    predicted_calls = program.predicted["mac_slots"] / (16 * 16 * 16)
+    assert predicted_calls == 4 * 4 * 8, "4x4 grid, 8 k-steps at 64x64x128"

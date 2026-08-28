@@ -31,6 +31,7 @@ latency the model predicts.
 from __future__ import annotations
 
 import math
+import sys
 import threading
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -60,6 +61,30 @@ def _load_numpy() -> ModuleType | None:
 
 NUMPY = _load_numpy()
 BACKEND = "numpy" if NUMPY is not None else "pure Python"
+
+DEBUG = "--debug" in sys.argv
+"""Whether to narrate the walk: which core takes which tile, when A is staged,
+and every instruction tile issued.
+
+Off by default and guarded at each call site rather than filtered inside
+:func:`log`, because the volume is the whole problem: a 1000x2000x3000 matmul
+issues 1.5 million instruction tiles, and formatting a line for each one that
+nobody reads would dominate the run. ``if DEBUG:`` costs one bool test."""
+
+_LOG_LOCK = threading.Lock()
+
+
+def log(message: str) -> None:
+    """One line of ``--debug`` output.
+
+    Serialised: cores run concurrently and unsynchronised ``print`` interleaves
+    mid-line. The lock orders whole lines, not the work — two cores' lines may
+    still appear in either order, which is honest, because in this model they
+    genuinely run at the same time.
+    """
+    with _LOG_LOCK:
+        print(message)
+
 
 Tile = Any
 """One block of numbers: a 2-D numpy array where numpy is present, a list of
@@ -454,6 +479,8 @@ class Scratchpad:
                 band = fetch()
                 self._bands[key] = band
                 self._counters.count_staging_event()
+                if DEBUG:
+                    log(f"  stage A for key {key} -- crosses DRAM, once per key (D33)")
             return band
 
 
@@ -554,8 +581,12 @@ def run_waves(
             for wave in range(waves):
                 tile = wave * used_cores + core_id
                 if tile < tiles:
+                    if DEBUG:
+                        log(f"core {core_id:<5} wave {wave:<4} takes tile {tile}")
                     run_tile(tile)
                 else:
+                    if DEBUG:
+                        log(f"core {core_id:<5} wave {wave:<4} idle -- no tile left (D30)")
                     counters.count_idle_core_wave()
                 barrier.wait()
         # Caught broadly and re-raised on the main thread: a core that dies while

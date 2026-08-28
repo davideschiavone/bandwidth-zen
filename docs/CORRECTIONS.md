@@ -2805,3 +2805,66 @@ would never fire for anything.
 re-reads the emitted constant rather than absorbing the change silently. A second test asserts the
 figure ignores geometry-less units, since that is the part a future reader is most likely to
 "simplify".
+
+
+---
+
+## D60 — The emitted program can narrate its own walk (2026-08-28)
+
+The user, after adding `print`s by hand to trace a `K=17` run: *"can you add in the python
+generation print to debug those iterations (k-steps) and what each unit process? only if --debug is
+passed to the python script, else for bigger models or matmuls becomes too wide."*
+
+Reasonable, and the hand-editing was evidence: the questions D57 and D58 answered were both reached
+by instrumenting the emitted file, and the one place a `print` is most wanted — inside the K sweep —
+took reading two functions to find, because `run_waves` narrates cores and `run_tile` narrates
+k-steps and neither says anything by default.
+
+`python <emitted file> --debug` now prints:
+
+```
+--debug: 1 tile(s) over 1 core(s) in 1 wave(s), issuing 2 instruction tile(s).
+core 0     wave 0    takes tile 0
+  stage A for key (0, 0, 0) -- crosses DRAM, once per key (D33)
+  tile 0      C[0:16, 0:16]  piece 0, kt 0..2
+    kt=0    A[0:16, 0:16] @ B[0:16, 0:16]      4,096 useful of 4,096 slots
+    kt=1    A[0:16, 16:17] @ B[16:17, 0:16]        256 useful of 4,096 slots
+```
+
+### Decisions
+
+**Guarded at each call site, not filtered inside `log`.** Volume is the entire reason the flag
+exists: a 1000x2000x3000 matmul issues 1.48 million instruction tiles, and formatting a line for
+each one that nobody reads would dominate a run whose docstring already insists it is not a
+benchmark. `if DEBUG:` costs one bool test. A test asserts, with `ast`, that every `log()` call sits
+inside an `if DEBUG:` block — checked structurally rather than by eye, since the cost of missing one
+is silent and only shows up on a large shape.
+
+**The narration is per-decomposition, not generic.** `os` reports an accumulator sweeping K; `ws`
+reports a resident B tile with M streaming past and a PARTIAL landing in the shared accumulator;
+`is` reports N streaming past a resident A tile. A single "processing tile N" line would have been
+less code and would have taught nothing — the same reason D54 emits different loop nests rather than
+one parameterised walk.
+
+**The line count is derived, not re-counted.** The header says how many lines to expect from
+`PREDICTED["mac_slots"] // SLOTS_PER_MMA`. Every instruction tile issues `SLOTS_PER_MMA` slots, so
+that quotient *is* the number of `mma()` calls and therefore of narrated lines — one expression,
+taken from a constant already on the page, rather than a second count free to drift.
+
+**Output is serialised through a lock.** Cores run concurrently and unsynchronised `print`
+interleaves mid-line. The lock orders whole lines and nothing else: two cores' lines may still
+appear in either order, which is honest, because in this model they genuinely run at the same time.
+
+### What it makes visible
+
+The staging structure D33 asserts, for one: on a 48x32x32 run, core 0 stages the band for grid row
+0, core 1 takes the next tile of that row and stages **nothing**, core 2 stages row 1. "A is staged
+once per row-band, shared across cores" stops being a claim in a docstring.
+
+And the idle tail: `core 3 wave 6 idle -- no tile left (D30)`, three of them on a 25-tile run over
+4 cores, against the `idle core-waves 3` the tier-1 table asserts two screens further down. The
+same number, once as a line per occurrence and once as a total.
+
+`sys` joins the emitted program's import list, which the standard-library allowlist test now
+includes. No count, assertion or byte moved; `docs/CLI.md` §2.6's verbatim output block is unchanged
+because that run passes no flag.

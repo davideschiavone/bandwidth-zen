@@ -283,6 +283,13 @@ def _docstring(
         "runtime it needs — counted DRAM, the shared staging buffer, the lockstep wave",
         "loop — is at the BOTTOM, out of the way of the part you came for.",
         "",
+        "    $ python <this file> --debug",
+        "",
+        "narrates the walk: which core takes which tile in which wave, when A is",
+        "staged, and every instruction tile issued with its operand ranges. One line",
+        "per instruction tile, so it is for small shapes — the run above issues one",
+        "line for every mma() call, which a large matmul has millions of.",
+        "",
         "What is really executed here, and what is only written down:",
         "",
         "  stationarity   real — a different loop nest, a different resident buffer",
@@ -858,13 +865,28 @@ def _accumulator_nest(grid: TileGrid) -> list[Line]:
             "    band = stage_a(tile, dram, pad)",
             "",
             "    acc = zeros(m1 - m0, n1 - n0, ACC_DTYPE)     # the accumulator that stays put",
+            "    if DEBUG:",
+            "        log(",
+            '            f"  tile {tile:<6} C[{m0}:{m1}, {n0}:{n1}]  piece {part}, "',
+            '            f"kt {kt0}..{kt1}"',
+            "        )",
             "    for kt in range(kt0, kt1):                   # K is swept INSIDE this tile",
             "        k0, k1 = kt * ROWS, min(kt * ROWS + ROWS, K)",
             "        a = sub(band, 0, m1 - m0, k0 - k_lo, k1 - k_lo)   # already on chip",
         ]
     )
+    out += [("        b = dram.read_b(k0, k1, n0, n1)                   # crosses DRAM", "load_b")]
+    out += _plain(
+        [
+            "        if DEBUG:",
+            "            log(",
+            '                f"    kt={kt:<4} A[{m0}:{m1}, {k0}:{k1}] @ B[{k0}:{k1}, {n0}:{n1}]"',
+            '                f"  {(m1 - m0) * (k1 - k0) * (n1 - n0):>9,} useful of "',
+            '                f"{SLOTS_PER_MMA:,} slots"',
+            "            )",
+        ]
+    )
     out += [
-        ("        b = dram.read_b(k0, k1, n0, n1)                   # crosses DRAM", "load_b"),
         ("        mma(acc, a, b, counters, SLOTS_PER_MMA)", "exec"),
         ("", None),
     ]
@@ -912,10 +934,21 @@ def _weight_nest() -> list[Line]:
         [
             "    band = stage_a(tile, dram, pad)",
             "",
+            "    if DEBUG:",
+            '        log(f"  tile {tile:<6} B[{k0}:{k1}, {n0}:{n1}] resident, M streams past it")',
             "    for mt in range(M_TILES):            # M streams past the resident tile",
             "        m0, m1 = mt * ROWS, min(mt * ROWS + ROWS, M)",
             "        a = sub(band, m0, m1, 0, k1 - k0)        # already on chip",
             "        product = zeros(m1 - m0, n1 - n0, ACC_DTYPE)",
+        ]
+    )
+    out += _plain(
+        [
+            "        if DEBUG:",
+            "            log(",
+            '                f"    mt={mt:<4} A[{m0}:{m1}, {k0}:{k1}] @ B[{k0}:{k1}, {n0}:{n1}]"',
+            '                f" -> PARTIAL into C[{m0}:{m1}, {n0}:{n1}]"',
+            "            )",
         ]
     )
     out += [
@@ -949,12 +982,25 @@ def _input_nest() -> list[Line]:
             "    band = stage_a(tile, dram, pad)",
             "    a = sub(band, 0, m1 - m0, k0, k1)            # the operand that stays put",
             "",
+            "    if DEBUG:",
+            "        log(",
+            '            f"  tile {tile:<6} A[{m0}:{m1}, {k0}:{k1}] resident, N streams past it"',
+            "        )",
             "    for nt in range(N_TILES):            # N streams past the resident tile",
             "        n0, n1 = nt * COLS, min(nt * COLS + COLS, N)",
         ]
     )
     out += [("        b = dram.read_b(k0, k1, n0, n1)          # crosses DRAM", "load_b")]
-    out += _plain(["        product = zeros(m1 - m0, n1 - n0, ACC_DTYPE)"])
+    out += _plain(
+        [
+            "        product = zeros(m1 - m0, n1 - n0, ACC_DTYPE)",
+            "        if DEBUG:",
+            "            log(",
+            '                f"    nt={nt:<4} A[{m0}:{m1}, {k0}:{k1}] @ B[{k0}:{k1}, {n0}:{n1}]"',
+            '                f" -> PARTIAL into C[{m0}:{m1}, {n0}:{n1}]"',
+            "            )",
+        ]
+    )
     out += [
         ("        mma(product, a, b, counters, SLOTS_PER_MMA)", "exec"),
         (
@@ -1051,6 +1097,16 @@ def _main(
         "def main() -> int:",
         f'    print("{title}")',
         '    print(f"backend: {BACKEND};  {USED_CORES} threads, one per modelled core in use")',
+        "    if DEBUG:",
+        "        # One line per instruction tile, so the count is PREDICTED's own:",
+        "        # mac_slots / SLOTS_PER_MMA is exactly how many mma() calls there are.",
+        '        issued = PREDICTED["mac_slots"] // SLOTS_PER_MMA',
+        "        log(",
+        '            f"--debug: {TILES:,} tile(s) over {USED_CORES:,} core(s) in "',
+        '            f"{WAVES:,} wave(s), issuing {issued:,} instruction tile(s)."',
+        "        )",
+        '        log("         core/wave assignment, A staging events, and every")',
+        '        log("         instruction tile follow. Expect one line each.")',
         "",
         "    counters = Counters()",
         "    a = operand(M, K, A_DTYPE, SEED)",
