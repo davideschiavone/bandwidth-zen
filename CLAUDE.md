@@ -12,14 +12,45 @@ command and the invocation behind every published number lives in `docs/CLI.md`.
 or CNN) will run on a given chip or multi-chip system: latency, throughput, utilization, memory
 footprint, energy, and — most importantly — **what the limiter is and why**.
 
-It is a fast, explainable estimator (roofline + tiling + collective-cost models), not a simulator
-and not a compiler. Every number must be traceable to a formula and its inputs.
+It is a fast, **explanatory** estimator (roofline + tiling + collective-cost models), not a
+simulator and not a compiler. Every number must be traceable to a formula and its inputs — see
+"What this project is *for*" below, which is why that rule is absolute rather than aspirational.
 
 **In scope:** analytical cost models, hardware/model spec schemas, sweep + Pareto exploration,
 visualization, validation against published benchmarks.
 
 **Out of scope:** cycle-accurate simulation, kernel codegen, running real models, training loops
 beyond a memory/FLOP multiplier, auth, databases, multi-tenancy.
+
+---
+
+## What this project is *for*
+
+**The goal is education.** `bandwidth-zen` exists so that a reader can see **how a workload maps
+onto a given architecture, and what the trade-offs are** — not merely what the latency comes out to.
+A regression fitted against published benchmarks would predict better and teach nothing; that is
+precisely the tool this is not.
+
+This is the frame for every judgement call below, and it changes what counts as a good change:
+
+- **A number without its derivation is a failure, even when the number is right.** Every figure the
+  tool prints names the formula and the inputs behind it, and every shortcut lands in
+  `report.assumptions`. It is why `--ideal` exists at all: it separates what follows from a
+  datasheet from what rests on a constant nobody has fitted.
+- **When accuracy and visibility trade off, visibility usually wins** — and where accuracy has to
+  win, the mechanism stays visible anyway. D53 flipped the matrix cores to output-stationary and
+  *lowered* the reported utilisation, because the higher figure came from a decomposition that hid
+  a reduction nobody was charging. A more honest mechanism beat a flattering number.
+- **"What would I change to make this faster?" has to be answerable from the output.** That is what
+  bottleneck classification, flip margins, the prefill crossover, and split-K's
+  occupancy-against-traffic trade are all for. A model that says *what* without *why* has failed at
+  the only job that matters here.
+- **Prefer the artifact a reader can check by hand or run.** `single_layer_encoder_toy` is sized to
+  be countable on paper for this reason; the emitted kernel code (D54) exists for the same one.
+- **Two architectures differing on the same workload is the most valuable output the tool has.**
+  Identical arithmetic and identical traffic landing on opposite sides of two ridge points teaches
+  more than either number alone, which is why `compare`, the banded timeline and the shared roofline
+  are worth their complexity.
 
 ---
 
