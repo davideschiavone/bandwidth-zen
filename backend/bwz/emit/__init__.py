@@ -111,6 +111,43 @@ def check(program: EmittedProgram) -> None:
             f"{program.filename}: USED_CORES exceeds AVAILABLE_CORES; the chip cannot run more "
             f"tiles at once than it has cores."
         )
+    _check_stage_lines(program)
+
+
+_REQUIRED_STAGES = ("load_a", "load_b", "exec", "store")
+"""Every walk loads both operands, computes, and stores. A program missing one of
+these would leave the animation with a station that never lights (D42/D43) — and
+more to the point, a decomposition that never touched an operand would be wrong."""
+
+
+def _check_stage_lines(program: EmittedProgram) -> None:
+    """Assert the animation's line map points at real, non-blank lines of *source*.
+
+    The map is what the animation highlights (D41), and it is built from line
+    numbers rather than from text, so an off-by-one would light the wrong
+    statement and read as authoritative. Checked here, statically, rather than
+    discovered by eye in a browser.
+    """
+    lines = program.source.splitlines()
+    tagged = dict(program.stage_lines)
+    missing = [stage for stage in _REQUIRED_STAGES if not tagged.get(stage)]
+    if missing:
+        raise ValueError(
+            f"{program.filename}: no lines tagged {missing}; every walk loads both operands, "
+            f"computes and stores, so the animation would have a station that never lights."
+        )
+    for stage, indices in program.stage_lines:
+        for index in indices:
+            if not 0 <= index < len(lines):
+                raise ValueError(
+                    f"{program.filename}: stage {stage!r} points at line {index}, outside the "
+                    f"{len(lines)}-line file."
+                )
+            if not lines[index].strip():
+                raise ValueError(
+                    f"{program.filename}: stage {stage!r} points at line {index}, which is "
+                    f"blank; the highlight would land on nothing."
+                )
 
 
 def _as_number(value: object) -> float:

@@ -46,6 +46,14 @@ COMMENT_COLUMN = 40
 carries one naming where it came from, and they line up so the whole block reads
 as a table."""
 
+Line = tuple[str, str | None]
+"""One emitted line and the animation stage it belongs to, if any."""
+
+
+def _plain(lines: list[str]) -> list[Line]:
+    """Untagged lines — everything but the loop nest's own load/exec/store."""
+    return [(line, None) for line in lines]
+
 
 @dataclass(frozen=True, slots=True)
 class EmittedProgram:
@@ -53,7 +61,7 @@ class EmittedProgram:
 
     ``predicted`` is kept beside the source so :func:`bwz.emit.check` can compare
     it against the ``Report`` without re-parsing the file — the same contract
-    :class:`bwz.deploy.Deployment` has with ``deploy.check``.
+    :class:`bwz.deploy.Deployment` had with ``deploy.check``.
     """
 
     chip_id: str
@@ -62,6 +70,20 @@ class EmittedProgram:
     predicted: dict[str, float]
     stationarity: Dataflow
     working_set_bytes: float
+    stage_lines: tuple[tuple[str, tuple[int, ...]], ...] = ()
+    """0-indexed line numbers within :attr:`source` for each animated stage
+    (``"load_b"``, ``"load_a"``, ``"exec"``, ``"store"``, ``"reduce"`` — the
+    vocabulary ``plot_pipeline.py``'s ``_ANIMATION_STAGE`` already uses). Lets
+    the animation's debug view light up the lines live at its current time
+    (D41), now against the real program rather than a pseudo-C paraphrase of it
+    (D54). A tuple of pairs rather than a ``dict``, to keep a frozen dataclass
+    hashable in substance."""
+    grid: TileGrid | None = None
+    """The decomposition this program walks. Carried so the animation's geometry
+    panel (D48) draws the operand *this* chip keeps resident without re-deriving
+    the emitter's own arithmetic."""
+    array_rows: int = 0
+    array_cols: int = 0
 
 
 _STATIONARITY_TITLE: dict[Dataflow, str] = {
@@ -152,38 +174,62 @@ def emit_matmul(
         + grid.m * grid.n * bytes_per_element(c_dtype)
     )
 
-    lines: list[str] = ["#!/usr/bin/env python3"]
-    lines += _docstring(chip, machine, grid, dataflow, command, version, working_set)
-    lines += ["from __future__ import annotations", ""]
-    lines += _harness_imports()
-    lines += ["", ""]
-    lines += _constants(
-        chip,
-        machine,
-        grid,
-        dataflow,
-        predicted,
-        a_dtype=a_dtype,
-        b_dtype=b_dtype,
-        c_dtype=c_dtype,
-        acc_dtype=acc_dtype,
-        double_buffered=double_buffered,
-        seed=seed,
+    # Assembled as (line, stage tag) pairs so the animation can light up the
+    # lines live at its current time (D41/D43) against the real program rather
+    # than against a pseudo-C paraphrase of it. Tagging after the fact, by
+    # matching line text, would be a second place that has to know what the
+    # emitter wrote; tagging here is one place.
+    lines: list[Line] = [("#!/usr/bin/env python3", None)]
+    lines += _plain(_docstring(chip, machine, grid, dataflow, command, version, working_set))
+    lines += _plain(["from __future__ import annotations", ""])
+    lines += _plain(_harness_imports())
+    lines += _plain(["", ""])
+    lines += _plain(
+        _constants(
+            chip,
+            machine,
+            grid,
+            dataflow,
+            predicted,
+            a_dtype=a_dtype,
+            b_dtype=b_dtype,
+            c_dtype=c_dtype,
+            acc_dtype=acc_dtype,
+            double_buffered=double_buffered,
+            seed=seed,
+        )
     )
-    lines += ["", ""]
-    lines += _harness_body()
-    lines += ["", ""]
+    lines += _plain(["", ""])
     lines += _loop_nest(grid, dataflow)
-    lines += ["", ""]
+    lines += _plain(["", ""])
     lines += _main(chip, machine, grid, dataflow)
+    # The runtime goes last, against convention and on purpose: the loop nest is
+    # what a reader is here for, and 400 lines of machinery between the constants
+    # and the walk would bury it. Python does not mind — nothing below runs until
+    # the guard at the very bottom calls main().
+    lines += _plain(["", ""])
+    lines += _plain(_harness_body())
+    lines += _plain(
+        [
+            "",
+            "",
+            'if __name__ == "__main__":',
+            "    raise SystemExit(main())",
+        ]
+    )
 
+    source, stage_lines = _tidy(lines)
     return EmittedProgram(
         chip_id=chip.id,
         filename=default_filename(chip.id, machine.dtype, grid.stationarity, grid.k_partitions),
-        source=_tidy("\n".join(lines)),
+        source=source,
         predicted=predicted,
         stationarity=grid.stationarity,
         working_set_bytes=working_set,
+        stage_lines=stage_lines,
+        grid=grid,
+        array_rows=unit.systolic_dims[0],
+        array_cols=unit.systolic_dims[1],
     )
 
 
@@ -488,32 +534,36 @@ def _tolerance(grid: TileGrid, acc_dtype: DType, operand_dtype: DType) -> float:
 # -------------------------------------------------------------------------- the walk
 
 
-def _loop_nest(grid: TileGrid, dataflow: DataflowPlan) -> list[str]:
-    """The part a reader is meant to read: one tile, walked."""
-    out = [
-        _rule("the walk"),
-        "COUNTERS = Counters()",
-        "",
-        "",
-        "def tile_row(tile: int) -> int:",
-        f'    """This tile\'s position along the grid\'s {grid.row_dim.value} axis."""',
-        "    return tile % (GRID_ROWS * GRID_COLS) // GRID_COLS",
-        "",
-        "",
-        "def tile_col(tile: int) -> int:",
-        f'    """This tile\'s position along the grid\'s {grid.col_dim.value} axis."""',
-        "    return tile % (GRID_ROWS * GRID_COLS) % GRID_COLS",
-        "",
-        "",
-        "def partition_of(tile: int) -> int:",
-        '    """Which split-K piece of the contraction this tile owns."""',
-        "    return tile // (GRID_ROWS * GRID_COLS)",
-        "",
-        "",
-        *_stage_function(grid, dataflow),
-        "",
-        "",
-    ]
+def _loop_nest(grid: TileGrid, dataflow: DataflowPlan) -> list[Line]:
+    """The part a reader is meant to read: one tile, walked.
+
+    Returned as tagged lines. The tags are the animation's own stage vocabulary
+    (D42/D43) and they point at real statements — ``dram.read_b(...)`` is the B
+    load, ``mma(...)`` is the arithmetic — so the debug view highlights code that
+    performs the transfer rather than code that describes one (D54).
+    """
+    out: list[Line] = _plain(
+        [
+            _rule("the walk"),
+            "def tile_row(tile: int) -> int:",
+            f'    """This tile\'s position along the grid\'s {grid.row_dim.value} axis."""',
+            "    return tile % (GRID_ROWS * GRID_COLS) // GRID_COLS",
+            "",
+            "",
+            "def tile_col(tile: int) -> int:",
+            f'    """This tile\'s position along the grid\'s {grid.col_dim.value} axis."""',
+            "    return tile % (GRID_ROWS * GRID_COLS) % GRID_COLS",
+            "",
+            "",
+            "def partition_of(tile: int) -> int:",
+            '    """Which split-K piece of the contraction this tile owns."""',
+            "    return tile // (GRID_ROWS * GRID_COLS)",
+            "",
+            "",
+        ]
+    )
+    out += _stage_function(grid, dataflow)
+    out += _plain(["", ""])
     # Dispatch on the SWEPT dimension, not on the resident operand: what decides
     # the shape of the nest is whether K is swept inside one tile — where it
     # accumulates locally and owes nobody a partial (os, and rs, whose extra
@@ -526,11 +576,11 @@ def _loop_nest(grid: TileGrid, dataflow: DataflowPlan) -> list[str]:
     else:
         out += _input_nest()
     if grid.materialises_partials:
-        out += ["", "", *_reduction_kernel()]
+        out += _plain(["", ""]) + _reduction_kernel()
     return out
 
 
-def _stage_function(grid: TileGrid, dataflow: DataflowPlan) -> list[str]:
+def _stage_function(grid: TileGrid, dataflow: DataflowPlan) -> list[Line]:
     """``stage_a``: the one place A crosses DRAM, in the grid's own vocabulary.
 
     Its own function rather than two lines inside ``run_tile`` because
@@ -538,203 +588,261 @@ def _stage_function(grid: TileGrid, dataflow: DataflowPlan) -> list[str]:
     bytes and differ only in *when* the events happen (D33), which is a
     difference this file can show by calling the same function earlier.
     """
-    head = [
-        "def stage_a(tile: int, dram: Dram, pad: Scratchpad) -> Tile:",
-        f'    """The band of A this tile reads, staged on chip once per {dataflow.group_name}.',
-        "",
-        "    One staging event per (grid row, residency chunk), which is what makes the",
-        "    three A strategies one mechanism: with A_RESIDENCY_TILES equal to the whole",
-        "    row — stage, and whole — A crosses DRAM exactly once (D33); with it set to 1",
-        "    — stream — every tile becomes its own event and re-fetches (D31).",
-        "",
-        "    Shared by every core, not per core: consecutive tiles of a row land on",
-        "    DIFFERENT cores in the same wave, so 'A is staged once per row' is a claim",
-        "    about one chip-wide buffer. Per-core staging would multiply A's traffic by",
-        "    the core count.",
-        '    """',
-    ]
+    head = _plain(
+        [
+            "def stage_a(tile: int, dram: Dram, pad: Scratchpad) -> Tile:",
+            f'    """A\'s band for this tile, staged once per {dataflow.group_name}.',
+            "",
+            "    One staging event per (grid row, residency chunk), which is what makes the",
+            "    three A strategies one mechanism: with A_RESIDENCY_TILES equal to the whole",
+            "    row — stage, and whole — A crosses DRAM exactly once (D33); with it set to 1",
+            "    — stream — every tile becomes its own event and re-fetches (D31).",
+            "",
+            "    Shared by every core, not per core: consecutive tiles of a row land on",
+            "    DIFFERENT cores in the same wave, so 'A is staged once per row' is a claim",
+            "    about one chip-wide buffer. Per-core staging would multiply A's traffic by",
+            "    the core count.",
+            '    """',
+        ]
+    )
     if grid.row_dim is Dim.K:
-        body = [
+        prologue = [
             "    kt = tile_row(tile)",
             "    k0, k1 = kt * ROWS, min(kt * ROWS + ROWS, K)",
-            "    return pad.band(",
-            "        (0, kt, tile_col(tile) // A_RESIDENCY_TILES),",
-            "        lambda: dram.read_a(0, M, k0, k1),   # the whole M height of one k-slice",
-            "    )",
         ]
+        fetch = "        lambda: dram.read_a(0, M, k0, k1),   # the whole M height of one k-slice"
     elif grid.col_dim is Dim.K:
-        body = [
+        prologue = [
             "    mt = tile_row(tile)",
             "    m0, m1 = mt * ROWS, min(mt * ROWS + ROWS, M)",
-            "    return pad.band(",
-            "        (0, mt, tile_col(tile) // A_RESIDENCY_TILES),",
-            "        lambda: dram.read_a(m0, m1, 0, K),   # one band of M rows, all of K",
-            "    )",
         ]
+        fetch = "        lambda: dram.read_a(m0, m1, 0, K),   # one band of M rows, all of K"
     else:
-        body = [
+        prologue = [
             "    mt, part = tile_row(tile), partition_of(tile)",
             "    m0, m1 = mt * ROWS, min(mt * ROWS + ROWS, M)",
             "    kt0, kt1 = K_TILE_BOUNDS[part]",
             "    k_lo, k_hi = kt0 * ROWS, min(kt1 * ROWS, K)",
-            "    return pad.band(",
-            "        (part, mt, tile_col(tile) // A_RESIDENCY_TILES),",
-            "        lambda: dram.read_a(m0, m1, k_lo, k_hi),   # one band of M, this piece of K",
-            "    )",
         ]
-    return head + body
+        fetch = (
+            "        lambda: dram.read_a(m0, m1, k_lo, k_hi),   # one band of M, this piece of K"
+        )
+    key = (
+        "(0, kt, tile_col(tile) // A_RESIDENCY_TILES)"
+        if grid.row_dim is Dim.K
+        else (
+            "(0, mt, tile_col(tile) // A_RESIDENCY_TILES)"
+            if grid.col_dim is Dim.K
+            else "(part, mt, tile_col(tile) // A_RESIDENCY_TILES)"
+        )
+    )
+    return (
+        head
+        + _plain(prologue)
+        + [
+            ("    return pad.band(", "load_a"),
+            (f"        {key},", "load_a"),
+            (fetch, "load_a"),
+            ("    )", "load_a"),
+        ]
+    )
 
 
-def _accumulator_nest(grid: TileGrid) -> list[str]:
+def _accumulator_nest(grid: TileGrid) -> list[Line]:
     """``os``/``rs``: C stays in the accumulator and K is swept inside one tile."""
-    out = ["def run_tile(tile: int, dram: Dram, pad: Scratchpad) -> None:"]
+    out: list[Line] = _plain(
+        ["def run_tile(tile: int, dram: Dram, pad: Scratchpad, counters: Counters) -> None:"]
+    )
     if grid.stationarity is Dataflow.ROW_STATIONARY:
-        out += [
-            '    """One output tile. A row of A lives in each PE and K reduces across the',
-            "    array's own columns, so no partial sum leaves this core either. The",
-            "    difference from output-stationary is INSIDE one array, which a program at",
-            "    this granularity cannot show and does not pretend to (Eyeriss, ISCA 2016).",
-            '    """',
-        ]
+        out += _plain(
+            [
+                '    """One output tile. A row of A lives in each PE and K reduces across the',
+                "    array's own columns, so no partial sum leaves this core either. The",
+                "    difference from output-stationary is INSIDE one array, which a program at",
+                "    this granularity cannot show and does not pretend to (Eyeriss, ISCA 2016).",
+                '    """',
+            ]
+        )
     else:
-        out += [
-            '    """One output tile. C stays in the accumulator; K is swept INSIDE it.',
+        out += _plain(
+            [
+                '    """One output tile. C stays in the accumulator; K is swept INSIDE it.',
+                "",
+                "    The whole contraction for this output block happens in one core's own",
+                "    accumulator, which is exactly why output-stationary owes no reduction: no",
+                "    partial sum ever leaves this function (D53).",
+                '    """',
+            ]
+        )
+    out += _plain(
+        [
+            "    mt, nt, part = tile_row(tile), tile_col(tile), partition_of(tile)",
+            "    m0, m1 = mt * ROWS, min(mt * ROWS + ROWS, M)",
+            "    n0, n1 = nt * COLS, min(nt * COLS + COLS, N)",
+            "    kt0, kt1 = K_TILE_BOUNDS[part]               # this piece's slice of the sweep",
+            "    k_lo = kt0 * ROWS",
+            "    band = stage_a(tile, dram, pad)",
             "",
-            "    The whole contraction for this output block happens in one core's own",
-            "    accumulator, which is exactly why output-stationary owes no reduction: no",
-            "    partial sum ever leaves this function (D53).",
-            '    """',
+            "    acc = zeros(m1 - m0, n1 - n0, ACC_DTYPE)     # the accumulator that stays put",
+            "    for kt in range(kt0, kt1):                   # K is swept INSIDE this tile",
+            "        k0, k1 = kt * ROWS, min(kt * ROWS + ROWS, K)",
+            "        a = sub(band, 0, m1 - m0, k0 - k_lo, k1 - k_lo)   # already on chip",
         ]
+    )
     out += [
-        "    mt, nt, part = tile_row(tile), tile_col(tile), partition_of(tile)",
-        "    m0, m1 = mt * ROWS, min(mt * ROWS + ROWS, M)",
-        "    n0, n1 = nt * COLS, min(nt * COLS + COLS, N)",
-        "    kt0, kt1 = K_TILE_BOUNDS[part]               # this piece's slice of the sweep",
-        "    k_lo = kt0 * ROWS",
-        "    band = stage_a(tile, dram, pad)",
-        "",
-        "    acc = zeros(m1 - m0, n1 - n0, ACC_DTYPE)     # the accumulator that stays put",
-        "    for kt in range(kt0, kt1):                   # K is swept INSIDE this tile",
-        "        k0, k1 = kt * ROWS, min(kt * ROWS + ROWS, K)",
-        "        a = sub(band, 0, m1 - m0, k0 - k_lo, k1 - k_lo)   # already on chip",
-        "        b = dram.read_b(k0, k1, n0, n1)                   # crosses DRAM",
-        "        mma(acc, a, b, COUNTERS, SLOTS_PER_MMA)",
-        "",
+        ("        b = dram.read_b(k0, k1, n0, n1)                   # crosses DRAM", "load_b"),
+        ("        mma(acc, a, b, counters, SLOTS_PER_MMA)", "exec"),
+        ("", None),
     ]
     if grid.materialises_partials:
-        out += [
-            "    # Kernel 1 of two. This piece owns K_TILE_BOUNDS[part] of the contraction and",
-            "    # nothing else, so what it holds is a partial — and the GEMM ends before the",
-            "    # reduction begins, so that partial cannot stay in a register (D53).",
-            "    dram.write_partial(part, m0, n0, acc)",
-        ]
+        out += _plain(
+            [
+                "    # Kernel 1 of two. This piece owns K_TILE_BOUNDS[part] of the contraction and",
+                "    # nothing else, so what it holds is a partial — and the GEMM ends before the",
+                "    # reduction begins, so that partial cannot stay in a register (D53).",
+            ]
+        )
+        out += [("    dram.write_partial(part, m0, n0, acc)", "store")]
     else:
         out += [
-            "    dram.write_c(m0, n0, acc)                    # finished, not a partial",
+            ("    dram.write_c(m0, n0, acc)                    # finished, not a partial", "store")
         ]
-    out += ["    COUNTERS.count_tile()"]
+    out += _plain(["    counters.count_tile()"])
     return out
 
 
-def _weight_nest() -> list[str]:
+def _weight_nest() -> list[Line]:
     """``ws``: B stays resident and M streams past it, producing partials over K."""
-    return [
-        "def run_tile(tile: int, dram: Dram, pad: Scratchpad, partials: Partials) -> None:",
-        '    """One weight tile. B stays resident; M streams past it.',
-        "",
-        "    This tile owns one slice of the contraction — a k-slice — so what it produces",
-        "    is a PARTIAL over K, not a finished result. The slices for one output block",
-        "    meet in `partials`, in an accumulator on chip, on a later wave (D53). That",
-        "    `partials` has to exist at all is the difference between this decomposition",
-        "    and output-stationary, in one object.",
-        '    """',
-        "    kt, nt = tile_row(tile), tile_col(tile)",
-        "    k0, k1 = kt * ROWS, min(kt * ROWS + ROWS, K)",
-        "    n0, n1 = nt * COLS, min(nt * COLS + COLS, N)",
-        "    b = dram.read_b(k0, k1, n0, n1)              # the operand that stays put",
-        "    band = stage_a(tile, dram, pad)",
-        "",
-        "    for mt in range(M_TILES):                    # M streams past the resident tile",
-        "        m0, m1 = mt * ROWS, min(mt * ROWS + ROWS, M)",
-        "        a = sub(band, m0, m1, 0, k1 - k0)        # already on chip",
-        "        product = zeros(m1 - m0, n1 - n0, ACC_DTYPE)",
-        "        mma(product, a, b, COUNTERS, SLOTS_PER_MMA)",
-        "        partials.accumulate(m0, n0, product)     # a PARTIAL over K; nothing is stored",
-        "    COUNTERS.count_tile()",
+    out: list[Line] = _plain(
+        [
+            "def run_tile(",
+            "    tile: int, dram: Dram, pad: Scratchpad, partials: Partials, counters: Counters",
+            ") -> None:",
+            '    """One weight tile. B stays resident; M streams past it.',
+            "",
+            "    This tile owns one slice of the contraction — a k-slice — so what it produces",
+            "    is a PARTIAL over K, not a finished result. The slices for one output block",
+            "    meet in `partials`, in an accumulator on chip, on a later wave (D53). That",
+            "    `partials` has to exist at all is the difference between this decomposition",
+            "    and output-stationary, in one object.",
+            '    """',
+            "    kt, nt = tile_row(tile), tile_col(tile)",
+            "    k0, k1 = kt * ROWS, min(kt * ROWS + ROWS, K)",
+            "    n0, n1 = nt * COLS, min(nt * COLS + COLS, N)",
+        ]
+    )
+    out += [
+        ("    b = dram.read_b(k0, k1, n0, n1)              # the operand that stays put", "load_b")
     ]
+    out += _plain(
+        [
+            "    band = stage_a(tile, dram, pad)",
+            "",
+            "    for mt in range(M_TILES):            # M streams past the resident tile",
+            "        m0, m1 = mt * ROWS, min(mt * ROWS + ROWS, M)",
+            "        a = sub(band, m0, m1, 0, k1 - k0)        # already on chip",
+            "        product = zeros(m1 - m0, n1 - n0, ACC_DTYPE)",
+        ]
+    )
+    out += [
+        ("        mma(product, a, b, counters, SLOTS_PER_MMA)", "exec"),
+        (
+            "        partials.accumulate(m0, n0, product)     # a PARTIAL over K; nothing is"
+            " stored",
+            "exec",
+        ),
+    ]
+    out += _plain(["    counters.count_tile()"])
+    return out
 
 
-def _input_nest() -> list[str]:
+def _input_nest() -> list[Line]:
     """``is``: A stays resident and N streams past it, producing partials over K."""
-    return [
-        "def run_tile(tile: int, dram: Dram, pad: Scratchpad, partials: Partials) -> None:",
-        '    """One input tile. A stays resident; N streams past it.',
-        "",
-        "    The grid's columns are slices of K here — K cut by the array's depth rather",
-        "    than its width — so this tile owns a slice of the contraction exactly as a",
-        "    weight-stationary one does, and produces PARTIALS over K (D53).",
-        '    """',
-        "    mt, kt = tile_row(tile), tile_col(tile)",
-        "    m0, m1 = mt * ROWS, min(mt * ROWS + ROWS, M)",
-        "    k0, k1 = kt * ROWS, min(kt * ROWS + ROWS, K)",
-        "    band = stage_a(tile, dram, pad)",
-        "    a = sub(band, 0, m1 - m0, k0, k1)            # the operand that stays put",
-        "",
-        "    for nt in range(N_TILES):                    # N streams past the resident tile",
-        "        n0, n1 = nt * COLS, min(nt * COLS + COLS, N)",
-        "        b = dram.read_b(k0, k1, n0, n1)          # crosses DRAM",
-        "        product = zeros(m1 - m0, n1 - n0, ACC_DTYPE)",
-        "        mma(product, a, b, COUNTERS, SLOTS_PER_MMA)",
-        "        partials.accumulate(m0, n0, product)     # a PARTIAL over K; nothing is stored",
-        "    COUNTERS.count_tile()",
+    out: list[Line] = _plain(
+        [
+            "def run_tile(",
+            "    tile: int, dram: Dram, pad: Scratchpad, partials: Partials, counters: Counters",
+            ") -> None:",
+            '    """One input tile. A stays resident; N streams past it.',
+            "",
+            "    The grid's columns are slices of K here — K cut by the array's depth rather",
+            "    than its width — so this tile owns a slice of the contraction exactly as a",
+            "    weight-stationary one does, and produces PARTIALS over K (D53).",
+            '    """',
+            "    mt, kt = tile_row(tile), tile_col(tile)",
+            "    m0, m1 = mt * ROWS, min(mt * ROWS + ROWS, M)",
+            "    k0, k1 = kt * ROWS, min(kt * ROWS + ROWS, K)",
+            "    band = stage_a(tile, dram, pad)",
+            "    a = sub(band, 0, m1 - m0, k0, k1)            # the operand that stays put",
+            "",
+            "    for nt in range(N_TILES):            # N streams past the resident tile",
+            "        n0, n1 = nt * COLS, min(nt * COLS + COLS, N)",
+        ]
+    )
+    out += [("        b = dram.read_b(k0, k1, n0, n1)          # crosses DRAM", "load_b")]
+    out += _plain(["        product = zeros(m1 - m0, n1 - n0, ACC_DTYPE)"])
+    out += [
+        ("        mma(product, a, b, counters, SLOTS_PER_MMA)", "exec"),
+        (
+            "        partials.accumulate(m0, n0, product)     # a PARTIAL over K; nothing is"
+            " stored",
+            "exec",
+        ),
     ]
+    out += _plain(["    counters.count_tile()"])
+    return out
 
 
-def _reduction_kernel() -> list[str]:
-    return [
-        "def reduce_partials(dram: Dram) -> None:",
-        '    """Kernel 2: sum the SPLIT_K partial results into C (D53).',
-        "",
-        "    A separate launch rather than more lines above: the GEMM has to finish",
-        "    everywhere before any of this can start, which is precisely why the partials",
-        "    could not stay in registers and crossed DRAM twice. Not new arithmetic —",
-        "    2*M*N*K already counts these adds; they have merely left the array's own",
-        "    accumulator for the vector unit, which is slower, and that is the trade",
-        "    split-K makes for its occupancy.",
-        '    """',
-        "    for m0 in range(0, M, ROWS):",
-        "        for n0 in range(0, N, COLS):",
-        "            m1, n1 = min(m0 + ROWS, M), min(n0 + COLS, N)",
-        "            acc = copy_of(dram.read_partial(0, m0, m1, n0, n1))",
-        "            for part in range(1, SPLIT_K):",
-        "                add_into(acc, dram.read_partial(part, m0, m1, n0, n1))",
-        "            dram.write_c(m0, n0, acc)",
+def _reduction_kernel() -> list[Line]:
+    out: list[Line] = _plain(
+        [
+            "def reduce_partials(dram: Dram) -> None:",
+            '    """Kernel 2: sum the SPLIT_K partial results into C (D53).',
+            "",
+            "    A separate launch rather than more lines above: the GEMM has to finish",
+            "    everywhere before any of this can start, which is precisely why the partials",
+            "    could not stay in registers and crossed DRAM twice. Not new arithmetic —",
+            "    2*M*N*K already counts these adds; they have merely left the array's own",
+            "    accumulator for the vector unit, which is slower, and that is the trade",
+            "    split-K makes for its occupancy.",
+            '    """',
+            "    for m0 in range(0, M, ROWS):",
+            "        for n0 in range(0, N, COLS):",
+            "            m1, n1 = min(m0 + ROWS, M), min(n0 + COLS, N)",
+            "            acc = copy_of(dram.read_partial(0, m0, m1, n0, n1))",
+            "            for part in range(1, SPLIT_K):",
+        ]
+    )
+    out += [
+        ("                add_into(acc, dram.read_partial(part, m0, m1, n0, n1))", "reduce"),
+        ("            dram.write_c(m0, n0, acc)", "store"),
     ]
+    return out
 
 
 # -------------------------------------------------------------------------- the main
 
 
 _CHECKS = """    checks = [
-        Check("tiles", PREDICTED["tiles"], COUNTERS.tiles_run, True),
+        Check("tiles", PREDICTED["tiles"], counters.tiles_run, True),
         Check("waves", PREDICTED["waves"], WAVES, True),
-        Check("MACs", PREDICTED["macs"], COUNTERS.macs, True),
-        Check("MAC slots issued", PREDICTED["mac_slots"], COUNTERS.mac_slots, True),
+        Check("MACs", PREDICTED["macs"], counters.macs, True),
+        Check("MAC slots issued", PREDICTED["mac_slots"], counters.mac_slots, True),
         Check(
             "idle core-waves",
             PREDICTED["idle_core_waves"],
-            COUNTERS.idle_core_waves + (AVAILABLE_CORES - USED_CORES) * WAVES,
+            counters.idle_core_waves + (AVAILABLE_CORES - USED_CORES) * WAVES,
             True,
             note="a core with no tile this wave. This IS wave occupancy (D30).",
         ),
-        Check("A staging events", PREDICTED["staging_events"], COUNTERS.staging_events, True),
-        Check("A bytes", PREDICTED["a_dram_bytes"], COUNTERS.a_dram_bytes, True),
-        Check("C bytes", PREDICTED["c_dram_bytes"], COUNTERS.c_dram_bytes, True),
-        Check("partial bytes", PREDICTED["partial_dram_bytes"], COUNTERS.partial_dram_bytes, True),
+        Check("A staging events", PREDICTED["staging_events"], counters.staging_events, True),
+        Check("A bytes", PREDICTED["a_dram_bytes"], counters.a_dram_bytes, True),
+        Check("C bytes", PREDICTED["c_dram_bytes"], counters.c_dram_bytes, True),
+        Check("partial bytes", PREDICTED["partial_dram_bytes"], counters.partial_dram_bytes, True),
         Check(
             "B bytes fetched",
             PREDICTED["b_dram_bytes_charged"],
-            COUNTERS.b_dram_bytes,
+            counters.b_dram_bytes,
             False,
             note=(
                 "tier 2. The report charges compulsory traffic and then discounts it by a\\n"
@@ -746,7 +854,7 @@ _CHECKS = """    checks = [
         Check(
             "B bytes, first touch",
             PREDICTED["b_dram_bytes_charged"],
-            COUNTERS.b_compulsory_bytes,
+            counters.b_compulsory_bytes,
             False,
             note="tier 2. What B costs if every byte of it crosses the bus exactly once.",
         ),
@@ -756,21 +864,26 @@ _CHECKS = """    checks = [
 
 def _main(
     chip: HardwareSpec, machine: MachineModel, grid: TileGrid, dataflow: DataflowPlan
-) -> list[str]:
+) -> list[Line]:
     needs_partials = grid.swept_dim is not Dim.K
-    call = "run_tile(tile, dram, pad, partials)" if needs_partials else "run_tile(tile, dram, pad)"
+    call = (
+        "run_tile(tile, dram, pad, partials, counters)"
+        if needs_partials
+        else "run_tile(tile, dram, pad, counters)"
+    )
     title = f"{chip.name} · {machine.dtype.value} · {_STATIONARITY_TITLE[grid.stationarity]}"
-    out = [
+    lines = [
         _rule("run it"),
         "def main() -> int:",
         f'    print("{title}")',
         '    print(f"backend: {BACKEND};  {USED_CORES} threads, one per modelled core in use")',
         "",
+        "    counters = Counters()",
         "    a = operand(M, K, A_DTYPE, SEED)",
         "    b = operand(K, N, B_DTYPE, SEED + 1)",
         "    c = zeros(M, N, ACC_DTYPE)",
         "    dram = Dram(",
-        "        a, b, c, COUNTERS,",
+        "        a, b, c, counters,",
         "        a_bytes_per_element=A_BYTES_PER_ELEMENT,",
         "        b_bytes_per_element=B_BYTES_PER_ELEMENT,",
         "        c_bytes_per_element=C_BYTES_PER_ELEMENT,",
@@ -778,12 +891,12 @@ def _main(
         "        partitions=SPLIT_K,",
         "        acc_dtype=ACC_DTYPE,",
         "    )",
-        "    pad = Scratchpad(COUNTERS)",
+        "    pad = Scratchpad(counters)",
     ]
     if needs_partials:
-        out.append("    partials = Partials(M, N, ROWS, COLS, ACC_DTYPE)")
+        lines.append("    partials = Partials(M, N, ROWS, COLS, ACC_DTYPE)")
     if dataflow.a_strategy is AStrategy.WHOLE:
-        out += [
+        lines += [
             "",
             "    # a_strategy=whole: every band is ramped in before wave 0 instead of at the",
             "    # row boundary that needs it. The same function, the same bytes, the same",
@@ -792,25 +905,30 @@ def _main(
             "    for tile in range(TILES):",
             "        stage_a(tile, dram, pad)",
         ]
-    out += [
+    lines += [
         "",
-        f"    run_waves(USED_CORES, WAVES, TILES, COUNTERS, lambda tile: {call})",
+        f"    run_waves(USED_CORES, WAVES, TILES, counters, lambda tile: {call})",
     ]
+    out: list[Line] = _plain(lines)
     if needs_partials:
-        out += [
-            "",
-            "    # The accumulator never crossed DRAM; C's own compulsory write does (D53).",
-            "    partials.drain(dram, M, N)",
-        ]
+        # The one place a `ws`/`is` walk writes C: the shared accumulator drains
+        # once the grid is finished. Tagged "store" for the same reason `os`'s
+        # `dram.write_c` is — it IS the store, wherever it happens to live (D54).
+        out += _plain(
+            ["", "    # The accumulator never crossed DRAM; C's own compulsory write does (D53)."]
+        )
+        out += [("    partials.drain(dram, M, N)", "store")]
     if grid.materialises_partials:
-        out += ["", "    reduce_partials(dram)"]
-    out += [
+        out += _plain(["", "    reduce_partials(dram)"])
+    tail = [
         "",
         "    error = max_abs_diff(c, reference(a, b, INTEGER))",
-        _CHECKS,
+        # Split rather than appended whole: every element of this list is one
+        # emitted line, and the stage-line numbering counts elements.
+        *_CHECKS.splitlines(),
         "",
-        "    occupancy = COUNTERS.occupancy(WAVES, USED_CORES, AVAILABLE_CORES)",
-        "    padding = COUNTERS.padding_efficiency()",
+        "    occupancy = counters.occupancy(WAVES, USED_CORES, AVAILABLE_CORES)",
+        "    padding = counters.padding_efficiency()",
         '    print("")',
         "    print(",
         '        f"wave occupancy   {occupancy:.4f}   "',
@@ -823,13 +941,13 @@ def _main(
         "    )",
     ]
     if _sub_cycles(machine) > 1:
-        out += [
+        tail += [
             '    print("                 The report\'s figure is the smaller of the two: on a")',
             '    print("                 bit-serial array it also charges a sub-cycle row of")',
             '    print("                 fill on K (D34), which is a RATE. Nothing here")',
             '    print("                 measures rates, so this program cannot see it.")',
         ]
-    out += [
+    tail += [
         '    print("")',
         '    print(f"numerics: max |C - A@B| = {error:g}   (tolerance {TOLERANCE:g})")',
         # A one-number fingerprint of C: two decompositions of the same matmul
@@ -846,12 +964,8 @@ def _main(
         '    print("")',
         '    print("every tier-1 count matches the report, and C == A @ B.")',
         "    return 0",
-        "",
-        "",
-        'if __name__ == "__main__":',
-        "    raise SystemExit(main())",
     ]
-    return out
+    return out + _plain(tail)
 
 
 # ----------------------------------------------------------------------- inline glue
@@ -903,12 +1017,27 @@ def _harness_split() -> tuple[list[str], list[str]]:
     return imports, banner + body
 
 
-def _tidy(source: str) -> str:
-    """Collapse the blank-line runs the import surgery leaves behind."""
-    out: list[str] = []
+def _tidy(lines: list[Line]) -> tuple[str, tuple[tuple[str, tuple[int, ...]], ...]]:
+    """Render the pairs, and report where each tagged line ended up.
+
+    The line *numbers* have to be computed here rather than while building,
+    because this is where blank-line runs are collapsed and leading blanks
+    trimmed — do it earlier and every index below the first collapse is wrong.
+    """
+    kept: list[Line] = []
     blanks = 0
-    for line in source.splitlines():
-        blanks = blanks + 1 if not line.strip() else 0
+    for text, tag in lines:
+        blanks = blanks + 1 if not text.strip() else 0
         if blanks <= 2:
-            out.append(line.rstrip())
-    return "\n".join(out).strip("\n") + "\n"
+            kept.append((text.rstrip(), tag))
+    while kept and not kept[0][0]:
+        kept.pop(0)
+    while kept and not kept[-1][0]:
+        kept.pop()
+
+    stages: dict[str, list[int]] = {}
+    for index, (_text, tag) in enumerate(kept):
+        if tag is not None:
+            stages.setdefault(tag, []).append(index)
+    source = "\n".join(text for text, _tag in kept) + "\n"
+    return source, tuple((tag, tuple(indices)) for tag, indices in stages.items())

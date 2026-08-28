@@ -244,6 +244,9 @@ config store, Tailwind for layout, D3 for scales/axes and canvas for anything dr
 - `analysis/stationarity.py` must stay the only place a tile grid is computed. It was duplicated in
   `pipeline.tile_count` and `tiling.systolic_utilisation` once, and the two drifted — the schedule
   drew a decomposition the utilisation figure was not costing (D53).
+- `deploy.py` no longer describes a tiled matmul. That listing became a runnable program in
+  `bwz/emit/` (D54); `deploy.py` keeps only the sequence listing a *graph* gets, where there is no
+  tile grid to walk. A new tiled-kernel listing belongs in `emit/`, not there.
 - The sweep process pool must receive plain dicts, not pydantic objects — pickling validated models
   across processes is measurably slower than re-validating in the worker.
 - Vite dev server needs `server.proxy['/api'] = 'http://localhost:8000'`; do not hardcode the

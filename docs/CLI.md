@@ -417,7 +417,9 @@ cross-`--iterations` amortisation §2.5 already documents above, a byte story, n
 
 Everything above §2.5 describes a schedule. `--emit` writes it as **real Python** that walks the
 same tile grid, stages A on the same events, hands tiles to cores the same way, counts what it
-moves, and asserts those counts against the report it came from (D54).
+moves, and asserts those counts against the report it came from (D54). This is what a chip's
+deployment listing *is* now: the pseudo-C loop nest the figures used to print was retired for it in
+the same change, and `plot_pipeline.py`'s pages and its `--animate` code pane both show this file.
 
 ```bash
 uv run bwz matmul -M 64 -N 64 -K 128 --chip a100_80gb --emit /tmp/k.py

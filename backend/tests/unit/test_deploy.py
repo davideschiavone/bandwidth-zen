@@ -3,317 +3,27 @@
 Same contract as ``test_explain``: a listing that disagreed with the timeline
 above it would be believed, so every constant it prints is checked against the
 trace the figure drew (docs/CORRECTIONS.md D32).
+
+**What is no longer here.** This module used to test a pseudo-C *tile nest* for a
+lone matmul — its wave counts, its weight-set writes, its bit-serial tax, its
+prefetch shape. That listing was retired in D54: the same decomposition is now
+emitted as a program that runs, computes ``A @ B`` and asserts its own counts
+against the report, and the tests that matter for it live in
+``tests/unit/test_emit.py`` and ``tests/integration/test_emitted_programs_run.py``.
+Every fact those old tests pinned is still pinned — by a program that would fail
+to run if it were wrong, rather than by a substring search over prose.
+
+What remains is the case ``emit`` has no answer for: a graph, which this model
+runs as a sequence with no overlap between operations (D5a).
 """
 
 from __future__ import annotations
 
-import math
-
-import pytest
-
 from bwz.analysis import analyze, idealised, machine_model
-from bwz.analysis.pipeline import build_trace, tile_count
+from bwz.analysis.pipeline import build_trace
 from bwz.deploy import check, deployment_of
 from bwz.graph import GraphPhase, build_graph
 from bwz.spec import DeploymentSpec, DType, MatmulSpec, load_chip
-
-
-def _run(chip_id: str, m: int, n: int, k: int, dtype: str = "int8"):  # type: ignore[no-untyped-def]
-    spec = MatmulSpec.model_validate(
-        {
-            "id": "t",
-            "name": "t",
-            "family": "matmul",
-            "m": m,
-            "n": n,
-            "k": k,
-            "a_dtype": dtype,
-            "b_dtype": dtype,
-        }
-    )
-    deployment = DeploymentSpec.model_validate({"batch": 1, "input_tokens": 1, "output_tokens": 1})
-    chip = idealised(load_chip(chip_id))
-    report = analyze(spec, chip, deployment)
-    assert report.feasible, report.infeasibility
-    graph = build_graph(spec, deployment, GraphPhase.STATIC)
-    machine = machine_model(chip, DType(dtype))
-    trace = build_trace(
-        graph,
-        report.phases[0],
-        machine,
-        double_buffered=report.memory.double_buffered,
-        max_steps=32,
-    )
-    listing = deployment_of(
-        chip, machine, report.phases[0], trace, workload="t", operation=graph.ops[0]
-    )
-    return chip, machine, graph, trace, listing
-
-
-@pytest.mark.parametrize("chip_id", ["a100_80gb", "metis_aipu", "chip_a", "h100_sxm"])
-@pytest.mark.parametrize("shape", [(600, 600, 600), (8192, 8192, 8192), (1, 4096, 4096)])
-def test_every_listing_agrees_with_the_schedule(chip_id: str, shape: tuple[int, int, int]) -> None:
-    """``check`` is the whole point: waves, tiles and units must reconcile."""
-    _chip, machine, graph, trace, listing = _run(chip_id, *shape)
-    check(listing, trace)
-
-    assert listing.tiles == tile_count(graph.ops[0], machine)
-    assert listing.waves == math.ceil(listing.tiles / listing.units)
-    assert listing.waves == trace.tiles
-
-
-def test_the_listing_quotes_the_tile_and_wave_counts_it_computed() -> None:
-    """The text and the fields cannot disagree — they are the same numbers.
-
-    8192-cubed INT8 on Metis: ceil(8192/512)^2 = 256 tiles over 4 AI cores is
-    64 waves, and 256 tiles against 16 array-resident ones means 240 displace an
-    earlier tile — NOT 240 extra writes. Within one pass M is innermost, so each
-    tile serves all M rows once and is never revisited; the listing has to say
-    that rather than imply a re-write (D30 correction).
-    """
-    _chip, _machine, _graph, _trace, listing = _run("metis_aipu", 8192, 8192, 8192)
-
-    assert (listing.tiles, listing.waves, listing.units) == (256, 64, 4)
-    assert listing.resident_tiles == 16
-    assert listing.reloads == 240
-    assert "#define TILES        256" in listing.code
-    assert "#define WAVES        64" in listing.code
-    assert "#define UNITS        4" in listing.code
-    assert "256 tiles and only 16 fit, so 240 of them" in listing.code
-    assert "Each is still written once in this pass" in listing.code
-    assert (listing.array_rows, listing.array_cols) == (512, 512)
-    assert listing.grid is not None
-    assert (listing.grid.rows, listing.grid.cols) == (16, 16), "K x N under weight-stationary"
-
-
-def test_the_per_tile_byte_share_does_not_shrink_when_the_wave_is_underfull() -> None:
-    """D46: 1x1x2 on A100 is 1 real tile against 432 tensor cores, one wave.
-
-    C's DRAM write is 2 B in total (``1x1`` at fp16) and there is exactly one
-    real tile, so the per-tile share the listing prints for ``store_C`` must be
-    that same 2 B. Before D46 the divisor was ``waves * units`` (432, the
-    array's theoretical capacity in this one-wave case) instead of the 1 real
-    tile, so the comment printed ``2 B / 432 = 4.63 mB`` — a fractional-byte
-    quantity with no physical meaning.
-    """
-    _chip, _machine, _graph, _trace, listing = _run("a100_80gb", 1, 1, 2, dtype="fp16")
-
-    assert (listing.tiles, listing.waves, listing.units) == (1, 1, 432)
-    assert "store_C(u, tile(w, u));       /* 2 B — hollow bar */" in listing.code
-    assert "mB" not in listing.code
-
-
-def test_an_imc_array_gets_weight_sets_and_a_write_and_a_tensor_core_does_not() -> None:
-    """The branch is driven by ``weight_sets``, not by the vendor's name.
-
-    A D-IMC weight must be written into a bank before it can join a MAC; an
-    NVIDIA tensor core reads both operands per instruction and stores nothing,
-    so emitting a write for it would invent a residency it does not have (D30).
-    """
-    _c, _m, _g, _t, metis = _run("metis_aipu", 8192, 8192, 8192)
-    _c2, _m2, _g2, _t2, a100 = _run("a100_80gb", 8192, 8192, 8192)
-
-    assert "WEIGHT_SETS" in metis.code and "imc_write" in metis.code
-    assert "weight sets per array" in metis.code
-    assert metis.resident_tiles == 16
-
-    assert "WEIGHT_SETS" not in a100.code and "imc_write" not in a100.code
-    assert "stores no weights" in a100.code
-    assert a100.resident_tiles == a100.units, "no weight residency: capacity is just the arrays"
-
-
-def test_an_mma_unit_issues_instruction_tiles_and_a_resident_array_streams() -> None:
-    """D52/D53: the loop nest must not narrate what the cost model denies.
-
-    Two independent facts meet in this listing, and the test pins both.
-
-    *Which dimension is swept* is the STATIONARITY's (D53). A100 declares
-    output-stationary, so C's accumulator is what stays put and each tile
-    sweeps K — ceil(3000/16) = 188 instruction tiles of it — while M and N
-    index the grid. Metis is weight-stationary: B stays put and M is what
-    streams past it.
-
-    *How the swept dimension is walked* is the UNIT's (D52). A tensor core
-    holds nothing and issues fixed instruction tiles, so the sweep quantises
-    into whole tiles; Metis's in-memory array genuinely holds a weight tile and
-    streams elements past it. Printing ``for (m = 0; m < M; ++m)`` past a
-    "held by the array" tile on a tensor core would contradict D52 and D30's
-    "the array stores no weights" in the same breath.
-    """
-    _c, _m, _g, _t, a100 = _run("a100_80gb", 1000, 2000, 3000, dtype="fp16")
-    _c2, _m2, _g2, _t2, metis = _run("metis_aipu", 1000, 2000, 3000)
-
-    assert "#define KTILES       188" in a100.code, "ceil(3000/16): K is what os sweeps"
-    assert "for (int kt = 0; kt < KTILES; ++kt)" in a100.code
-    assert "mma(u, &A[GROUP(w, u)][kt * ROWS], &B[kt * ROWS][COL(w, u)]);" in a100.code
-    assert "accumulates in the tile's own accumulator" in a100.code
-    assert "held by the array" not in a100.code
-    assert "no reduction to pay for" in a100.code
-
-    assert "KTILES" not in metis.code
-    assert "#define GRID_ROWS    6 " in metis.code, "ceil(3000/512): ws grids K"
-    assert "for (int m = 0; m < 1000; ++m)" in metis.code
-    assert "held by the array" in metis.code
-
-
-def test_the_bit_serial_tax_appears_only_where_the_profile_declares_it() -> None:
-    """``SUB_CYCLES`` comes from the dtype multiplier, so it is the profile's."""
-    _c, _m, _g, _t, metis = _run("metis_aipu", 8192, 8192, 8192)
-    _c2, _m2, _g2, _t2, a100 = _run("a100_80gb", 8192, 8192, 8192, dtype="fp16")
-
-    assert "#define SUB_CYCLES   8" in metis.code, "int8 multiplier 0.125 -> 8 cycles"
-    assert "SUB_CYCLES" not in a100.code, "fp16 multiplier is 1.0, so there is no sub-cycle loop"
-
-
-def test_the_listing_stages_a_once_and_rotates_weight_sets() -> None:
-    """D33: A k-slices are staged on chip and consumed by every tile of their
-    group (A crosses DRAM exactly once), and reloads land in a set freed by
-    the previous wave, so the write hides behind arithmetic instead of
-    serialising in front of it.
-    """
-    _c, _m, _g, _t, metis = _run("metis_aipu", 8192, 8192, 8192)
-    _c2, _m2, _g2, _t2, a100 = _run("a100_80gb", 8192, 8192, 8192)
-
-    assert "#define TILES_PER_GROUP 16" in metis.code, "16 n-tiles per k-slice at N=8192"
-    assert "GROUP(w, u)" in metis.code
-    assert "A crosses DRAM exactly once" in metis.code
-    assert "staged once per k-slice" in metis.code
-    assert "(w + 1) % WEIGHT_SETS" in metis.code, "write-ahead: next wave's tile, previous set"
-    assert "write-ahead" in metis.code
-    assert "must land before the array can use it" not in metis.code
-
-    assert "TILES_PER_GROUP" in a100.code and "GROUP(w, u)" in a100.code
-    assert "A crosses DRAM exactly once" in a100.code
-    assert "write-ahead" not in a100.code, "a tensor core stores no weights (D30)"
-
-
-@pytest.mark.parametrize("chip_id", ["a100_80gb", "metis_aipu"])
-def test_the_pseudo_c_has_no_nested_comments(chip_id: str) -> None:
-    """C forbids them, and the listing is meant to survive being pasted (D26)."""
-    _c, _m, _g, _t, listing = _run(chip_id, 600, 600, 600)
-
-    depth = 0
-    index = 0
-    while index < len(listing.code) - 1:
-        pair = listing.code[index : index + 2]
-        if pair == "/*":
-            depth += 1
-            assert depth == 1, f"{chip_id}: nested /* at offset {index}"
-            index += 2
-            continue
-        if pair == "*/":
-            depth -= 1
-            assert depth == 0, f"{chip_id}: unbalanced */ at offset {index}"
-            index += 2
-            continue
-        index += 1
-    assert depth == 0, f"{chip_id}: unterminated comment"
-
-
-def test_double_buffered_listing_prefetches_wave_w_plus_1_beside_waves_compute() -> None:
-    """D41: ``#define DEPTH 2 /* double buffered */`` used to sit above a loop
-    that read as fully serial. The real schedule (``_pipelined_tiles``) lets
-    wave i's load start once the buffer two waves back has been freed, with no
-    dependency on wave i-1's compute at all — genuine overlap — so the listing
-    should show a wave-0 prologue and a steady-state loop that prefetches wave
-    w+1 alongside wave w's own arithmetic, not one big serial block.
-
-    This also pins a real bug the restructuring fixes: under write-ahead, no
-    statement used to write wave 0's own tile into a weight set at all (the
-    per-wave line only ever wrote tile(w+1, u), so at w=0 that's tile 1) even
-    though the prologue *comment* already claimed it landed somewhere.
-    """
-    _c, _m, _g, trace, metis = _run("metis_aipu", 8192, 8192, 8192)
-    assert trace.double_buffered
-
-    assert "for (int u = 0; u < UNITS; ++u) {" in metis.code
-    assert "load_B(u, tile(0, u));" in metis.code, "prologue primes wave 0 before the loop"
-    assert "imc_write(u, 0, tile(0, u));" in metis.code, "the wave-0-never-written fix"
-    assert "load_B(u, tile(w + 1, u));" in metis.code, "steady state prefetches wave w+1"
-    assert "if (w + 1 < WAVES) {" in metis.code
-    assert "imc_write(u, (w + 1) % WEIGHT_SETS, tile(w + 1, u));" in metis.code
-
-    # Every stage still points at real, correct lines: not just present text,
-    # but the exact statement a debug view would highlight.
-    lines = metis.code.split("\n")
-    by_stage = dict(metis.stage_lines)
-    assert len(by_stage["load_b"]) == 2, "one prologue occurrence, one steady-state occurrence"
-    assert all("load_B(u, tile(" in lines[i] for i in by_stage["load_b"])
-    assert all("mac(" in lines[i] or "feed(" in lines[i] for i in by_stage["exec"])
-    assert all("store_C(" in lines[i] for i in by_stage["store"])
-
-    # Every substring the pre-existing test suite already pins still survives —
-    # the restructuring must not be a stealth rewrite of tested behaviour.
-    for assertion in (
-        "#define TILES_PER_GROUP 16",
-        "GROUP(w, u)",
-        "A crosses DRAM exactly once",
-        "staged once per k-slice",
-        "(w + 1) % WEIGHT_SETS",
-        "write-ahead",
-    ):
-        assert assertion in metis.code
-
-
-def test_non_double_buffered_listing_stays_serial() -> None:
-    """The depth==1 fallback: no shipped profile at any shape actually produces
-    ``double_buffered=False`` (SRAM capacity fits two tiles everywhere), so this
-    forces it directly — shrink every non-DRAM level below twice one tile's
-    bytes, which flips ``report.memory.double_buffered`` end to end (an
-    ``on_chip_capacity_bytes`` override alone would silently no-op: it is a
-    computed property, not a stored field). Uses a ``weight_sets == 1`` chip
-    (A100) deliberately: the weight-set write-ahead/persistent commentary is
-    gated only on ``weight_sets > 1``, independent of ``depth``, so testing on
-    an IMC chip would trip an unrelated, pre-existing gap this change is not
-    trying to close.
-
-    ``_pipelined_tiles`` genuinely serialises at depth==1 (a store is placed
-    before the next load's start is even computed), so the listing must show
-    no prologue and no reference to a next wave at all — the exact text this
-    module always printed, not the new double-buffered shape.
-    """
-    chip = idealised(load_chip("a100_80gb"))
-    shrunk_memory = [
-        level.model_copy(update={"capacity_bytes": 300}) if level.name != chip.dram.name else level
-        for level in chip.memory
-    ]
-    chip = chip.model_copy(update={"memory": shrunk_memory})
-    spec = MatmulSpec.model_validate(
-        {
-            "id": "t",
-            "name": "t",
-            "family": "matmul",
-            "m": 600,
-            "n": 600,
-            "k": 600,
-            "a_dtype": "int8",
-            "b_dtype": "int8",
-        }
-    )
-    deployment = DeploymentSpec.model_validate({"batch": 1, "input_tokens": 1, "output_tokens": 1})
-    report = analyze(spec, chip, deployment)
-    assert report.feasible, report.infeasibility
-    assert report.memory.double_buffered is False, "the shrink above must actually flip this"
-    graph = build_graph(spec, deployment, GraphPhase.STATIC)
-    machine = machine_model(chip, DType.INT8)
-    trace = build_trace(
-        graph,
-        report.phases[0],
-        machine,
-        double_buffered=report.memory.double_buffered,
-        max_steps=32,
-    )
-    listing = deployment_of(
-        chip, machine, report.phases[0], trace, workload="t", operation=graph.ops[0]
-    )
-    check(listing, trace)
-
-    assert "w + 1" not in listing.code, "depth==1: nothing prefetches a wave ahead"
-    assert "prologue" not in listing.code
-    lines = listing.code.split("\n")
-    by_stage = dict(listing.stage_lines)
-    assert len(by_stage["load_b"]) == 1, "one load_B statement, referencing wave w"
-    assert "tile(w, u)" in lines[by_stage["load_b"][0]]
 
 
 def test_a_network_gets_a_sequence_listing_rather_than_a_tile_nest() -> None:
@@ -346,8 +56,7 @@ def test_a_network_gets_a_sequence_listing_rather_than_a_tile_nest() -> None:
     assert "#define OPS" in listing.code
     assert "SEQUENCE" in listing.code
     assert "TILES" not in listing.code
-    assert (listing.array_rows, listing.array_cols) == (0, 0)
-    assert listing.grid is None
+    assert listing.kind == "operations"
 
 
 def _network_listing(chip_id: str, dtype: DType, precision: dict[str, str] | None = None):  # type: ignore[no-untyped-def]
@@ -432,3 +141,45 @@ def test_network_listing_writes_the_weight_set_when_the_array_has_one() -> None:
         i for i, line in enumerate(listing.code.split("\n")) if "imc_write(op[i]);" in line
     )
     assert imc_write_line not in tagged_lines
+
+
+def test_a_matmul_with_no_array_geometry_says_so_rather_than_implying_a_grid() -> None:
+    """The one matmul this module still handles, and why (D54).
+
+    A100 executes fp32 on its CUDA cores, which declare no ``systolic_dims``.
+    There is then no tile grid to walk and nothing for ``bwz.emit`` to write, so
+    the run falls back to this listing — and it has to say that, rather than
+    print a sequence listing whose "a network is a SEQUENCE here" would be about
+    a workload that is not a network.
+    """
+    spec = MatmulSpec.model_validate(
+        {
+            "id": "t",
+            "name": "t",
+            "family": "matmul",
+            "m": 512,
+            "n": 512,
+            "k": 512,
+            "a_dtype": "fp32",
+            "b_dtype": "fp32",
+        }
+    )
+    deployment = DeploymentSpec.model_validate({"batch": 1, "input_tokens": 1, "output_tokens": 1})
+    chip = idealised(load_chip("a100_80gb"))
+    report = analyze(spec, chip, deployment)
+    assert report.feasible, report.infeasibility
+    machine = machine_model(chip, DType.FP32)
+    assert machine.unit.systolic_dims is None, "fp32 on A100 runs on the CUDA cores"
+
+    graph = build_graph(spec, deployment, GraphPhase.STATIC)
+    trace = build_trace(
+        graph, report.phases[0], machine, double_buffered=report.memory.double_buffered
+    )
+    listing = deployment_of(
+        chip, machine, report.phases[0], trace, workload="t", operation=graph.ops[0]
+    )
+    check(listing, trace)
+
+    assert "declares no array geometry" in listing.code
+    assert "no runnable program to emit" in listing.code
+    assert "A network is a SEQUENCE" not in listing.code

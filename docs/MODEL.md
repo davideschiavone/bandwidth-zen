@@ -738,3 +738,8 @@ finding worth having (D54).
 **What the program does not model**, and says in its own header: `b_dataflow` and double buffering
 are placements in *time* and move no byte within one pass (D30/D33, D40), and sub-cycles are a
 rate. It validates counts, not time; its wall clock has no relationship to the predicted latency.
+
+**It replaced the pseudo-C tile nest** `deploy.py` used to print (D32, retired in D54). The program
+carries the same animated stage tags — `load_a`, `load_b`, `exec`, `store`, `reduce` — so the
+`--animate` code pane highlights *statements that perform the transfer* rather than a paraphrase of
+one. `deploy.py` keeps only the sequence listing a graph gets, where there is no tile grid to walk.

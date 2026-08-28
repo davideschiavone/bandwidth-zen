@@ -53,22 +53,23 @@ a **new tab in an existing window** rather than a new window.
   addresses in the hovers index into exactly that grid, so without it they cannot be read
 - below the timeline, the same run's place on the **roofline**: both ceilings, the ridge point, the
   M=1 line, and this workload as a labelled point
-- below that, **how it is deployed on the chip** — a pseudo-C loop nest **per chip** showing how B
-  is cut into array-sized tiles, how many arrays take a wave of them at once, whether and when a
-  tile must be written into the array before it can compute. Which loop nest this *is* comes from
-  the chip's stationarity (`--stationarity`, `../CLI.md` §2.5.1, D53) — `os` accumulates K inside
-  the tile, `ws` streams M past a resident one — with `--a-strategy`/`--b-dataflow` (§2.5.2, D36)
-  choosing how the operands move within it, and a second listing block for split-K's reduction
-  kernel when there is one. And where the loads and stores sit around it. Every constant is read back out of the schedule drawn above and checked against it, so
-  the listing and the timeline cannot disagree (D32). Rendered once per chip, unlike the arithmetic,
-  because the mapping is exactly what differs between two machines
-- with `--emit`, **run it yourself** — the same decomposition as a runnable Python program, written
-  beside the page and carried in it (`../CLI.md` §2.6, D54). It walks the grid the timeline draws,
-  counts what it moves and asserts those counts against this page's own numbers, so it cannot
-  narrate a schedule the model did not cost. A `--compare` page emits one per chip, which is where
-  it earns its keep: the same matmul on two machines gives two different loop nests, two different
-  staging counts and the same `C`. It validates **counts, not time** — timing it against the
-  predicted latency is a category error, and the file says so before anything else
+- below that, **how it is deployed on the chip — run it yourself**: the loop nest this model
+  actually schedules, **per chip**, as a **runnable Python program** rather than a description of
+  one (`../CLI.md` §2.6, D54). It walks the grid the timeline draws, stages A on the same events,
+  hands tiles to cores the same way, counts what it moves and asserts those counts against this
+  page's own numbers — so it cannot narrate a schedule the model did not cost, and a reader can
+  run it, edit it and break it. Which loop nest this *is* comes from the chip's stationarity
+  (`--stationarity`, `../CLI.md` §2.5.1, D53) — `os` accumulates K inside the tile, `ws` streams M
+  past a resident one and needs a shared accumulator the `os` file has no use for — with
+  `--a-strategy`/`--b-dataflow` (§2.5.2, D36) choosing how the operands move within it, and a
+  second kernel for split-K's reduction when there is one. Rendered once per chip, unlike the
+  arithmetic, because the mapping is exactly what differs between two machines; `--compare` is
+  where it earns its keep, giving two loop nests, two staging counts and the same `C`. `--emit`
+  also saves the file beside the page, ready to run. It validates **counts, not time** — timing it
+  against the predicted latency is a category error, and the file says so before anything else
+- a **network** has no tile grid to walk and so no program to emit: its operations run in strict
+  sequence (D5a). That page keeps a short pseudo-C listing of the sequence instead, checked
+  against the schedule the same way (D32)
 - below that, **the arithmetic operation by operation** — operand shapes, the algebra, the flop
   count as an expression (`2·M·N·K = 2·4·8·8 = 512`) and a pseudo-C loop nest with the real extents,
   so the model can be back-tested against code rather than trusted
@@ -128,22 +129,20 @@ schedule by hand rather than watching it play.
   animating `--iterations` repeats back to back is the only way `persistent`'s real advantage (its
   2nd+ pass B load genuinely vanishing) would show up in motion
 
-**A pseudo-C pane plays alongside the diagram, debugger-style (D41).** The same loop nest the
-timeline page's "how it is deployed on the chip" section shows — now honestly double-buffered, with
-a real wave-0 prologue and a steady-state loop that prefetches wave *w+1* beside wave *w*'s own
-compute, instead of reading as one serial block — lights up the line(s) executing at the current
-playback time. More than one line highlights at once exactly when double buffering means more than
-one statement is truly concurrent: watch for the `load_B` line and the `mac`/`feed` line lighting up
-together while a block is mid-flight toward a compute station and another is sliding in from DRAM at
-the same time. `imc_write` lines are never highlighted — no event in this model currently times that
-statement (D40), so lighting it up would be decoration, not data — though the line itself is now
-shown for `weight_sets > 1` chips on both the tiled and network paths (D43).
+**A code pane plays alongside the diagram, debugger-style (D41).** For a matmul it is the *runnable
+program* the timeline page carries (D54) — the same file `--emit` saves — and the lines that light
+up are statements that perform the transfer: `dram.read_b(...)` for the B load, `mma(...)` for the
+arithmetic, `dram.write_c(...)` for the store. More than one lights at once exactly when double
+buffering means more than one statement is truly concurrent: watch the staging block and the `mma`
+line glow together while one block is mid-flight toward a compute station and another slides in
+from DRAM. Not every line is highlightable — a statement no event in this model times would be
+decoration rather than data.
 
 **`--encoder`'s code pane is honest about a real limit, not a smaller version of the matmul one
 (D42/D43).** A network's loop is generic — `for (i = 0; i < OPS; ++i) { load_B(op[i]); ...;
 store_C(op[i]); }` — never unrolled per named operation, so the pane can show "a load is happening"
 but not "q_proj's load is happening"; the blocks and the hover text *do* carry the real operation
-name (`Span.label`), the pseudo-C just doesn't. Cross-operation overlap is zero in this model (D5a:
+name (`Span.label`), the listing just doesn't. Cross-operation overlap is zero in this model (D5a:
 operations run in strict sequence) — the highlight only ever lights up lines together within one
 operation's own load/compute, e.g. a norm's `load_A`/`exec` overlapping because that operation's own
 schedule was double buffered, never two different operations' lines at once. The two compute

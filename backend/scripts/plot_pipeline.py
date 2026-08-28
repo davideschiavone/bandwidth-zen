@@ -489,18 +489,19 @@ def _roofline_data(roofs: list[Roof]) -> dict[str, object]:
 
 
 def _deployments(panels: list[Panel]) -> list[dict[str, str]]:
-    """One loop-nest listing per chip — the section a comparison must not merge.
+    """One listing per chip, for the workloads that have no runnable program.
 
-    Every constant is checked against the schedule before it reaches the page
-    (``deploy.check``), on the same reasoning as ``explain.check``: a listing
-    that disagreed with the timeline above it would be believed.
+    A lone matmul's decomposition is emitted as real Python instead (D54), which
+    is the section below this one; what is left here is the *sequence* listing a
+    network gets, where there is no single tile grid to walk and so nothing to
+    emit. Every constant is still checked against the schedule before it reaches
+    the page (``deploy.check``), on the same reasoning as ``explain.check``.
     """
     out: list[dict[str, str]] = []
     for panel in panels:
         work = panel.work
-        if work.phase is None:
+        if work.phase is None or work.program is not None:
             continue
-        dataflow = work.dataflow
         listing = deployment_of(
             panel.chip,
             panel.machine,
@@ -508,34 +509,30 @@ def _deployments(panels: list[Panel]) -> list[dict[str, str]]:
             work.trace,
             workload=f"{work.name} at {panel.dtype.value}",
             operation=work.operation,
-            **(
-                {"a_strategy": dataflow.a_strategy, "b_dataflow": dataflow.b_dataflow}
-                if dataflow is not None
-                else {}
-            ),
         )
         check_deployment(listing, work.trace)
         out.append({"title": listing.title, "code": listing.code})
     return out
 
 
-def _programs(panels: list[Panel], out: Path) -> list[dict[str, str]]:
-    """Write each panel's runnable program beside the page, and carry its source.
+def _programs(panels: list[Panel], out: Path, *, write: bool) -> list[dict[str, str]]:
+    """Each panel's runnable program, for the page — and on disk when asked.
 
-    Beside the HTML rather than inside it alone: the page is for reading, and the
-    point of D54 is that the thing can be *run*. Both, then — the file on disk to
-    run and the source in the page to read, from one ``EmittedProgram`` so the
-    two cannot differ.
+    This is what replaced the pseudo-C listing for a tiled matmul (D54): the page
+    is for reading, but the point is that the thing can be *run*, so ``--emit``
+    also drops the file beside the HTML. One ``EmittedProgram`` feeds both, so
+    the two cannot differ.
     """
     written: list[dict[str, str]] = []
     for panel in panels:
         program = panel.work.program
         if program is None:
             continue
-        destination = out.parent / program.filename
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_text(program.source, encoding="utf-8")
-        print(f"wrote {destination}")
+        if write:
+            destination = out.parent / program.filename
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_text(program.source, encoding="utf-8")
+            print(f"wrote {destination}")
         written.append(
             {
                 "title": _program_title(panel, program),
@@ -581,7 +578,9 @@ def _stationarity_banner(panels: list[Panel]) -> str:
     return banner
 
 
-def write_html(panels: list[Panel], command: str, out: Path) -> None:
+def write_html(
+    panels: list[Panel], command: str, out: Path, *, write_programs: bool = False
+) -> None:
     """The same figure, zoomable, as one self-contained file.
 
     A comparison page carries every chip's rows against one shared, absolute time
@@ -640,7 +639,7 @@ def write_html(panels: list[Panel], command: str, out: Path) -> None:
             for span in panel.work.trace.spans
         ],
         deployments=_deployments(panels),
-        programs=_programs(panels, out),
+        programs=_programs(panels, out, write=write_programs),
         total_s=total,
         hint=(
             " Rows are banded by chip and the time axis is <b>shared and absolute</b>, so a bar "
@@ -908,35 +907,43 @@ def write_animation_html(panel: Panel, command: str, out: Path) -> None:
     work = panel.work
     dataflow = work.dataflow
     assert work.phase is not None, "every --animate workload carries its phase"
-    listing = deployment_of(
-        panel.chip,
-        panel.machine,
-        work.phase,
-        work.trace,
-        workload=f"{work.name} at {panel.dtype.value}",
-        operation=work.operation,
-        **(
-            {"a_strategy": dataflow.a_strategy, "b_dataflow": dataflow.b_dataflow}
-            if dataflow is not None
-            else {}
-        ),
-    )
-    check_deployment(listing, work.trace)
+    # The code pane shows the RUNNABLE program where there is one (D54): the
+    # highlighted lines are then statements that perform the transfer rather
+    # than a pseudo-C paraphrase of one, and a reader can run the file the
+    # animation is stepping through. A network has no tile grid to walk, so it
+    # keeps the sequence listing, which is all `deployment_of` still produces.
+    program = work.program
+    code_lines = program.source.split("\n") if program is not None else []
+    stage_lines: dict[str, list[int]] = {}
+    if program is not None:
+        stage_lines = {tag: list(indices) for tag, indices in program.stage_lines}
+    if program is None:
+        listing = deployment_of(
+            panel.chip,
+            panel.machine,
+            work.phase,
+            work.trace,
+            workload=f"{work.name} at {panel.dtype.value}",
+            operation=work.operation,
+        )
+        check_deployment(listing, work.trace)
+        code_lines = listing.code.split("\n")
+        stage_lines = {tag: list(indices) for tag, indices in listing.stage_lines}
     geometry: dict[str, object] | None = None
-    if listing.kind == "tiles" and listing.grid is not None:
-        # Straight off the listing's own grid (D53): the panel has to draw the
+    if program is not None and program.grid is not None:
+        # Straight off the program's own grid (D53): the panel has to draw the
         # operand THIS chip keeps resident, and which one that is — along with
         # which dimension each grid axis carries — is exactly what the grid
-        # says. Re-deriving it here is how the panel and the listing would
-        # drift apart.
-        grid = listing.grid
+        # says. Re-deriving it here is how the panel and the program would drift
+        # apart.
+        grid = program.grid
         band_rows, band_cols = grid.a_event_shape
         geometry = {
             "m": grid.m,
             "n": grid.n,
             "k": grid.k,
-            "rows": listing.array_rows,
-            "cols": listing.array_cols,
+            "rows": program.array_rows,
+            "cols": program.array_cols,
             "grid_rows": grid.rows,
             "grid_cols": grid.cols,
             "row_dim": grid.row_dim.value,
@@ -975,8 +982,8 @@ def write_animation_html(panel: Panel, command: str, out: Path) -> None:
         a_strategy=dataflow.a_strategy.value if dataflow is not None else None,
         b_dataflow=dataflow.b_dataflow.value if dataflow is not None else None,
         notes=list(dataflow.notes) if dataflow is not None else [],
-        code_lines=listing.code.split("\n"),
-        stage_lines={tag: list(indices) for tag, indices in listing.stage_lines},
+        code_lines=code_lines,
+        stage_lines=stage_lines,
         geometry=geometry,
     )
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -1114,7 +1121,7 @@ def build_matmul(
     iterations: int = 1,
     stationarity: Dataflow | None = None,
     split_k: int = 1,
-    emit_command: str | None = None,
+    command: str = "bwz matmul",
 ) -> Workload:
     spec = matmul_kernel(m, n, k, a_dtype=dtype, b_dtype=dtype)
     deployment = DeploymentSpec.model_validate(
@@ -1160,10 +1167,14 @@ def build_matmul(
         dataflow=dataflow,
     )
     op = report.phases[0].ops[0]
+    # Always, not only under --emit: the page's "how it is deployed" section IS
+    # this program now (D54), and --emit only decides whether the .py is also
+    # written to disk beside the page. A chip whose fastest unit for this dtype
+    # declares no array geometry (fp32 on A100 runs on the CUDA cores) has no
+    # tile grid to walk, and falls back to the sequence listing.
     program: EmittedProgram | None = None
-    if emit_command is not None:
-        grid = grid_of(graph.ops[0], machine)
-        assert grid is not None, "a matmul on a chip with declared array geometry"
+    grid = grid_of(graph.ops[0], machine)
+    if grid is not None:
         program = emit_matmul(
             chip,
             machine,
@@ -1175,7 +1186,7 @@ def build_matmul(
             c_dtype=spec.result_dtype,
             acc_dtype=deployment.precision.accumulate,
             double_buffered=report.memory.double_buffered,
-            command=emit_command,
+            command=command,
             version=bwz.__version__,
         )
         check_program(program)
@@ -1490,8 +1501,8 @@ def _build_parser() -> argparse.ArgumentParser:
     output.add_argument(
         "--emit",
         action="store_true",
-        help="Also write the decomposition as a runnable Python program next to the page, "
-        "and carry its source in a 'Run it yourself' section (matmul only, D54)",
+        help="Also write the runnable program the page already carries as a .py file next "
+        "to it, ready to run (matmul only, D54)",
     )
     output.add_argument(
         "--animate",
@@ -1631,7 +1642,7 @@ def main() -> None:
                 iterations=args.iterations,
                 stationarity=Dataflow(args.stationarity) if args.stationarity else None,
                 split_k=args.split_k,
-                emit_command=command if args.emit else None,
+                command=command,
             )
         ]
 
@@ -1662,6 +1673,7 @@ def main() -> None:
                 panels,
                 command,
                 args.out / f"timeline-{slug(prefix, dtype, panels[0].work, index)}.html",
+                write_programs=args.emit,
             )
         return
 
@@ -1670,7 +1682,10 @@ def main() -> None:
         for index, work in enumerate(workloads(chip, dtype, args.steps)):
             panel = Panel(chip, dtype, work)
             write_html(
-                [panel], command, args.out / f"timeline-{slug(chip.id, dtype, work, index)}.html"
+                [panel],
+                command,
+                args.out / f"timeline-{slug(chip.id, dtype, work, index)}.html",
+                write_programs=args.emit,
             )
             if args.animate:
                 write_animation_html(

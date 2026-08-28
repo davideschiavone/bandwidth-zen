@@ -549,10 +549,12 @@ One self-contained file — no server, no download, no CDN. Wheel zooms about th
 double-click resets. Hovering a bar names the transaction: `LOAD — operands in`, `STORE — result
 written back`, `EXEC — matmul`, `HOLD — on chip`, each with its bytes or operations and the rate.
 
-Below the timeline it carries the **roofline** for the same run, and below that **the arithmetic
-operation by operation** — operand shapes, the algebra, the flop count as an expression
-(`2·M·N·K = 2·4·8·8 = 512`) and a pseudo-C loop nest with the real extents, so the model can be
-back-tested against code rather than trusted.
+Below the timeline it carries the **roofline** for the same run; below that **how it is deployed on
+the chip**, which for a matmul is the decomposition written out as a **runnable Python program**
+(`bwz matmul --emit`, D54) that walks the same grid, counts what it moves and asserts those counts
+against the page's own numbers; and below that **the arithmetic operation by operation** — operand
+shapes, the algebra, the flop count as an expression (`2·M·N·K = 2·4·8·8 = 512`) and a pseudo-C loop
+nest with the real extents, so the model can be back-tested against code rather than trusted.
 
 **The figures are not the report.** `bwz matmul`, `bwz run` and `bwz encoder-layer` print the
 numbers, their derivations and the assumptions drawer; the plot scripts write files and print only
@@ -728,6 +730,7 @@ backend/bwz/
   operators/    per-family cost models (matmul, conv, attention, norm, elementwise)
   analysis/     roofline, stationarity (the tile grid), tiling, memory, schedule,
                 parallelism, collectives, power, bottleneck
+  emit/         one matmul's decomposition as a runnable, self-checking program
   api/, cli.py  thin shells over analyze(model, hardware, deployment) -> Report
   profiles/     chip and model YAML
 backend/scripts/  figure generation (imports the engine; the engine never imports it)

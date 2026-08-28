@@ -135,13 +135,8 @@ point: left of it the chip is starved of bandwidth, right of it the array is the
 line is the M=1 ceiling — array geometry, not a derating.</p>
 <div id="rwrap"><svg id="roof"></svg><div id="rtip"></div></div>
 
-<h2 class="section">How it is deployed on the chip</h2>
-<p class="hint">The loop nest this model actually schedules, per chip — how B is cut into
-array-sized tiles, how many arrays take a wave of them at once, whether a tile has to be written
-into the array before it can compute, and where the loads and stores sit around it. Every constant
-is read back out of the schedule drawn above, so this and the timeline cannot disagree.</p>
-{deployments}
 {programs}
+{deployments}
 
 <h2 class="section">The arithmetic, operation by operation</h2>
 <p class="hint">Shapes, algebra, the flop count as an expression, and a loop nest that performs
@@ -520,28 +515,42 @@ def render(
     # One listing per chip, unlike the arithmetic: how the work reaches the
     # silicon is exactly what differs between two machines running the same
     # workload, so this is the section a comparison must NOT render once.
-    deploy_html = "".join(
-        f'<h3 class="deploy">{_escape(d["title"])}</h3>'
-        f'<pre class="deploy">{_escape(d["code"])}</pre>'
-        for d in deployments or []
-    )
+    # Heading and hint live here rather than in the template because both
+    # sections are conditional: a tiled matmul has a runnable program and no
+    # listing, a network has a listing and no program (D54), and an empty
+    # heading would promise a section the page does not carry.
+    deploy_html = ""
+    if deployments:
+        deploy_html = (
+            '<h2 class="section">How it is deployed on the chip</h2>'
+            '<p class="hint">A graph runs as a SEQUENCE in this model &mdash; no overlap is '
+            "modelled between one operation&rsquo;s prefetch and the previous one&rsquo;s "
+            "arithmetic (D5a) &mdash; so there is no tile grid to walk here and nothing to emit "
+            "as a runnable program. Every constant below is read back out of the schedule drawn "
+            "above, so this and the timeline cannot disagree.</p>"
+        ) + "".join(
+            f'<h3 class="deploy">{_escape(d["title"])}</h3>'
+            f'<pre class="deploy">{_escape(d["code"])}</pre>'
+            for d in deployments or []
+        )
     # The whole section, heading included, is built here rather than sitting in
     # the template: without --emit there is no program, and an empty "Run it
     # yourself" heading would promise something the page does not carry.
     programs_html = ""
     if programs:
         programs_html = (
-            '<h2 class="section">Run it yourself</h2>'
-            '<p class="hint">The same decomposition as a program you can run, edit and break '
-            "&mdash; the tile grid above, walked. It counts what it moves and checks those counts "
-            "against this page&rsquo;s own numbers, so it cannot narrate a schedule the model did "
-            "not cost. It validates <b>counts, not time</b>: timing it and comparing that to the "
-            "predicted latency is a category error. Written beside this file; regenerate with the "
-            "command in this page&rsquo;s footer, or with <code>bwz matmul --emit</code>.</p>"
+            '<h2 class="section">How it is deployed on the chip &mdash; run it yourself</h2>'
+            '<p class="hint">The loop nest this model actually schedules, as a program you can '
+            "run, edit and break &mdash; the tile grid above, walked. It stages A on the same "
+            "events, hands tiles to cores the same way, counts what it moves and checks those "
+            "counts against this page&rsquo;s own numbers, so it cannot narrate a schedule the "
+            "model did not cost. It validates <b>counts, not time</b>: timing it and comparing "
+            "that to the predicted latency is a category error. Save it with "
+            "<code>--emit</code>, or regenerate with the command in this page&rsquo;s footer.</p>"
         ) + "".join(
             f'<h3 class="deploy">{_escape(p["title"])}</h3>'
-            f'<p class="hint">Saved beside this page as <code>{_escape(p["filename"])}</code>; '
-            f"run it with <code>python {_escape(p['filename'])}</code>.</p>"
+            f'<p class="hint"><code>{_escape(p["filename"])}</code> &mdash; run it with '
+            f"<code>python {_escape(p['filename'])}</code>.</p>"
             f'<pre class="deploy">{_escape(p["source"])}</pre>'
             for p in programs
         )

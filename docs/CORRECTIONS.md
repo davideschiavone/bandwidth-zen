@@ -2416,11 +2416,44 @@ rather than an unexamined term in a residency formula.
   claims about *time* — a write's placement, an overlap, a rate — and this program measures counts.
   D54-PLAN proposed a real prefetch queue of `DEPTH`; it would move no byte and change no result,
   so it is written down in the file's own header instead of simulated.
-- **The pseudo-C stays.** The animation's line-highlighting points at `Deployment.stage_lines`
-  (D41/D43). Re-targeting it at the emitted Python is strictly better and is what the user's
-  complaint points at, but it touches tested behaviour and is its own change.
 - **`--used-cores N` is descriptive, not a knob.** `USED_CORES` is `min(AVAILABLE, TILES)` and the
   file shows the idle remainder. Making it a user-settable *cap* would change reported latency
   (fewer cores → more waves → lower occupancy) and needs its own goldens.
 - **Other kernels.** Attention, convolution and the encoder come later; the harness is shaped so
   they slot in, but one kernel done properly beats three sketched.
+
+### The pseudo-C is retired, in the same change
+
+The plan proposed keeping it and re-targeting the animation later. The user asked for it now, and
+the argument for waiting was weak once the Python could carry the same stage tags: two listings of
+the same loop nest are not two useful artifacts, and the weaker one could be checked against nothing
+but its own constants.
+
+So `EmittedProgram` now carries `stage_lines` — 0-indexed line numbers for `load_a`, `load_b`,
+`exec`, `store` and `reduce`, in the vocabulary `plot_pipeline.py` already used — and the animation
+highlights **those**. The lines it lights are statements that perform the transfer:
+`dram.read_b(k0, k1, n0, n1)`, `mma(acc, a, b, counters, SLOTS_PER_MMA)`,
+`dram.write_c(m0, n0, acc)`. `emit.check` asserts the map points at real, non-blank lines and that
+all four required stages are present, so an off-by-one is caught statically rather than found by eye
+in a browser.
+
+`deploy.py` keeps only the case `emit` has no answer for: a **graph**, which this model runs as a
+sequence with no overlap between operations (D5a), so there is no tile grid to walk and nothing to
+emit. A matmul on a chip whose fastest unit for the requested dtype declares no array geometry
+(fp32 on A100 runs on the CUDA cores) lands there too, and the listing now says *that* rather than
+printing "a network is a SEQUENCE here" about a workload that is not a network.
+
+Two consequences worth naming. The emitted file's runtime moved **below** `main()`, against
+convention and on purpose: the loop nest is what a reader is here for, and 400 lines of machinery
+between the constants and the walk would bury it — which is the mirror of the failure the pseudo-C
+had. And the `COUNTERS` global went with it; counters are threaded through `run_tile` explicitly,
+which the reordering forced and which is better anyway.
+
+`--emit` consequently changed meaning on `plot_pipeline.py`: the page **always** carries the
+program now, and the flag decides only whether the `.py` is also saved beside it.
+
+`tests/unit/test_deploy.py` lost the tile-nest half. Every fact it pinned — the wave counts, the
+staged-once-per-group claim, the swept dimension, the bit-serial tax — is still pinned, by a program
+that would fail to run if it were wrong rather than by a substring search over prose. Four
+pre-existing `mypy` errors in `scripts/plot_pipeline.py` went with the retired `a_strategy`/
+`b_dataflow` parameters.

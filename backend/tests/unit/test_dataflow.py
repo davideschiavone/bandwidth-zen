@@ -15,8 +15,6 @@ import pytest
 from bwz.analysis import analyze, machine_model, trace_phases
 from bwz.analysis.dataflow import DataflowPlan, plan_dataflow
 from bwz.analysis.pipeline import Lane, tile_count, tiles_per_a_event
-from bwz.deploy import check as check_deployment
-from bwz.deploy import deployment_of
 from bwz.graph import GraphPhase, build_graph
 from bwz.operators.base import cost_of
 from bwz.report import Report
@@ -328,10 +326,18 @@ def test_dataflow_line_names_the_effective_not_requested_strategy() -> None:
     assert "persistent" not in lines[0].split("·")[1]
 
 
-def test_deploy_listing_agrees_with_the_plan_for_every_strategy() -> None:
-    """deploy.py's check() must hold for every combination — the listing cannot
-    claim a strategy the schedule above it did not run."""
-    from bwz.analysis.pipeline import build_trace
+def test_the_emitted_program_agrees_with_the_plan_for_every_strategy() -> None:
+    """``emit.check`` must hold for every combination — the program cannot walk a
+    strategy the schedule above it did not run.
+
+    This was ``deploy.py``'s pseudo-C listing until D54 retired it. The guarantee
+    is the same and the artifact is stronger: a program that named the wrong
+    strategy would also *move the wrong bytes*, and its own tier-1 assertions
+    would fail when run.
+    """
+    from bwz.analysis.pipeline import build_trace, grid_of
+    from bwz.emit import check as check_program
+    from bwz.emit import emit_matmul
 
     spec = _spec(600, 600, 600)
     chip = load_chip("metis_aipu")
@@ -356,7 +362,7 @@ def test_deploy_listing_agrees_with_the_plan_for_every_strategy() -> None:
                 deployment,
                 a_bytes=cost_of(graph.ops[0], graph.tensors).input_bytes,
             )
-            trace = build_trace(
+            build_trace(
                 graph,
                 report.phases[0],
                 machine,
@@ -364,17 +370,25 @@ def test_deploy_listing_agrees_with_the_plan_for_every_strategy() -> None:
                 max_steps=32,
                 dataflow=plan,
             )
-            listing = deployment_of(
+            grid = grid_of(graph.ops[0], machine)
+            assert grid is not None
+            program = emit_matmul(
                 chip,
                 machine,
-                report.phases[0],
-                trace,
-                workload="t",
-                operation=graph.ops[0],
-                a_strategy=plan.a_strategy,
-                b_dataflow=plan.b_dataflow,
+                grid,
+                plan,
+                report.phases[0].ops[0],
+                a_dtype=spec.a_dtype,
+                b_dtype=spec.b_dtype,
+                c_dtype=spec.result_dtype,
+                acc_dtype=deployment.precision.accumulate,
+                double_buffered=report.memory.double_buffered,
+                command="bwz matmul (test)",
+                version="0.0.0-test",
             )
-            check_deployment(listing, trace)
+            check_program(program)
+            assert f'A_STRATEGY = "{plan.a_strategy.value}"' in program.source
+            assert f'B_DATAFLOW = "{plan.b_dataflow.value}"' in program.source
 
 
 def test_a_prefetch_depth_is_schedule_only() -> None:
