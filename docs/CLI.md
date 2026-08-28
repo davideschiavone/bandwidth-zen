@@ -474,9 +474,9 @@ python /tmp/k.py --debug
 --debug: 1 tile(s) over 1 core(s) in 1 wave(s), issuing 2 instruction tile(s).
          core/wave assignment, A staging events, and every
          instruction tile follow. Expect one line each.
-core 0     wave 0    takes tile 0
+core 0     wave 0    tile 0
+  C[0:16, 0:16]  piece 0, sweeping kt 0..2
   stage A for key (0, 0, 0) -- crosses DRAM, once per key (D33)
-  tile 0      C[0:16, 0:16]  piece 0, kt 0..2
     kt=0    A[0:16, 0:16] @ B[0:16, 0:16]      4,096 useful of 4,096 slots
     kt=1    A[0:16, 16:17] @ B[16:17, 0:16]        256 useful of 4,096 slots
 ```
@@ -485,13 +485,19 @@ core 0     wave 0    takes tile 0
 4 096-slot instruction tile for 256 useful MACs. That is where `shape utilisation` comes from, one
 line at a time.
 
+**One core's lines print as one block.** Cores run concurrently, and the narration is *indented* — a
+tile under a core, a k-step under a tile — so that nesting is a claim about which line belongs to
+which. Each core buffers its block and prints it whole (D61). Blocks still appear in **completion
+order**, not tile order, which is honest: they genuinely run at the same time. Within a block
+nothing interleaves.
+
 **It says what the decomposition is.** The same flag on Metis reports the other family — a resident
 B tile with M streaming past it, and a partial rather than a result:
 
 ```
-core 0     wave 0    takes tile 0
+core 0     wave 0    tile 0
+  B[0:512, 0:512] resident, M streams past it
   stage A for key (0, 0, 0) -- crosses DRAM, once per key (D33)
-  tile 0      B[0:512, 0:512] resident, M streams past it
     mt=0    A[0:512, 0:512] @ B[0:512, 0:512] -> PARTIAL into C[0:512, 0:512]
 ...
 core 3     wave 6    idle -- no tile left (D30)

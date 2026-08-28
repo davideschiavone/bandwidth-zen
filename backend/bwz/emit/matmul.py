@@ -862,14 +862,11 @@ def _accumulator_nest(grid: TileGrid) -> list[Line]:
             "    n0, n1 = nt * COLS, min(nt * COLS + COLS, N)",
             "    kt0, kt1 = K_TILE_BOUNDS[part]               # this piece's slice of the sweep",
             "    k_lo = kt0 * ROWS",
+            "    if DEBUG:",
+            '        log(f"  C[{m0}:{m1}, {n0}:{n1}]  piece {part}, sweeping kt {kt0}..{kt1}")',
             "    band = stage_a(tile, dram, pad)",
             "",
             "    acc = zeros(m1 - m0, n1 - n0, ACC_DTYPE)     # the accumulator that stays put",
-            "    if DEBUG:",
-            "        log(",
-            '            f"  tile {tile:<6} C[{m0}:{m1}, {n0}:{n1}]  piece {part}, "',
-            '            f"kt {kt0}..{kt1}"',
-            "        )",
             "    for kt in range(kt0, kt1):                   # K is swept INSIDE this tile",
             "        k0, k1 = kt * ROWS, min(kt * ROWS + ROWS, K)",
             "        a = sub(band, 0, m1 - m0, k0 - k_lo, k1 - k_lo)   # already on chip",
@@ -927,6 +924,12 @@ def _weight_nest() -> list[Line]:
             "    n0, n1 = nt * COLS, min(nt * COLS + COLS, N)",
         ]
     )
+    out += _plain(
+        [
+            "    if DEBUG:",
+            '        log(f"  B[{k0}:{k1}, {n0}:{n1}] resident, M streams past it")',
+        ]
+    )
     out += [
         ("    b = dram.read_b(k0, k1, n0, n1)              # the operand that stays put", "load_b")
     ]
@@ -934,8 +937,6 @@ def _weight_nest() -> list[Line]:
         [
             "    band = stage_a(tile, dram, pad)",
             "",
-            "    if DEBUG:",
-            '        log(f"  tile {tile:<6} B[{k0}:{k1}, {n0}:{n1}] resident, M streams past it")',
             "    for mt in range(M_TILES):            # M streams past the resident tile",
             "        m0, m1 = mt * ROWS, min(mt * ROWS + ROWS, M)",
             "        a = sub(band, m0, m1, 0, k1 - k0)        # already on chip",
@@ -979,13 +980,11 @@ def _input_nest() -> list[Line]:
             "    mt, kt = tile_row(tile), tile_col(tile)",
             "    m0, m1 = mt * ROWS, min(mt * ROWS + ROWS, M)",
             "    k0, k1 = kt * ROWS, min(kt * ROWS + ROWS, K)",
+            "    if DEBUG:",
+            '        log(f"  A[{m0}:{m1}, {k0}:{k1}] resident, N streams past it")',
             "    band = stage_a(tile, dram, pad)",
             "    a = sub(band, 0, m1 - m0, k0, k1)            # the operand that stays put",
             "",
-            "    if DEBUG:",
-            "        log(",
-            '            f"  tile {tile:<6} A[{m0}:{m1}, {k0}:{k1}] resident, N streams past it"',
-            "        )",
             "    for nt in range(N_TILES):            # N streams past the resident tile",
             "        n0, n1 = nt * COLS, min(nt * COLS + COLS, N)",
         ]

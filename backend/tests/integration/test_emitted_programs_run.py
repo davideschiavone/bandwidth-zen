@@ -102,10 +102,10 @@ def _write(
     return path
 
 
-def _run(path: Path, env: dict[str, str] | None = None) -> str:
+def _run(path: Path, env: dict[str, str] | None = None, extra_args: list[str] | None = None) -> str:
     """Run an emitted program and return its stdout, failing on a non-zero exit."""
     finished = subprocess.run(
-        [sys.executable, str(path)],
+        [sys.executable, str(path), *(extra_args or [])],
         capture_output=True,
         text=True,
         timeout=TIMEOUT_S,
@@ -227,3 +227,53 @@ def test_it_runs_without_numpy(tmp_path: Path) -> None:
     output = _run(path, env={"PYTHONPATH": str(shadow), "PATH": "/usr/bin:/bin"})
     assert "backend: pure Python" in output
     assert "every tier-1 count matches the report" in output
+
+
+def test_debug_blocks_are_atomic_under_real_concurrency(tmp_path: Path) -> None:
+    """Each core's narration prints as one unit, however many cores run (D61).
+
+    The narration is indented — a tile under a core, a k-step under a tile — and
+    that nesting is a *claim* about which line belongs to which. Serialising
+    individual lines is not enough: with four cores it put ``kt=`` lines under a
+    header belonging to a different core, so the indentation said something
+    false. This runs 64 cores at once and checks every block is whole.
+
+    A subprocess, and a shape with many tiles, because the failure only appears
+    when threads genuinely interleave — an in-process single-core run would pass
+    against the broken version.
+    """
+    path = _write(tmp_path, chip_id="a100_80gb", shape=(128, 128, 32), dtype="fp16")
+    output = _run(path, extra_args=["--debug"])
+
+    blocks: list[list[str]] = []
+    for line in output.splitlines():
+        if line.startswith("core "):
+            blocks.append([line])
+        elif blocks and line.startswith(" ") and ("kt=" in line or "C[" in line or "stage" in line):
+            blocks[-1].append(line)
+    assert len(blocks) == 64, f"8x8 grid -> 64 tiles, got {len(blocks)} blocks"
+
+    for block in blocks:
+        header, body = block[0], block[1:]
+        geometry = [line for line in body if line.strip().startswith("C[")]
+        steps = [line for line in body if "kt=" in line]
+        assert len(geometry) == 1, f"one tile per block, got {len(geometry)}: {header}"
+        assert len(steps) == 2, f"ceil(32/16) = 2 k-steps per tile, got {len(steps)}: {header}"
+        # And the k-steps belong to *this* block's tile, not a neighbour's.
+        rows = geometry[0].split("C[")[1].split(",")[0]
+        assert all(f"A[{rows}," in step for step in steps), (
+            "a k-step under the wrong tile header:\n" + "\n".join(block)
+        )
+
+
+def test_debug_changes_no_count(tmp_path: Path) -> None:
+    """Narrating the walk must not alter it — the flag is observation only."""
+    path = _write(tmp_path, chip_id="a100_80gb", shape=(64, 64, 128), dtype="fp16")
+    quiet = _run(path)
+    noisy = _run(path, extra_args=["--debug"])
+
+    def table(text: str) -> list[str]:
+        return [line for line in text.splitlines() if "OK" in line or "differs" in line]
+
+    assert table(quiet) == table(noisy)
+    assert "every tier-1 count matches the report" in noisy

@@ -72,18 +72,42 @@ issues 1.5 million instruction tiles, and formatting a line for each one that
 nobody reads would dominate the run. ``if DEBUG:`` costs one bool test."""
 
 _LOG_LOCK = threading.Lock()
+_LOG = threading.local()
 
 
 def log(message: str) -> None:
-    """One line of ``--debug`` output.
+    """One line of ``--debug`` output, held until this core's block is flushed.
 
-    Serialised: cores run concurrently and unsynchronised ``print`` interleaves
-    mid-line. The lock orders whole lines, not the work — two cores' lines may
-    still appear in either order, which is honest, because in this model they
-    genuinely run at the same time.
+    Serialising individual lines is not enough. The narration is *indented* —
+    a tile under a core, a k-step under a tile — and that nesting is a claim
+    about which line belongs to which. Four cores printing line by line put a
+    ``kt=`` under a ``tile`` header belonging to a different core, and the
+    indentation then says something false (D61).
+
+    So a line goes into the current core's buffer and the whole block is printed
+    at once. Blocks still appear in completion order, which is honest: they
+    genuinely run at the same time. Lines within one no longer do.
     """
-    with _LOG_LOCK:
-        print(message)
+    lines = getattr(_LOG, "lines", None)
+    if lines is None:
+        with _LOG_LOCK:
+            print(message)
+    else:
+        lines.append(message)
+
+
+def log_block(header: str) -> None:
+    """Open a block on this thread; every :func:`log` from it joins the block."""
+    _LOG.lines = [header]
+
+
+def log_flush() -> None:
+    """Print this thread's block as one unit, and close it."""
+    lines = getattr(_LOG, "lines", None)
+    _LOG.lines = None
+    if lines:
+        with _LOG_LOCK:
+            print("\n".join(lines))
 
 
 Tile = Any
@@ -582,8 +606,10 @@ def run_waves(
                 tile = wave * used_cores + core_id
                 if tile < tiles:
                     if DEBUG:
-                        log(f"core {core_id:<5} wave {wave:<4} takes tile {tile}")
+                        log_block(f"core {core_id:<5} wave {wave:<4} tile {tile}")
                     run_tile(tile)
+                    if DEBUG:
+                        log_flush()
                 else:
                     if DEBUG:
                         log(f"core {core_id:<5} wave {wave:<4} idle -- no tile left (D30)")
@@ -593,6 +619,10 @@ def run_waves(
         # its peers are inside barrier.wait() would hang the whole run, so the
         # barrier is aborted and the first failure surfaces from run_waves.
         except BaseException as exc:
+            # Flush whatever this core had narrated: on a failure that partial
+            # block is the most useful thing on screen.
+            if DEBUG:
+                log_flush()
             with failure_lock:
                 failures.append(exc)
             barrier.abort()

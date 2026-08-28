@@ -2868,3 +2868,79 @@ same number, once as a line per occurrence and once as a total.
 `sys` joins the emitted program's import list, which the standard-library allowlist test now
 includes. No count, assertion or byte moved; `docs/CLI.md` §2.6's verbatim output block is unchanged
 because that run passes no flag.
+
+
+---
+
+## D61 — Indented narration needs whole blocks, not whole lines (2026-08-28)
+
+D60 shipped `--debug` a few minutes earlier and the user ran it on a 17-cubed matmul — four tiles,
+four cores — and got this:
+
+```
+core 0     wave 0    takes tile 0
+  stage A for key (0, 0, 0) -- crosses DRAM, once per key (D33)
+  tile 0      C[0:16, 0:16]  piece 0, kt 0..2
+core 2     wave 0    takes tile 2
+  stage A for key (0, 1, 0) -- crosses DRAM, once per key (D33)
+core 3     wave 0    takes tile 3
+    kt=0    A[0:16, 0:16] @ B[0:16, 0:16]      4,096 useful of 4,096 slots
+    kt=1    A[0:16, 16:17] @ B[16:17, 0:16]        256 useful of 4,096 slots
+  tile 2      C[16:17, 0:16]  piece 0, kt 0..2
+```
+
+*"the debug log is not very clear, there is some overlap or something is not writing in order"*.
+
+Those two `kt=` lines are **core 0's**, printed after core 3's header. The indentation says they
+belong to tile 3. They do not.
+
+### The reasoning that was wrong
+
+D60 said, and this entry retracts it:
+
+> *Output is serialised through a lock. ... The lock orders whole lines and nothing else: two cores'
+> lines may still appear in either order, which is honest, because in this model they genuinely run
+> at the same time.*
+
+The honesty argument does not survive contact with the format. Unordered output would be honest if
+the lines were independent — but they are **indented**, and indentation is a claim that a line
+belongs under the one above it. Line-level serialisation preserves that claim's *typography* while
+destroying its *truth*, which is worse than no structure at all. It is the same failure D56–D58 kept
+finding in comments, arrived at from the other direction: a presentation that says something the
+data does not.
+
+### The fix
+
+`log()` appends to a **thread-local** buffer; `run_waves` opens a block before `run_tile` and
+flushes it after, so one core's tile prints as one unit:
+
+```
+core 0     wave 0    tile 0
+  C[0:16, 0:16]  piece 0, sweeping kt 0..2
+  stage A for key (0, 0, 0) -- crosses DRAM, once per key (D33)
+    kt=0    A[0:16, 0:16] @ B[0:16, 0:16]      4,096 useful of 4,096 slots
+    kt=1    A[0:16, 16:17] @ B[16:17, 0:16]        256 useful of 4,096 slots
+```
+
+Blocks still appear in **completion order** rather than tile order, and that genuinely is honest —
+they run at the same time, and nothing in the block claims otherwise. A per-wave ordered flush was
+considered and rejected: it needs a second barrier and a designated printing core, which is real
+plumbing in `run_waves`, the one function whose shape is the teaching point.
+
+The tile's geometry line also moved *above* `stage_a`, so a block reads in the order things happen —
+identify the tile, stage what it needs, then issue its instruction tiles — instead of announcing the
+staging before saying what was being staged for.
+
+A failing core flushes its partial block before recording the failure: on a crash that block is the
+most useful thing on screen.
+
+### Tested against the bug, not around it
+
+`test_debug_blocks_are_atomic_under_real_concurrency` runs an 8x8-grid program — **64 cores at
+once** — in a subprocess and asserts every block has exactly one geometry line, exactly two k-steps,
+and k-steps whose row range matches *its own* header. Reverting the buffering makes it fail; an
+in-process single-core check would have passed against the broken version, which is why it is an
+integration test with a shape big enough to interleave.
+
+A second test asserts `--debug` changes no counted quantity: the flag is observation, and the
+tier-1/tier-2 table must be identical with and without it.
