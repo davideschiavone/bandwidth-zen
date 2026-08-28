@@ -62,7 +62,7 @@ class Deployment:
     stage_lines: tuple[tuple[str, tuple[int, ...]], ...] = ()
     """0-indexed line numbers within ``code`` for each animated stage
     (``"load_b"``, ``"load_a"``, ``"exec_core"``, ``"exec_vector"``, ``"store"``
-    — the vocabulary ``plot_pipeline.py``'s ``_ANIMATION_STAGE`` already uses).
+    — the vocabulary ``bwz.figures``'s ``_ANIMATION_STAGE`` already uses).
     A tuple of pairs rather than a ``dict``, matching ``PipelineTrace.work_by_op``'s
     own reason: keep a frozen dataclass hashable-in-substance. Lets a debug view
     highlight the line(s) live at the animation's current time (D41)."""

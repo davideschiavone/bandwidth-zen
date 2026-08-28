@@ -45,19 +45,12 @@ two precisions would be comparing two different amounts of traffic — so
 
 from __future__ import annotations
 
-import argparse
-import shlex
 import subprocess
-import sys
-import textwrap
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from dataflow_html import render as render_animation
-from timeline_html import Box, render
-
 import bwz
-from bwz.analysis import analyze, idealised, machine_model
+from bwz.analysis import idealised, machine_model
 from bwz.analysis.dataflow import DataflowPlan, plan_dataflow
 from bwz.analysis.pipeline import Lane, PipelineTrace, Span, Stage, build_trace, grid_of
 from bwz.analysis.roofline import MATRIX_OP_TYPES, MachineModel, compute_dtype
@@ -67,22 +60,13 @@ from bwz.deploy import deployment_of
 from bwz.emit import EmittedProgram, emit_matmul
 from bwz.emit import check as check_program
 from bwz.explain import Explanation, explain_graph
+from bwz.figures.dataflow_html import render as render_animation
+from bwz.figures.timeline_html import Box, render
 from bwz.graph import GraphPhase, build_graph, build_graphs
 from bwz.graph.ops import Operation
-from bwz.kernels import encoder_layer_kernel, matmul_kernel
 from bwz.operators.base import cost_of
-from bwz.report import Bound, PhaseResult
-from bwz.spec import (
-    AnyModelSpec,
-    AStrategy,
-    BDataflow,
-    DeploymentSpec,
-    DType,
-    HardwareSpec,
-    load_chip,
-    load_model,
-)
-from bwz.spec.hardware_spec import Dataflow
+from bwz.report import Bound, PhaseResult, Report
+from bwz.spec import AnyModelSpec, DeploymentSpec, DType, HardwareSpec, MatmulSpec
 from bwz.units import format_bandwidth, format_bytes, format_quantity, format_time
 
 # Chip identity, used only where two machines share one chart: the band rules on
@@ -515,32 +499,22 @@ def _deployments(panels: list[Panel]) -> list[dict[str, str]]:
     return out
 
 
-def _programs(panels: list[Panel], out: Path, *, write: bool) -> list[dict[str, str]]:
-    """Each panel's runnable program, for the page — and on disk when asked.
+def _programs(panels: list[Panel]) -> list[dict[str, str]]:
+    """Each panel's runnable program, carried in the page.
 
-    This is what replaced the pseudo-C listing for a tiled matmul (D54): the page
-    is for reading, but the point is that the thing can be *run*, so ``--emit``
-    also drops the file beside the HTML. One ``EmittedProgram`` feeds both, so
-    the two cannot differ.
+    This is what replaced the pseudo-C listing for a tiled matmul (D54). The page
+    is for reading; ``--emit`` saves the same program to disk to run, from the
+    same ``EmittedProgram``, so the two cannot differ.
     """
-    written: list[dict[str, str]] = []
-    for panel in panels:
-        program = panel.work.program
-        if program is None:
-            continue
-        if write:
-            destination = out.parent / program.filename
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            destination.write_text(program.source, encoding="utf-8")
-            print(f"wrote {destination}")
-        written.append(
-            {
-                "title": _program_title(panel, program),
-                "filename": program.filename,
-                "source": program.source,
-            }
-        )
-    return written
+    return [
+        {
+            "title": _program_title(panel, panel.work.program),
+            "filename": panel.work.program.filename,
+            "source": panel.work.program.source,
+        }
+        for panel in panels
+        if panel.work.program is not None
+    ]
 
 
 def _program_title(panel: Panel, program: EmittedProgram) -> str:
@@ -578,9 +552,7 @@ def _stationarity_banner(panels: list[Panel]) -> str:
     return banner
 
 
-def write_html(
-    panels: list[Panel], command: str, out: Path, *, write_programs: bool = False
-) -> None:
+def write_timeline(panels: list[Panel], command: str, out: Path) -> None:
     """The same figure, zoomable, as one self-contained file.
 
     A comparison page carries every chip's rows against one shared, absolute time
@@ -639,7 +611,7 @@ def write_html(
             for span in panel.work.trace.spans
         ],
         deployments=_deployments(panels),
-        programs=_programs(panels, out, write=write_programs),
+        programs=_programs(panels),
         total_s=total,
         hint=(
             " Rows are banded by chip and the time axis is <b>shared and absolute</b>, so a bar "
@@ -650,7 +622,6 @@ def write_html(
     )
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(page, encoding="utf-8")
-    print(f"wrote {out}")
 
 
 def _tile_segments(tile_start: int, tile_end: int, grid_cols: int) -> list[tuple[int, int, int]]:
@@ -888,7 +859,7 @@ def _flow_spans(trace: PipelineTrace) -> list[dict[str, object]]:
     return out
 
 
-def write_animation_html(panel: Panel, command: str, out: Path) -> None:
+def write_animation(panel: Panel, command: str, out: Path) -> None:
     """One chip's schedule as a self-contained DRAM -> SRAM -> Accelerator flow
     animation (docs/CLI.md §3, docs/CORRECTIONS.md D40/D42/D43).
 
@@ -988,7 +959,6 @@ def write_animation_html(panel: Panel, command: str, out: Path) -> None:
     )
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(page, encoding="utf-8")
-    print(f"wrote {out}")
 
 
 def _quantity(row: Row, trace: PipelineTrace) -> str:
@@ -1108,49 +1078,30 @@ def _git() -> str:
 
 def build_matmul(
     chip: HardwareSpec,
-    m: int,
-    n: int,
-    k: int,
-    dtype: DType,
-    steps: int,
+    spec: MatmulSpec,
+    deployment: DeploymentSpec,
+    report: Report,
     *,
-    a_strategy: AStrategy = AStrategy.STAGE,
-    b_dataflow: BDataflow = BDataflow.WRITE_AHEAD,
-    a_residency_tiles: int | None = None,
-    a_prefetch_depth: int | None = None,
-    iterations: int = 1,
-    stationarity: Dataflow | None = None,
-    split_k: int = 1,
-    command: str = "bwz matmul",
+    steps: int,
+    command: str,
 ) -> Workload:
-    spec = matmul_kernel(m, n, k, a_dtype=dtype, b_dtype=dtype)
-    deployment = DeploymentSpec.model_validate(
-        {
-            "batch": 1,
-            "input_tokens": 1,
-            "output_tokens": 1,
-            "a_strategy": a_strategy,
-            "b_dataflow": b_dataflow,
-            "a_residency_tiles": a_residency_tiles,
-            "a_prefetch_depth": a_prefetch_depth,
-            "iterations": iterations,
-            "stationarity": stationarity,
-            "split_k": split_k,
-        }
-    )
-    report = analyze(spec, chip, deployment)
-    if not report.feasible:
-        raise SystemExit(f"bwz: infeasible on {chip.id}: {report.infeasibility[0]}")
-    # Same decomposition the report was built with, or the picture would draw a
-    # different grid than the numbers it illustrates (D53).
+    """One matmul's schedule, drawn from the report the caller already has.
+
+    The ``Report`` and the ``DeploymentSpec`` come in rather than being rebuilt
+    here (D55): ``bwz matmul`` prints its table from one analysis and draws its
+    figure from the same one, so the picture cannot illustrate a run the numbers
+    above it did not come from. Everything else below is a pure function of those
+    two, recomputed rather than threaded through — ``machine_model``,
+    ``build_graph`` and ``plan_dataflow`` are deterministic, so recomputing is
+    cheaper than widening the signature and cannot disagree.
+    """
     machine = machine_model(
-        chip, spec.operand_dtype, stationarity=stationarity, k_partitions=split_k
+        chip,
+        spec.operand_dtype,
+        stationarity=deployment.stationarity,
+        k_partitions=deployment.split_k,
     )
     graph = build_graph(spec, deployment, GraphPhase.STATIC)
-    # The same plan_dataflow call analyze() made internally to charge the bytes
-    # above: recomputed rather than threaded out, because it is pure — same
-    # inputs, same plan — so the trace this draws and the report's numbers
-    # cannot disagree on which strategy actually ran (whole/persistent clamp).
     dataflow = plan_dataflow(
         graph.ops[0],
         machine,
@@ -1167,11 +1118,10 @@ def build_matmul(
         dataflow=dataflow,
     )
     op = report.phases[0].ops[0]
-    # Always, not only under --emit: the page's "how it is deployed" section IS
-    # this program now (D54), and --emit only decides whether the .py is also
-    # written to disk beside the page. A chip whose fastest unit for this dtype
-    # declares no array geometry (fp32 on A100 runs on the CUDA cores) has no
-    # tile grid to walk, and falls back to the sequence listing.
+    # The page's "how it is deployed" section IS this program (D54). A chip whose
+    # fastest unit for this dtype declares no array geometry (fp32 on A100 runs
+    # on the CUDA cores) has no tile grid to walk, and falls back to the sequence
+    # listing instead.
     program: EmittedProgram | None = None
     grid = grid_of(graph.ops[0], machine)
     if grid is not None:
@@ -1206,57 +1156,26 @@ def build_matmul(
     )
 
 
-def build_model(
-    chip: HardwareSpec, model_id: str, tokens: int, dtype: DType, steps: int
-) -> list[Workload]:
-    """One workload per phase of a profile: prefill and decode are different
-    machines, so they get different figures rather than being averaged."""
-    # Profile ids use underscores; accept the hyphenated form people type after
-    # seeing the command name.
-    return _workloads_for(chip, load_model(model_id.replace("-", "_")), tokens, dtype, steps)
-
-
-def build_encoder(
+def build_phases(
     chip: HardwareSpec,
+    model: AnyModelSpec,
+    deployment: DeploymentSpec,
+    report: Report,
     *,
-    dmodel: int,
-    nheads: int,
-    ffn: int,
-    vocab: int,
     tokens: int,
-    dtype: DType,
     steps: int,
 ) -> list[Workload]:
-    """A single-layer encoder built from dimensions, mirroring `bwz encoder-layer`.
+    """One workload per phase of *model* — prefill and decode are different
+    machines (CLAUDE.md #6), so they get different figures rather than an
+    average.
 
-    The same reason that command exists: a shape you can change one term of and
-    watch the picture move, without writing a profile for every experiment.
+    Same contract as :func:`build_matmul`: the caller's own report and
+    deployment, so the page and the table it came with describe one run.
     """
-    try:
-        spec = encoder_layer_kernel(
-            dmodel=dmodel, nheads=nheads, ffn=ffn, vocab=vocab, tokens=tokens
-        )
-    except ValueError as exc:
-        raise SystemExit(f"bwz: {exc}") from exc
-    return _workloads_for(chip, spec, tokens, dtype, steps)
-
-
-def _workloads_for(
-    chip: HardwareSpec, model: AnyModelSpec, tokens: int, dtype: DType, steps: int
-) -> list[Workload]:
-    """One workload per phase of *model*."""
-    deployment = DeploymentSpec.model_validate(
-        {
-            "batch": 1,
-            "input_tokens": tokens,
-            "output_tokens": 1,
-            "precision": {"weights": dtype, "activations": dtype, "kv_cache": dtype},
-        }
+    machine = machine_model(
+        chip,
+        compute_dtype(chip, deployment.precision.weights, deployment.precision.activations),
     )
-    report = analyze(model, chip, deployment)
-    if not report.feasible:
-        raise SystemExit(f"bwz: infeasible on {chip.id}: {report.infeasibility[0]}")
-    machine = machine_model(chip, compute_dtype(chip, dtype, dtype))
     graphs = build_graphs(model, deployment)
     out = []
     for phase in report.phases:
@@ -1285,14 +1204,7 @@ def _workloads_for(
 PREFERRED_DTYPES = (DType.FP16, DType.INT8, DType.BF16, DType.FP32)
 
 
-def _default_dtype(chip: HardwareSpec) -> DType:
-    for candidate in PREFERRED_DTYPES:
-        if chip.supports(candidate):
-            return candidate
-    return chip.compute_units[0].supported_dtypes[0]
-
-
-def _shared_dtype(chips: list[HardwareSpec], requested: str | None) -> DType:
+def shared_dtype(chips: list[HardwareSpec], requested: str | None) -> DType:
     """One precision for every chip in a comparison.
 
     Per-chip defaults would silently compare *different workloads*: A100 defaults
@@ -1306,8 +1218,8 @@ def _shared_dtype(chips: list[HardwareSpec], requested: str | None) -> DType:
         missing = [c.id for c in chips if not c.supports(dtype)]
         if missing:
             raise SystemExit(
-                f"bwz: {', '.join(missing)} has no {dtype.value} datapath, so --compare cannot "
-                f"run the same workload on every chip. Supported by all: "
+                f"bwz: {', '.join(missing)} has no {dtype.value} datapath, so --compare-with "
+                f"cannot run the same workload on every chip. Supported by all: "
                 f"{_common_dtypes(chips) or 'nothing — these chips share no precision'}"
             )
         return dtype
@@ -1317,7 +1229,7 @@ def _shared_dtype(chips: list[HardwareSpec], requested: str | None) -> DType:
     common = _common_dtypes(chips)
     if not common:
         raise SystemExit(
-            "bwz: --compare needs one precision every chip supports, and "
+            "bwz: --compare-with needs one precision every chip supports, and "
             + "; ".join(f"{c.id} supports {_dtypes_of(c)}" for c in chips)
         )
     return DType(common.split(", ")[0])
@@ -1332,366 +1244,3 @@ def _common_dtypes(chips: list[HardwareSpec]) -> str:
         *({d for u in c.compute_units for d in u.supported_dtypes} for c in chips)
     )
     return ", ".join(sorted(d.value for d in shared))
-
-
-def _build_parser() -> argparse.ArgumentParser:
-    """Three questions, in order: what to run, on what, and (for a lone matmul
-    only) how its operands should move. Flags are grouped by which question
-    they answer, and a flag from one workload's group used with another
-    workload is a hard error rather than a silent no-op — CLAUDE.md #8's
-    "actionable errors" applies to the CLI surface as much as to a `Report`.
-    """
-    parser = argparse.ArgumentParser(
-        prog="plot_pipeline.py",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        description=(
-            "Draw one self-contained, zoomable HTML timeline: where the time went, on "
-            "which piece of hardware, for one chip or a head-to-head of several.\n\n"
-            "Three questions: WORKLOAD (what to run — pick exactly one), CHIP (what to "
-            "run it on — repeatable, add --compare for a head-to-head), and, only for "
-            "the default matmul workload, DATAFLOW STRATEGY (how A and B move, "
-            "docs/CLI.md §2.5). See docs/plots/README.md for how to read the page."
-        ),
-        epilog=textwrap.dedent(
-            """\
-            examples:
-              # a matmul, the default workload
-              plot_pipeline.py --chip a100_80gb --matmul 8192,8192,8192
-
-              # a model instead -- one page per phase (prefill, decode)
-              plot_pipeline.py --chip a100_80gb --model llama3_8b -S 512
-
-              # an ad-hoc single-layer encoder, sized from the shape flags
-              plot_pipeline.py --chip a100_80gb --encoder --dmodel 4096 --nheads 64 \\
-                  --ffn 16384 -S 4096
-
-              # two chips, one shared page, head to head
-              plot_pipeline.py --chip a100_80gb --chip metis_aipu --compare --model gemma3_4b -S 512
-
-              # a lone matmul's dataflow strategy (docs/CLI.md §2.5)
-              plot_pipeline.py --chip metis_aipu --matmul 8192,8192,8192 \\
-                  --a-strategy stream --b-dataflow persistent
-
-            --matmul / --model / --encoder are mutually exclusive: pick one workload.
-            The encoder shape flags (--dmodel --nheads --ffn --vocab) and
-            --tokens/-S only mean anything for --encoder or --model; the dataflow
-            strategy flags (--a-strategy --b-dataflow --a-residency-tiles
-            --a-prefetch-depth --iterations) only mean anything for the default matmul
-            workload. Passing one with the wrong workload is rejected rather than
-            silently ignored.
-            """
-        ),
-    )
-
-    workload = parser.add_argument_group(
-        "workload — pick exactly one (default: --matmul 4096,4096,4096)"
-    ).add_mutually_exclusive_group()
-    workload.add_argument(
-        "--matmul", default="4096,4096,4096", metavar="M,N,K", help="A[M,K] x B[K,N] -> C[M,N]"
-    )
-    workload.add_argument(
-        "--model", default=None, metavar="ID", help="Draw a model instead; one page per phase"
-    )
-    workload.add_argument(
-        "--encoder",
-        action="store_true",
-        help="Draw a single-layer encoder sized from the shape flags below, not a profile",
-    )
-
-    shape = parser.add_argument_group("encoder shape — only with --encoder")
-    shape.add_argument("--dmodel", type=int, default=None, help="Model width (default 8)")
-    shape.add_argument(
-        "--nheads",
-        type=int,
-        default=None,
-        help="Attention heads (default 2); dmodel must divide evenly by this "
-        "-- head_dim is always dmodel // nheads, never set separately",
-    )
-    shape.add_argument(
-        "--ffn",
-        type=int,
-        default=None,
-        help="FFN inner width (default 16, or 4x --dmodel when --dmodel is set)",
-    )
-    shape.add_argument("--vocab", type=int, default=None, help="Vocabulary (default 16)")
-    shape.add_argument(
-        "--tokens",
-        "-S",
-        type=int,
-        default=None,
-        help="Sequence length for --model / --encoder (default 512)",
-    )
-
-    chip = parser.add_argument_group("chip & precision")
-    chip.add_argument("--chip", action="append", default=None, help="Chip id; repeatable")
-    chip.add_argument(
-        "--compare",
-        action="store_true",
-        help="Draw every --chip in ONE page on a shared, absolute time axis, rows banded per "
-        "chip, with both rooflines below. Without it each chip gets its own page, x normalised "
-        "to that chip's own span — both views are kept because they answer different questions",
-    )
-    chip.add_argument("--weights", default=None, help="Precision; defaults per chip")
-    chip.add_argument("--ideal", action="store_true", help="Both de-ratings at 1.0")
-
-    dataflow = parser.add_argument_group(
-        "dataflow strategy — only with the default matmul workload (docs/CLI.md §2.5)"
-    )
-    dataflow.add_argument(
-        "--stationarity",
-        choices=[d.value for d in Dataflow],
-        default=None,
-        help="Which operand stays resident, deciding the whole decomposition (D53): "
-        "os (C in the accumulator, K swept inside the tile), ws (B held, M streams "
-        "past), is (A held, N streams past), rs (Eyeriss, unvalidated). Default: the "
-        "chip's own. One the chip cannot run is refused, not clamped",
-    )
-    dataflow.add_argument(
-        "--split-k",
-        type=int,
-        default=None,
-        help="Cut the contraction into this many independent pieces (os only). Costs "
-        "CUTLASS's second kernel: the partials' DRAM round trip, the adds on the "
-        "vector unit, one more dispatch (D53)",
-    )
-    dataflow.add_argument(
-        "--a-strategy",
-        choices=[s.value for s in AStrategy],
-        default=None,
-        help="How A is loaded: stage (once per k-slice, D33, the default), stream "
-        "(per tile, D31) or whole (all of A before the first tile)",
-    )
-    dataflow.add_argument(
-        "--b-dataflow",
-        choices=[d.value for d in BDataflow],
-        default=None,
-        help="When B's array write lands: write-ahead (a wave early, hidden behind "
-        "compute, the default), on-demand (at compute, exposed) or persistent "
-        "(once, never displaced)",
-    )
-    dataflow.add_argument(
-        "--a-residency-tiles",
-        type=int,
-        default=None,
-        help="Override tiles served per A staging event under stage/whole; must be a "
-        "power-of-2 divisor of NTILES_PER_KS (clamped otherwise)",
-    )
-    dataflow.add_argument(
-        "--a-prefetch-depth",
-        type=int,
-        default=None,
-        help="Override the double-buffered staging depth for A. Schedule-only",
-    )
-    dataflow.add_argument(
-        "--iterations",
-        type=int,
-        default=None,
-        help="Invocations this report represents (default 1); only b_dataflow=persistent reads it",
-    )
-
-    output = parser.add_argument_group("output")
-    output.add_argument(
-        "--steps",
-        type=int,
-        default=256,
-        help="Steps in the trace (default 256). The only resolution knob — the page "
-        "zooms, so there is no separate static-figure register to keep legible",
-    )
-    output.add_argument("--out", type=Path, default=Path("../docs/plots"), help="Output directory")
-    output.add_argument(
-        "--emit",
-        action="store_true",
-        help="Also write the runnable program the page already carries as a .py file next "
-        "to it, ready to run (matmul only, D54)",
-    )
-    output.add_argument(
-        "--animate",
-        action="store_true",
-        help="Also write a self-contained DRAM->SRAM->Accelerator flow animation "
-        "(matmul only; opt-in, not part of `make plots`)",
-    )
-    return parser
-
-
-def _reject_flags_for_the_wrong_workload(
-    parser: argparse.ArgumentParser, args: argparse.Namespace
-) -> None:
-    """Fill in the real defaults for the chosen workload, and refuse a flag
-    scoped to a workload that was not chosen — a flag combination this script
-    would otherwise silently ignore, which is worse than an error naming it
-    (CLAUDE.md #8): `--ffn` with `--matmul` never reaches an encoder to apply
-    to, and previously said nothing about that at all.
-    """
-
-    def given(**flags: object) -> list[str]:
-        return [f"--{name.replace('_', '-')}" for name, value in flags.items() if value is not None]
-
-    if args.encoder:
-        # ffn's default depends on whether dmodel was actually typed, not on
-        # its resolved value: the bare --encoder invocation has to keep
-        # matching bwz encoder-layer's own bare defaults, hand-countable at
-        # 664 params/5280 ops (D24) — the 4x-dmodel convention only applies
-        # once dmodel was itself an explicit choice (D45).
-        dmodel_given = args.dmodel is not None
-        args.dmodel = 8 if args.dmodel is None else args.dmodel
-        args.nheads = 2 if args.nheads is None else args.nheads
-        if args.ffn is None:
-            args.ffn = 4 * args.dmodel if dmodel_given else 16
-        args.vocab = 16 if args.vocab is None else args.vocab
-    else:
-        bad = given(
-            dmodel=args.dmodel,
-            nheads=args.nheads,
-            ffn=args.ffn,
-            vocab=args.vocab,
-        )
-        if bad:
-            verb = "applies" if len(bad) == 1 else "apply"
-            them = "it" if len(bad) == 1 else "them"
-            parser.error(
-                f"{', '.join(bad)} only {verb} to --encoder; pass --encoder or drop {them}"
-            )
-
-    if args.model or args.encoder:
-        args.tokens = 512 if args.tokens is None else args.tokens
-    elif args.tokens is not None:
-        parser.error("--tokens/-S only applies to --model / --encoder; pass one or drop it")
-
-    if args.model or args.encoder:
-        bad = given(
-            stationarity=args.stationarity,
-            split_k=args.split_k,
-            a_strategy=args.a_strategy,
-            b_dataflow=args.b_dataflow,
-            a_residency_tiles=args.a_residency_tiles,
-            a_prefetch_depth=args.a_prefetch_depth,
-            iterations=args.iterations,
-        )
-        if bad:
-            verb = "applies" if len(bad) == 1 else "apply"
-            them = "it" if len(bad) == 1 else "them"
-            parser.error(
-                f"{', '.join(bad)} only {verb} to the default matmul workload, not "
-                f"--model/--encoder; drop {them} or drop --model/--encoder (docs/CLI.md §2.5)"
-            )
-    else:
-        args.a_strategy = args.a_strategy or AStrategy.STAGE.value
-        args.b_dataflow = args.b_dataflow or BDataflow.WRITE_AHEAD.value
-        args.iterations = 1 if args.iterations is None else args.iterations
-        args.split_k = 1 if args.split_k is None else args.split_k
-
-    if args.emit and (args.model or args.encoder):
-        parser.error(
-            "--emit writes one matmul's loop nest as a program; a whole model would be a "
-            "program nobody can run on this machine. Drop --model/--encoder or drop --emit "
-            "(docs/CLI.md 2.6)"
-        )
-    if args.animate and args.model:
-        parser.error(
-            "--animate does not support --model yet (only the default matmul and --encoder "
-            "workloads); drop --model or drop --animate (docs/CLI.md §3)"
-        )
-    if args.animate and args.compare:
-        parser.error("--animate draws one chip's schedule; drop --compare or drop --animate")
-
-
-def main() -> None:
-    parser = _build_parser()
-    args = parser.parse_args()
-    _reject_flags_for_the_wrong_workload(parser, args)
-
-    m, n, k = (int(part) for part in args.matmul.split(","))
-    command = "uv run --group plots python " + " ".join(shlex.quote(a) for a in sys.argv)
-
-    def slug(prefix: str, dtype: DType, work: Workload, index: int) -> str:
-        """File stem. A model gets one figure per phase, so the phase is in the name."""
-        if args.encoder:
-            return f"{prefix}-encoder-d{args.dmodel}-S{args.tokens}-{dtype.value}"
-        if args.model is None:
-            return f"{prefix}-{dtype.value}"
-        phase = work.trace.spans[0].phase.value if work.trace.spans else str(index)
-        return f"{prefix}-{args.model.replace('-', '_')}-{phase}-{dtype.value}"
-
-    def workloads(chip: HardwareSpec, dtype: DType, steps: int) -> list[Workload]:
-        """One workload per phase — one for a matmul, two for a decoder."""
-        if args.encoder:
-            return build_encoder(
-                chip,
-                dmodel=args.dmodel,
-                nheads=args.nheads,
-                ffn=args.ffn,
-                vocab=args.vocab,
-                tokens=args.tokens,
-                dtype=dtype,
-                steps=steps,
-            )
-        if args.model:
-            return build_model(chip, args.model, args.tokens, dtype, steps)
-        return [
-            build_matmul(
-                chip,
-                m,
-                n,
-                k,
-                dtype,
-                steps,
-                a_strategy=AStrategy(args.a_strategy),
-                b_dataflow=BDataflow(args.b_dataflow),
-                a_residency_tiles=args.a_residency_tiles,
-                a_prefetch_depth=args.a_prefetch_depth,
-                iterations=args.iterations,
-                stationarity=Dataflow(args.stationarity) if args.stationarity else None,
-                split_k=args.split_k,
-                command=command,
-            )
-        ]
-
-    chips = [load_chip(chip_id) for chip_id in args.chip or ["a100_80gb", "chip_a"]]
-    if args.ideal:
-        chips = [idealised(chip) for chip in chips]
-
-    if args.compare:
-        if len(chips) < 2:
-            raise SystemExit(
-                f"bwz: --compare puts two or more chips in one figure and got {len(chips)}; "
-                f"pass --chip twice, or drop --compare for the per-chip view"
-            )
-        dtype = _shared_dtype(chips, args.weights)
-        prefix = "compare-" + "-vs-".join(chip.id for chip in chips)
-
-        def groups(steps: int) -> list[list[Panel]]:
-            """Transposed: per phase, one panel per chip — so prefill is compared
-            against prefill and decode against decode, never across."""
-            per_chip = [workloads(chip, dtype, steps) for chip in chips]
-            return [
-                [Panel(chip, dtype, work) for chip, work in zip(chips, phase, strict=True)]
-                for phase in zip(*per_chip, strict=True)
-            ]
-
-        for index, panels in enumerate(groups(args.steps)):
-            write_html(
-                panels,
-                command,
-                args.out / f"timeline-{slug(prefix, dtype, panels[0].work, index)}.html",
-                write_programs=args.emit,
-            )
-        return
-
-    for chip in chips:
-        dtype = DType(args.weights) if args.weights else _default_dtype(chip)
-        for index, work in enumerate(workloads(chip, dtype, args.steps)):
-            panel = Panel(chip, dtype, work)
-            write_html(
-                [panel],
-                command,
-                args.out / f"timeline-{slug(chip.id, dtype, work, index)}.html",
-                write_programs=args.emit,
-            )
-            if args.animate:
-                write_animation_html(
-                    panel, command, args.out / f"animate-{slug(chip.id, dtype, work, index)}.html"
-                )
-
-
-if __name__ == "__main__":
-    main()

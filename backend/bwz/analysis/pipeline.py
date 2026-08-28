@@ -158,7 +158,7 @@ class Span:
     ``grid.decode`` turns ``tile_start``/``tile_end`` into a (row, col) position
     and ``grid.row_dim``/``col_dim`` say which of M/N/K each axis is, so a
     caller holding just a ``Span`` (D48's shared hover text,
-    ``plot_pipeline.py``'s ``_tip``) can name the tile without importing the
+    ``bwz.figures``'s ``_tip``) can name the tile without importing the
     deployment's own geometry. Same object for every span of one trace: it
     replaces the bare ``tiles_per_ks`` width, which could only describe the
     weight-stationary grid."""

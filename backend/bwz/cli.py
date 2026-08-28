@@ -30,6 +30,14 @@ from bwz.analysis.roofline import MachineModel, compute_dtype
 from bwz.analysis.stationarity import grid_for
 from bwz.emit import check as emit_check
 from bwz.emit import emit_matmul
+from bwz.figures import (
+    Panel,
+    build_matmul,
+    build_phases,
+    shared_dtype,
+    write_animation,
+    write_timeline,
+)
 from bwz.graph import build_graph
 from bwz.graph.ops import GraphPhase, MatmulAttrs
 from bwz.kernels import encoder_layer_kernel, matmul_kernel
@@ -71,7 +79,7 @@ app = typer.Typer(
         "[cyan]list[/cyan] shows the bundled chip/model ids these all take.\n\n"
         "Each command prints numbers, derivations and an assumptions drawer — nothing here plots. "
         "For the same run as a zoomable picture: "
-        "[cyan]uv run python scripts/plot_pipeline.py --help[/cyan]."
+        "add [cyan]--timeline[/cyan] or [cyan]--animate[/cyan] to any of them."
     ),
 )
 console = Console()
@@ -346,7 +354,7 @@ def _emit_program(
         c_dtype=spec.result_dtype,
         acc_dtype=deployment.precision.accumulate,
         double_buffered=report.memory.double_buffered,
-        command=shlex.join(["bwz", *sys.argv[1:]]),
+        command=_command(),
         version=bwz.__version__,
     )
     emit_check(program)
@@ -360,13 +368,145 @@ def _emit_program(
     path = Path(target)
     destination = path / program.filename if path.is_dir() else path
     destination.write_text(program.source, encoding="utf-8")
-    console.print(f"\n[bold]Emitted[/bold] {destination}", highlight=False, soft_wrap=True)
-    console.print(f"  run it: [cyan]python {destination}[/cyan]", soft_wrap=True)
+    _wrote(destination)
+    print(f"  run it: python {destination}")
     if program.working_set_bytes > EMIT_SIZE_WARNING_BYTES:
         console.print(
             f"  [yellow]note:[/yellow] its working set is "
             f"{format_bytes(program.working_set_bytes)} of operands, allocated in full when "
             f"you run it."
+        )
+
+
+PANEL_FIGURE = "figures — self-contained HTML, no server (docs/plots/README.md)"
+
+
+def _command() -> str:
+    """This invocation, as a line a reader can paste back.
+
+    Every figure and every emitted program records it, so a page found on its own
+    carries the command that regenerates it.
+    """
+    return shlex.join(["bwz", *sys.argv[1:]])
+
+
+def _wrote(path: Path) -> None:
+    """Confirm a file was written.
+
+    Builtin ``print``, not ``console``, so ``--quiet`` silences the *report* and
+    never the record of what landed on disk — the one line that is still useful
+    when a command is being run to produce files rather than to be read (D55).
+    """
+    print(f"wrote {path}")
+
+
+def _figure_chips(primary: str, compare_with: list[str], *, ideal: bool) -> list[HardwareSpec]:
+    """The chips one figure covers: the command's own, then any `--compare-with`.
+
+    Order matters and is the order given: the first chip is the one the report
+    above the figure describes, and a comparison page bands its rows in this
+    order so the reader meets them the same way twice.
+    """
+    return [_chip_for(chip_id, ideal) for chip_id in [primary, *compare_with]]
+
+
+def _figure_stem(chips: list[HardwareSpec], dtype: DType, suffix: str = "") -> str:
+    """The filename stem: one chip's id, or every chip's for a comparison.
+
+    Unchanged from the names ``docs/plots/README.md`` documents and ``make
+    plots`` regenerates, so a moved script does not orphan a figure a reader has
+    a link to (D55).
+    """
+    who = chips[0].id if len(chips) == 1 else "compare-" + "-vs-".join(c.id for c in chips)
+    return f"{who}{suffix}-{dtype.value}"
+
+
+def _draw(
+    panels: list[Panel],
+    *,
+    command: str,
+    out: Path,
+    stem: str,
+    timeline: bool,
+    animate: bool,
+) -> None:
+    """Write whichever pages were asked for, and say where they went.
+
+    ``--animate`` draws one chip's schedule, so a comparison is refused rather
+    than silently drawing only the first panel (CLAUDE.md #8).
+    """
+    if timeline:
+        destination = out / f"timeline-{stem}.html"
+        write_timeline(panels, command, destination)
+        _wrote(destination)
+    if animate:
+        if len(panels) > 1:
+            # An error outlives --quiet, for the same reason infeasibility does.
+            console.quiet = False
+            console.print(
+                "[red]bwz:[/red] --animate plays one chip's schedule back; drop --compare-with "
+                "or drop --animate."
+            )
+            raise typer.Exit(code=1)
+        destination = out / f"animate-{stem}.html"
+        write_animation(panels[0], command, destination)
+        _wrote(destination)
+
+
+def _draw_graph_figures(
+    model: AnyModelSpec,
+    chip: str,
+    compare_with: list[str],
+    deployment: DeploymentSpec,
+    tokens: int,
+    *,
+    ideal: bool,
+    out: Path,
+    steps: int,
+    timeline: bool,
+    animate: bool,
+    suffix: str = "",
+    with_phase: bool = True,
+) -> None:
+    """Draw a graph workload: one page per phase, per chip or compared.
+
+    Prefill and decode are different machines (CLAUDE.md #6), so they get
+    different pages rather than an average — which is why the phase is in the
+    filename and why this loops where the matmul path does not.
+    """
+    chips = _figure_chips(chip, compare_with, ideal=ideal)
+    shared_dtype(chips, deployment.precision.weights.value)
+    per_chip = [
+        build_phases(
+            hardware,
+            model,
+            deployment,
+            _report_for(model, hardware.id, deployment, ideal=ideal),
+            tokens=tokens,
+            steps=steps,
+        )
+        for hardware in chips
+    ]
+    dtype = deployment.precision.weights
+    # Transposed: per phase, one panel per chip — so prefill is compared against
+    # prefill and decode against decode, never across.
+    for phase_panels in zip(*per_chip, strict=True):
+        panels = [
+            Panel(hardware, dtype, work) for hardware, work in zip(chips, phase_panels, strict=True)
+        ]
+        # The phase is in the name only where there is more than one to tell
+        # apart: `bwz run` draws prefill and decode, an encoder draws prefill
+        # alone and naming it would be noise. Same filenames docs/plots/README.md
+        # documents, so a moved script does not orphan an existing link.
+        phase = panels[0].work.trace.spans[0].phase.value if panels[0].work.trace.spans else ""
+        stem = _figure_stem(chips, dtype, f"{suffix}-{phase}" if with_phase and phase else suffix)
+        _draw(
+            panels,
+            command=_command(),
+            out=out,
+            stem=stem,
+            timeline=timeline,
+            animate=animate,
         )
 
 
@@ -467,11 +607,45 @@ def run(
         "per-dispatch overhead: a hardware ceiling, not a prediction",
         rich_help_panel=PANEL_OUTPUT,
     ),
+    timeline: bool = typer.Option(
+        False,
+        "--timeline",
+        help="Also write the zoomable HTML timeline, one page per phase",
+        rich_help_panel=PANEL_FIGURE,
+    ),
+    compare_with: list[str] = typer.Option(
+        [],
+        "--compare-with",
+        metavar="CHIP",
+        help="Draw this chip alongside --chip on ONE page with a shared, absolute time "
+        "axis. Repeatable. Every chip must support the requested precision",
+        rich_help_panel=PANEL_FIGURE,
+    ),
+    out: Path = typer.Option(
+        Path("."),
+        "--out",
+        help="Directory the figures are written to",
+        rich_help_panel=PANEL_FIGURE,
+    ),
+    steps: int = typer.Option(
+        256,
+        "--steps",
+        help="Steps in the drawn trace. The only resolution knob — the page zooms",
+        rich_help_panel=PANEL_FIGURE,
+    ),
+    quiet: bool = typer.Option(
+        False,
+        "--quiet",
+        "-q",
+        help="Suppress the report; the `wrote …` lines still print",
+        rich_help_panel=PANEL_OUTPUT,
+    ),
     as_json: bool = typer.Option(
         False, "--json", help="Emit the raw Report as JSON", rich_help_panel=PANEL_OUTPUT
     ),
 ) -> None:
     """Predict how a model runs on a chip."""
+    console.quiet = quiet
     try:
         deployment = DeploymentSpec.model_validate(
             {
@@ -503,6 +677,7 @@ def run(
         return
 
     if not report.feasible:
+        console.quiet = False
         console.print("[red]Infeasible.[/red]")
         for reason in report.infeasibility:
             console.print(f"  • {reason}")
@@ -511,6 +686,24 @@ def run(
     summary = report.summary
     assert summary is not None
     _present(report, chip, weights, ideal=ideal, show_ops=show_ops)
+
+    if timeline:
+        # Profile ids use underscores; accept the hyphenated form people type
+        # after seeing the command name, the same way `_run_report` does.
+        model_id = model.replace("-", "_")
+        _draw_graph_figures(
+            load_model(model_id),
+            chip,
+            compare_with,
+            deployment,
+            input_tokens,
+            ideal=ideal,
+            out=out,
+            steps=steps,
+            timeline=timeline,
+            animate=False,
+            suffix=f"-{model_id}",
+        )
 
 
 def _present(
@@ -714,6 +907,48 @@ def matmul(
         help="Show which resource is busy for how long",
         rich_help_panel=PANEL_OUTPUT,
     ),
+    timeline: bool = typer.Option(
+        False,
+        "--timeline",
+        help="Also write the zoomable HTML timeline: where the time went, per hardware "
+        "resource, with the roofline and the runnable loop nest below it",
+        rich_help_panel=PANEL_FIGURE,
+    ),
+    animate: bool = typer.Option(
+        False,
+        "--animate",
+        help="Also write the flow animation: the same schedule played back as "
+        "DRAM -> SRAM -> Accelerator motion, with the loop nest lighting up",
+        rich_help_panel=PANEL_FIGURE,
+    ),
+    compare_with: list[str] = typer.Option(
+        [],
+        "--compare-with",
+        metavar="CHIP",
+        help="Draw this chip alongside --chip on ONE page with a shared, absolute time "
+        "axis. Repeatable. Every chip must support the requested dtype",
+        rich_help_panel=PANEL_FIGURE,
+    ),
+    out: Path = typer.Option(
+        Path("."),
+        "--out",
+        help="Directory the figures are written to",
+        rich_help_panel=PANEL_FIGURE,
+    ),
+    steps: int = typer.Option(
+        256,
+        "--steps",
+        help="Steps in the drawn trace. The only resolution knob — the page zooms",
+        rich_help_panel=PANEL_FIGURE,
+    ),
+    quiet: bool = typer.Option(
+        False,
+        "--quiet",
+        "-q",
+        help="Suppress the report table; the `wrote …` lines still print. For `make plots`, "
+        "where a wall of tables per chip would drown the output",
+        rich_help_panel=PANEL_OUTPUT,
+    ),
     emit: str | None = typer.Option(
         None,
         "--emit",
@@ -741,6 +976,10 @@ def matmul(
     """
     a = a_dtype if a_dtype is not None else dtype
     b = b_dtype if b_dtype is not None else dtype
+    # One switch rather than a conditional around every print: rich's own quiet
+    # flag drops the report, and the `wrote …` confirmations go through builtin
+    # print so they survive it (D55).
+    console.quiet = quiet
     try:
         spec = matmul_kernel(m, n, k, a_dtype=a, b_dtype=b, out_dtype=out_dtype)
         # DeploymentSpec is required by analyze() but a bare matmul reads nothing
@@ -773,6 +1012,10 @@ def matmul(
         return
 
     if not report.feasible:
+        # Infeasibility is reported whatever --quiet says: it is the answer, not
+        # a table, and a silent non-zero exit would be the least actionable
+        # possible outcome (CLAUDE.md #8).
+        console.quiet = False
         console.print("[red]Infeasible.[/red]")
         for reason in report.infeasibility:
             console.print(f"  • {reason}")
@@ -860,13 +1103,20 @@ def matmul(
     # assumptions drawer: the tile count, the wave occupancy and any reduction
     # all follow from it, so a reader checking the utilisation below needs to
     # see which grid it was computed against (D53).
-    grid = grid_for(
-        machine.stationarity,
-        MatmulAttrs(m=m, n=n, k=k),
-        *(dims or (0, 0)),
-        k_partitions=split_k,
-    )
+    #
+    # Built only when there IS an array to tile against. It used to be built
+    # unconditionally with `*(dims or (0, 0))`, which divided by zero for every
+    # chip whose fastest unit for the requested dtype declares no geometry —
+    # `bwz matmul -d fp32 -c a100_80gb` runs on the CUDA cores and crashed with a
+    # traceback rather than printing a table (D55). An exception is never an
+    # acceptable output (CLAUDE.md #8).
     if dims is not None:
+        grid = grid_for(
+            machine.stationarity,
+            MatmulAttrs(m=m, n=n, k=k),
+            *dims,
+            k_partitions=split_k,
+        )
         table.add_row(
             "stationarity",
             machine.stationarity.value,
@@ -941,6 +1191,35 @@ def matmul(
     if emit is not None:
         _emit_program(spec, _chip_for(chip, ideal), machine, deployment, report, target=emit)
 
+    if timeline or animate:
+        chips = _figure_chips(chip, compare_with, ideal=ideal)
+        # Every chip must run the SAME workload at the SAME precision, or the
+        # shared time axis compares two different amounts of traffic (D29).
+        shared_dtype(chips, spec.operand_dtype.value)
+        panels = [
+            Panel(
+                hardware,
+                spec.operand_dtype,
+                build_matmul(
+                    hardware,
+                    spec,
+                    deployment,
+                    _report_for(spec, hardware.id, deployment, ideal=ideal),
+                    steps=steps,
+                    command=_command(),
+                ),
+            )
+            for hardware in chips
+        ]
+        _draw(
+            panels,
+            command=_command(),
+            out=out,
+            stem=_figure_stem(chips, spec.operand_dtype),
+            timeline=timeline,
+            animate=animate,
+        )
+
 
 @app.command(name="encoder-layer")
 def encoder_layer(
@@ -993,6 +1272,46 @@ def encoder_layer(
         help="Show the N most expensive operations",
         rich_help_panel=PANEL_OUTPUT,
     ),
+    timeline: bool = typer.Option(
+        False,
+        "--timeline",
+        help="Also write the zoomable HTML timeline, one page per phase",
+        rich_help_panel=PANEL_FIGURE,
+    ),
+    animate: bool = typer.Option(
+        False,
+        "--animate",
+        help="Also write the flow animation: the same schedule played back as "
+        "DRAM -> SRAM -> Accelerator motion, with the loop nest lighting up",
+        rich_help_panel=PANEL_FIGURE,
+    ),
+    compare_with: list[str] = typer.Option(
+        [],
+        "--compare-with",
+        metavar="CHIP",
+        help="Draw this chip alongside --chip on ONE page with a shared, absolute time "
+        "axis. Repeatable. Every chip must support the requested precision",
+        rich_help_panel=PANEL_FIGURE,
+    ),
+    out: Path = typer.Option(
+        Path("."),
+        "--out",
+        help="Directory the figures are written to",
+        rich_help_panel=PANEL_FIGURE,
+    ),
+    steps: int = typer.Option(
+        256,
+        "--steps",
+        help="Steps in the drawn trace. The only resolution knob — the page zooms",
+        rich_help_panel=PANEL_FIGURE,
+    ),
+    quiet: bool = typer.Option(
+        False,
+        "--quiet",
+        "-q",
+        help="Suppress the report; the `wrote …` lines still print",
+        rich_help_panel=PANEL_OUTPUT,
+    ),
     as_json: bool = typer.Option(
         False, "--json", help="Emit the raw Report as JSON", rich_help_panel=PANEL_OUTPUT
     ),
@@ -1013,6 +1332,7 @@ def encoder_layer(
     # reproducing 664 params/5280 ops, the hand-countable example every doc
     # quotes (D24) — so ffn only follows the 4x-dmodel convention when dmodel
     # was itself an explicit choice (D45).
+    console.quiet = quiet
     dmodel_given = dmodel is not None
     dmodel = 8 if dmodel is None else dmodel
     if ffn is None:
@@ -1046,6 +1366,7 @@ def encoder_layer(
         console.print_json(report.to_json())
         return
     if not report.feasible:
+        console.quiet = False
         console.print("[red]Infeasible.[/red]")
         for reason in report.infeasibility:
             console.print(f"  • {reason}")
@@ -1053,6 +1374,22 @@ def encoder_layer(
 
     console.print(_shape_table(spec, deployment))
     _present(report, chip, weights, ideal=ideal, show_ops=show_ops)
+
+    if timeline or animate:
+        _draw_graph_figures(
+            spec,
+            chip,
+            compare_with,
+            deployment,
+            tokens,
+            ideal=ideal,
+            out=out,
+            steps=steps,
+            timeline=timeline,
+            animate=animate,
+            suffix=f"-encoder-d{dmodel}-S{tokens}",
+            with_phase=False,
+        )
 
 
 def _shape_table(spec: TransformerSpec, deployment: DeploymentSpec) -> Table:

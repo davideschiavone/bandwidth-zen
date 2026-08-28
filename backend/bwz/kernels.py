@@ -1,7 +1,7 @@
 """Ad-hoc kernel probes: a spec built straight from shape arguments, no profile.
 
 ``docs/CORRECTIONS.md`` D39. Two kernels, ``matmul`` and ``encoder-layer`` — the
-single place ``bwz matmul``/``bwz encoder-layer`` and ``scripts/plot_pipeline.py``'s
+single place ``bwz matmul``/``bwz encoder-layer`` and their ``--timeline``/``--animate``
 ``--matmul``/``--encoder`` build the probe, so the report and the figure for the
 same probe cannot silently describe two different specs the way they had drifted
 to before this module existed: a placeholder id (``"p"``) on the plotted matmul, no

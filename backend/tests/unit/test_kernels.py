@@ -1,7 +1,7 @@
 """The two ad-hoc kernel probes: id/name derivation, and defaults that hold.
 
 ``docs/CORRECTIONS.md`` D39. ``bwz matmul``/``bwz encoder-layer`` and
-``scripts/plot_pipeline.py``'s ``--matmul``/``--encoder`` all go through
+``bwz matmul``/``bwz encoder-layer`` and their figures all go through
 :mod:`bwz.kernels` now, so there is one place to test the shape-to-spec mapping
 instead of two independently hand-built dicts that can drift.
 """

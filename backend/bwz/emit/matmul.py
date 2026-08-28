@@ -73,7 +73,7 @@ class EmittedProgram:
     stage_lines: tuple[tuple[str, tuple[int, ...]], ...] = ()
     """0-indexed line numbers within :attr:`source` for each animated stage
     (``"load_b"``, ``"load_a"``, ``"exec"``, ``"store"``, ``"reduce"`` — the
-    vocabulary ``plot_pipeline.py``'s ``_ANIMATION_STAGE`` already uses). Lets
+    vocabulary ``bwz.figures``'s ``_ANIMATION_STAGE`` already uses). Lets
     the animation's debug view light up the lines live at its current time
     (D41), now against the real program rather than a pseudo-C paraphrase of it
     (D54). A tuple of pairs rather than a ``dict``, to keep a frozen dataclass
