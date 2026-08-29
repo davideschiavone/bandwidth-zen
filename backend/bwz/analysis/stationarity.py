@@ -404,7 +404,9 @@ def reduction_placement(
     at, which is what :func:`reduction_cost`'s caller passes — rather than at a
     deployment knob, so the two cannot disagree about the same bytes.
     """
-    if not grid.needs_reduction:
+    if not grid.needs_reduction or grid.k_slices <= 1:
+        # One slice is no cut at all: K fits inside a single instruction tile,
+        # so the "partial" is the finished value and there is nothing to sum.
         return ReductionPlacement.NONE
     if grid.materialises_partials:
         return ReductionPlacement.DRAM

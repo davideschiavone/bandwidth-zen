@@ -35,7 +35,7 @@ from bwz.analysis.roofline import MachineModel
 from bwz.analysis.stationarity import Dim, TileGrid
 from bwz.analysis.tiling import padded
 from bwz.emit import _harness
-from bwz.report import OpResult
+from bwz.report import OpResult, ReductionPlacement
 from bwz.spec.deployment import AStrategy, BDataflow
 from bwz.spec.dtypes import DType, accumulator_for, bytes_per_element, is_integer
 from bwz.spec.hardware_spec import ComputeUnit, Dataflow, HardwareSpec
@@ -136,6 +136,11 @@ def predicted_for(
         "macs": grid.m * grid.n * grid.k,
         "mac_slots": padded(grid.m, rows) * padded(grid.n, cols) * padded(grid.k, rows),
         "staging_events": events,
+        # (p-1) per output element, where p is the k-slices it ends up with —
+        # the grid's own K axis, or split-K's partitions. The report charges
+        # exactly this many additions to the vector unit (D62), so the walk
+        # counting a different number means one of the two is wrong.
+        "partial_sum_adds": (grid.k_slices - 1) * grid.m * grid.n,
         "a_dram_bytes": result.dram_activation_read_bytes,
         "c_dram_bytes": result.dram_write_bytes,
         "partial_dram_bytes": result.dram_reduction_bytes,
@@ -211,9 +216,9 @@ def emit_matmul(
         )
     )
     lines += _plain(["", ""])
-    lines += _loop_nest(grid, dataflow)
+    lines += _loop_nest(grid, dataflow, unit, result.reduction_placement)
     lines += _plain(["", ""])
-    lines += _main(chip, machine, grid, dataflow)
+    lines += _main(chip, machine, grid, dataflow, result.reduction_placement)
     # The runtime goes last, against convention and on purpose: the loop nest is
     # what a reader is here for, and 400 lines of machinery between the constants
     # and the walk would bury it. Python does not mind — nothing below runs until
@@ -294,6 +299,10 @@ def _docstring(
         "",
         "  stationarity   real — a different loop nest, a different resident buffer",
         "  split-K        real — per-partition partials and a second reduction pass",
+        "  reduction      half real — the additions are performed and COUNTED here; the",
+        "                 report's reduction OVERLAP is written down only. That the",
+        "                 vector unit sums slice n while the array builds slice n+1 is a",
+        "                 claim about time, and this program counts (D62)",
         "  a_strategy     real — changes how often A is staged, and A's measured bytes",
         "  residency      real — the staging buffer serves that many tiles before refill",
         "  b_dataflow     written down only — a placement in *time*, moving no byte",
@@ -715,7 +724,12 @@ def _tolerance(grid: TileGrid, acc_dtype: DType, operand_dtype: DType) -> float:
 # -------------------------------------------------------------------------- the walk
 
 
-def _loop_nest(grid: TileGrid, dataflow: DataflowPlan) -> list[Line]:
+def _loop_nest(
+    grid: TileGrid,
+    dataflow: DataflowPlan,
+    unit: ComputeUnit,
+    placement: ReductionPlacement,
+) -> list[Line]:
     """The part a reader is meant to read: one tile, walked.
 
     Returned as tagged lines. The tags are the animation's own stage vocabulary
@@ -753,9 +767,9 @@ def _loop_nest(grid: TileGrid, dataflow: DataflowPlan) -> list[Line]:
     if grid.swept_dim is Dim.K:
         out += _accumulator_nest(grid)
     elif grid.swept_dim is Dim.M:
-        out += _weight_nest()
+        out += _weight_nest(unit, placement)
     else:
-        out += _input_nest()
+        out += _input_nest(placement)
     if grid.materialises_partials:
         out += _plain(["", ""]) + _reduction_kernel()
     return out
@@ -904,20 +918,82 @@ def _accumulator_nest(grid: TileGrid) -> list[Line]:
     return out
 
 
-def _weight_nest() -> list[Line]:
-    """``ws``: B stays resident and M streams past it, producing partials over K."""
+def _placement_note(placement: ReductionPlacement) -> tuple[str, ...]:
+    """Where the report says these additions happen, and what it charged (D62).
+
+    The count is the same under every placement and the program measures it the
+    same way; what differs is the *price*, and quoting one placement's price in
+    a file emitted for another would be exactly the kind of adjacent-to-true
+    comment this repository keeps having to correct.
+    """
+    if placement is ReductionPlacement.LOCAL:
+        return (
+            "    The report charges NOTHING for them: this unit declares an accumulator deep",
+            "    enough for the whole contraction, so the partials are summed in its own",
+            "    periphery and never reach on-chip memory (D62). The count below is still",
+            "    real — it is the work the hardware absorbed.",
+        )
+    if placement is ReductionPlacement.ON_CHIP:
+        return (
+            "    The report charges these to the VECTOR unit — a matrix engine does",
+            "    matrix-multiply-accumulate and nothing else (D27) — and OVERLAPS them with",
+            "    the arithmetic above: it costs max(matrix, vector), not their sum. The",
+            "    overlap is the one part of that this program cannot check; it counts.",
+        )
+    if placement is ReductionPlacement.DRAM:
+        return (
+            "    The report charges these to the VECTOR unit (D27) and, because the whole",
+            "    M x N accumulator does not fit on chip, a DRAM round trip besides — so they",
+            "    serialise behind the arithmetic rather than overlapping it (D62).",
+        )
+    return ()
+
+
+def _weight_nest(unit: ComputeUnit, placement: ReductionPlacement) -> list[Line]:
+    """``ws``: K is on the grid and M streams past a tile of B, giving partials.
+
+    The docstring it writes depends on the unit, because "weight-stationary" is
+    a claim about hardware and is a misnomer on half of them (D62). An array
+    with weight banks really does hold B; an MMA unit holds nothing — it reads
+    every operand from the register file per instruction (D30) — and what the
+    dataflow actually changed there is that K moved onto the tile grid. Saying
+    "B stays resident" on such a unit would describe a machine the reader is not
+    running.
+    """
+    holds = unit.weight_sets > 1
+    headline = (
+        "One weight tile. B stays resident; M streams past it."
+        if holds
+        else "One k-slice of the contraction. Nothing is held — K is on the grid."
+    )
     out: list[Line] = _plain(
         [
             "def run_tile(",
             "    tile: int, dram: Dram, pad: Scratchpad, partials: Partials, counters: Counters",
             ") -> None:",
-            '    """One weight tile. B stays resident; M streams past it.',
+            f'    """{headline}',
             "",
+        ]
+        + (
+            []
+            if holds
+            else [
+                f"    {unit.name} declares weight_sets=1, so it stores no weights of its own and",
+                "    the NAME of this dataflow is a misnomer here: the tile of B below is read",
+                "    per instruction like everything else (D30). What ws really changed is the",
+                "    GRID — its rows are slices of K rather than bands of M — and that is what",
+                "    costs, because the slices of one output block are now on different cores.",
+                "",
+            ]
+        )
+        + [
             "    This tile owns one slice of the contraction — a k-slice — so what it produces",
             "    is a PARTIAL over K, not a finished result. The slices for one output block",
-            "    meet in `partials`, in an accumulator on chip, on a later wave (D53). That",
-            "    `partials` has to exist at all is the difference between this decomposition",
-            "    and output-stationary, in one object.",
+            "    meet in `partials`, which counts the additions it performs. That `partials`",
+            "    has to exist at all is the difference between this decomposition and",
+            "    output-stationary, in one object.",
+            "",
+            *_placement_note(placement),
             '    """',
             "    kt, nt = tile_row(tile), tile_col(tile)",
             "    k0, k1 = kt * ROWS, min(kt * ROWS + ROWS, K)",
@@ -964,7 +1040,7 @@ def _weight_nest() -> list[Line]:
     return out
 
 
-def _input_nest() -> list[Line]:
+def _input_nest(placement: ReductionPlacement) -> list[Line]:
     """``is``: A stays resident and N streams past it, producing partials over K."""
     out: list[Line] = _plain(
         [
@@ -975,7 +1051,10 @@ def _input_nest() -> list[Line]:
             "",
             "    The grid's columns are slices of K here — K cut by the array's depth rather",
             "    than its width — so this tile owns a slice of the contraction exactly as a",
-            "    weight-stationary one does, and produces PARTIALS over K (D53).",
+            "    weight-stationary one does, and produces PARTIALS over K (D53). They meet in",
+            "    `partials`, which counts the additions it performs.",
+            "",
+            *_placement_note(placement),
             '    """',
             "    mt, kt = tile_row(tile), tile_col(tile)",
             "    m0, m1 = mt * ROWS, min(mt * ROWS + ROWS, M)",
@@ -1015,7 +1094,7 @@ def _input_nest() -> list[Line]:
 def _reduction_kernel() -> list[Line]:
     out: list[Line] = _plain(
         [
-            "def reduce_partials(dram: Dram) -> None:",
+            "def reduce_partials(dram: Dram, counters: Counters) -> None:",
             '    """Kernel 2: sum the SPLIT_K partial results into C (D53).',
             "",
             "    A separate launch rather than more lines above: the GEMM has to finish",
@@ -1034,6 +1113,10 @@ def _reduction_kernel() -> list[Line]:
     )
     out += [
         ("                add_into(acc, dram.read_partial(part, m0, m1, n0, n1))", "reduce"),
+        (
+            "                counters.count_partial_sum_adds((m1 - m0) * (n1 - n0))",
+            "reduce",
+        ),
         ("            dram.write_c(m0, n0, acc)", "store"),
     ]
     return out
@@ -1057,7 +1140,19 @@ _CHECKS = """    checks = [
         Check("A staging events", PREDICTED["staging_events"], counters.staging_events, True),
         Check("A bytes", PREDICTED["a_dram_bytes"], counters.a_dram_bytes, True),
         Check("C bytes", PREDICTED["c_dram_bytes"], counters.c_dram_bytes, True),
-        Check("partial bytes", PREDICTED["partial_dram_bytes"], counters.partial_dram_bytes, True),
+{partial_bytes}
+        Check(
+            "partial-sum additions",
+            PREDICTED["partial_sum_adds"],
+            counters.partial_sum_adds,
+            True,
+            note=(
+                "(p-1) x M x N, where p is how many k-slices each output element ends\\n"
+                "up with. Not new arithmetic — 2*M*N*K already counts them — but the\\n"
+                "report charges them to the VECTOR unit, because they have left the\\n"
+                "matrix engine's own accumulator (D27/D62)."
+            ),
+        ),
         Check(
             "B bytes fetched",
             PREDICTED["b_dram_bytes_charged"],
@@ -1081,8 +1176,49 @@ _CHECKS = """    checks = [
     failed = report_checks(checks)"""
 
 
+_PARTIAL_BYTES_TIER_1 = (
+    '        Check("partial bytes", PREDICTED["partial_dram_bytes"], '
+    "counters.partial_dram_bytes, True),"
+)
+
+_PARTIAL_BYTES_TIER_2 = """        Check(
+            "partial bytes",
+            PREDICTED["partial_dram_bytes"],
+            counters.partial_dram_bytes,
+            False,
+            note=(
+                "tier 2, and the one place this file and the report model different\\n"
+                "machines. The report found the M x N accumulator too big for on-chip\\n"
+                "capacity, so it charged the partials a DRAM round trip (D62); this walk\\n"
+                "keeps them in `partials` whatever their size, because where an\\n"
+                "accumulator lives is a capacity heuristic and not a decomposition. The\\n"
+                "gap above IS that heuristic, which is why it is shown and not asserted."
+            ),
+        ),"""
+
+
+def _checks(grid: TileGrid, placement: ReductionPlacement) -> list[str]:
+    """The check list, with the partial-bytes row at the tier it can defend.
+
+    Tier 1 everywhere the program and the report agree about where the partials
+    live — nowhere at all (no reduction), on chip (this file's `Partials`), or
+    in DRAM because there are two kernels (split-K, which this file emits). Tier
+    2 for the one case they disagree: a K-on-grid walk whose accumulator the
+    report found too big to hold. That is a capacity judgement about a machine,
+    not a step of the walk, so the file shows the gap rather than asserting a
+    round trip it has no reason to perform (D54's rule, D62's case).
+    """
+    spilled = placement is ReductionPlacement.DRAM and not grid.materialises_partials
+    row = _PARTIAL_BYTES_TIER_2 if spilled else _PARTIAL_BYTES_TIER_1
+    return _CHECKS.format(partial_bytes=row).splitlines()
+
+
 def _main(
-    chip: HardwareSpec, machine: MachineModel, grid: TileGrid, dataflow: DataflowPlan
+    chip: HardwareSpec,
+    machine: MachineModel,
+    grid: TileGrid,
+    dataflow: DataflowPlan,
+    placement: ReductionPlacement,
 ) -> list[Line]:
     needs_partials = grid.swept_dim is not Dim.K
     call = (
@@ -1123,7 +1259,7 @@ def _main(
         "    pad = Scratchpad(counters)",
     ]
     if needs_partials:
-        lines.append("    partials = Partials(M, N, ROWS, COLS, ACC_DTYPE)")
+        lines.append("    partials = Partials(M, N, ROWS, COLS, ACC_DTYPE, counters)")
     if dataflow.a_strategy is AStrategy.WHOLE:
         lines += [
             "",
@@ -1152,13 +1288,13 @@ def _main(
         )
         out += [("    partials.drain(dram, M, N)", "store")]
     if grid.materialises_partials:
-        out += _plain(["", "    reduce_partials(dram)"])
+        out += _plain(["", "    reduce_partials(dram, counters)"])
     tail = [
         "",
         "    error = max_abs_diff(c, reference(a, b, INTEGER))",
         # Split rather than appended whole: every element of this list is one
         # emitted line, and the stage-line numbering counts elements.
-        *_CHECKS.splitlines(),
+        *_checks(grid, placement),
         "",
         "    occupancy = counters.occupancy(WAVES, USED_CORES, AVAILABLE_CORES)",
         "    padding = counters.padding_efficiency()",

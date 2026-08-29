@@ -174,26 +174,9 @@ def test_output_and_weight_stationary_compute_the_same_c(tmp_path: Path) -> None
     shape = (64, 64, 128)
     elsewhere = tmp_path / "ws"
     elsewhere.mkdir()
-    # A100's tensor core declares `os` alone and a stationarity it does not
-    # declare is refused, not clamped (D53) — so the weight-stationary half runs
-    # on a forged profile, which is the honest way to reach that branch.
-    base = load_chip("a100_80gb")
-    forged = base.model_copy(
-        update={
-            "compute_units": [
-                unit.model_copy(
-                    update={
-                        "dataflow": Dataflow.WEIGHT_STATIONARY,
-                        "supported_dataflows": (Dataflow.WEIGHT_STATIONARY,),
-                    }
-                )
-                if unit.systolic_dims is not None
-                else unit
-                for unit in base.compute_units
-            ],
-            "hypothetical": True,
-        }
-    )
+    # Both halves run on the shipped A100 profile: since D62 its tensor core
+    # declares all three grids, precisely so that the two can be compared on one
+    # chip. `os` is still its native dataflow and still the default.
     output_stationary = _run(_write(tmp_path, chip_id="a100_80gb", shape=shape, dtype="fp16"))
     weight_stationary = _run(
         _write(
@@ -202,7 +185,6 @@ def test_output_and_weight_stationary_compute_the_same_c(tmp_path: Path) -> None
             shape=shape,
             dtype="fp16",
             stationarity=Dataflow.WEIGHT_STATIONARY,
-            chip=forged,
         )
     )
 
@@ -277,3 +259,24 @@ def test_debug_changes_no_count(tmp_path: Path) -> None:
 
     assert table(quiet) == table(noisy)
     assert "every tier-1 count matches the report" in noisy
+
+
+@pytest.mark.parametrize(
+    "flow", [Dataflow.WEIGHT_STATIONARY, Dataflow.INPUT_STATIONARY], ids=lambda d: d.value
+)
+def test_a_k_on_grid_walk_counts_the_additions_it_owes(tmp_path: Path, flow: Dataflow) -> None:
+    """The reduction, executed and counted against the report (D62).
+
+    64x64x128 on A100's 16x16 array cuts K into 8 k-slices, so each of the 4096
+    output elements collects 8 partials and ``7 x 64 x 64 = 28,672`` additions
+    happen in the shared accumulator. The report charges exactly that many to
+    the CUDA cores; the program counts them and the check is tier 1, so a
+    disagreement fails the run rather than being argued about.
+    """
+    path = _write(
+        tmp_path, chip_id="a100_80gb", shape=(64, 64, 128), dtype="fp16", stationarity=flow
+    )
+    output = _run(path)
+    assert "partial-sum additions" in output
+    assert f"{7 * 64 * 64:,}" in output
+    assert "every tier-1 count matches the report" in output

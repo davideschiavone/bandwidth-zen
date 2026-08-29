@@ -315,6 +315,12 @@ class Counters:
     c_dram_bytes: float = 0.0
     partial_dram_bytes: float = 0.0
     """Split-K's partials, out of kernel 1 and back into kernel 2 (D53)."""
+    partial_sum_adds: int = 0
+    """Elementwise additions that summed partial results — the ``(p-1)*M*N`` the
+    report charges to the VECTOR unit (D62). Counted where they happen: in the
+    shared accumulator under a K-on-grid walk, in the second kernel under
+    split-K. A first touch is a copy into a zeroed accumulator and is not one of
+    them, which is exactly why the count is ``p-1`` and not ``p``."""
     a_compulsory_bytes: float = 0.0
     """A bytes on their **first** touch only."""
     b_compulsory_bytes: float = 0.0
@@ -351,6 +357,10 @@ class Counters:
     def count_partial(self, byte_count: float) -> None:
         with self.lock:
             self.partial_dram_bytes += byte_count
+
+    def count_partial_sum_adds(self, adds: int) -> None:
+        with self.lock:
+            self.partial_sum_adds += adds
 
     def count_staging_event(self) -> None:
         with self.lock:
@@ -521,21 +531,40 @@ class Partials:
     That this class is needed at all is the difference between the two families
     of decomposition. Under ``os`` the question never arises: K is swept inside
     one tile, in one core's own accumulator.
+
+    It also **counts the additions** it performs (D62), which is the number the
+    report charges to the vector unit. What it does not model is *time*: the
+    report overlaps those adds with the matrix work, and this program measures
+    counts, not rates.
     """
 
-    def __init__(self, m: int, n: int, tile_rows: int, tile_cols: int, dtype: str) -> None:
+    def __init__(
+        self, m: int, n: int, tile_rows: int, tile_cols: int, dtype: str, counters: Counters
+    ) -> None:
         self.acc = zeros(m, n, dtype)
         self.tile_rows = tile_rows
         self.tile_cols = tile_cols
+        self.counters = counters
         self._block_cols = max(1, math.ceil(n / tile_cols))
         blocks = max(1, math.ceil(m / tile_rows)) * self._block_cols
         self._locks = [threading.Lock() for _ in range(blocks)]
+        self._touched = [False] * blocks
 
     def accumulate(self, r0: int, c0: int, block: Tile) -> None:
-        """Add one tile's partial into the output block that owns it."""
+        """Add one tile's partial into the output block that owns it.
+
+        The **first** partial to reach a block lands in a zeroed accumulator, so
+        it is a copy rather than an addition and is not counted: over ``p``
+        k-slices that leaves ``p-1`` additions per element, which is what the
+        model charges (D62).
+        """
         rows, cols = shape_of(block)
         index = (r0 // self.tile_rows) * self._block_cols + (c0 // self.tile_cols)
         with self._locks[index]:
+            if self._touched[index]:
+                self.counters.count_partial_sum_adds(rows * cols)
+            else:
+                self._touched[index] = True
             if NUMPY is not None:
                 self.acc[r0 : r0 + rows, c0 : c0 + cols] += block
                 return

@@ -24,6 +24,7 @@ from bwz.analysis.pipeline import grid_of
 from bwz.emit import check, constants_of, default_filename, emit_matmul, predicted_for
 from bwz.graph import GraphPhase, build_graph
 from bwz.operators.base import cost_of
+from bwz.report import ReductionPlacement
 from bwz.spec import DeploymentSpec, DType, MatmulSpec, largest_declared_array, load_chip
 from bwz.spec.hardware_spec import Dataflow, HardwareSpec
 
@@ -572,3 +573,86 @@ def test_debug_counts_the_lines_it_will_print_from_a_constant_on_the_page() -> N
     assert 'issued = PREDICTED["mac_slots"] // SLOTS_PER_MMA' in program.source
     predicted_calls = program.predicted["mac_slots"] / (16 * 16 * 16)
     assert predicted_calls == 4 * 4 * 8, "4x4 grid, 8 k-steps at 64x64x128"
+
+
+def test_the_program_counts_the_additions_the_report_charges() -> None:
+    """A K-on-grid walk's reduction becomes a tier-1 count (D62).
+
+    64x64x128 on a 16x16 array cuts K into 8 k-slices, so every one of the 4096
+    output elements ends up with 8 partials and ``7 x 64 x 64 = 28,672``
+    additions have to happen. ``os`` cuts nothing and predicts 0; split-K into 4
+    predicts ``3 x 64 x 64 = 12,288``. Three decompositions, three counts, one
+    matmul.
+    """
+    plain, *_ = _emit("a100_80gb")
+    weight, *_ = _emit("a100_80gb", stationarity=Dataflow.WEIGHT_STATIONARY)
+    inputs, *_ = _emit("a100_80gb", stationarity=Dataflow.INPUT_STATIONARY)
+    split, *_ = _emit("a100_80gb", split_k=4)
+
+    assert plain.predicted["partial_sum_adds"] == 0
+    assert weight.predicted["partial_sum_adds"] == 7 * 64 * 64
+    assert inputs.predicted["partial_sum_adds"] == 7 * 64 * 64
+    assert split.predicted["partial_sum_adds"] == 3 * 64 * 64
+    assert 'Check(\n            "partial-sum additions"' in weight.source
+    assert "counters.count_partial_sum_adds" in split.source, "the second kernel counts too"
+
+
+def test_a_ws_program_on_a_tensor_core_says_nothing_is_held() -> None:
+    """Trap 9: "weight-stationary" is a misnomer on a unit with no weight banks.
+
+    The tensor core reads every operand from the register file per instruction
+    (D30), so what ``ws`` actually changed is the grid — its rows are slices of
+    K. Metis really does hold B in its array, and keeps the original wording.
+    """
+    tensor_core, *_ = _emit("a100_80gb", stationarity=Dataflow.WEIGHT_STATIONARY)
+    imc, *_ = _emit("metis_aipu", dtype="int8")
+
+    assert "Nothing is held — K is on the grid." in tensor_core.source
+    assert "misnomer here" in tensor_core.source
+    assert "One weight tile. B stays resident" in imc.source
+    assert "misnomer" not in imc.source
+
+
+def test_the_emitted_file_quotes_the_placement_its_report_charged() -> None:
+    """Same walk, same count, three different prices — and the file says which.
+
+    Quoting one placement's price in a file emitted for another is exactly the
+    kind of adjacent-to-true comment this repository keeps having to correct
+    (D57/D58/D61), so the note is built from the ``OpResult``'s own placement.
+    """
+    on_chip, *_ = _emit("a100_80gb", stationarity=Dataflow.WEIGHT_STATIONARY)
+    local, *_ = _emit("metis_aipu", shape=(64, 64, 1024), dtype="int8")
+
+    assert "OVERLAPS them with" in on_chip.source
+    assert "max(matrix, vector)" in on_chip.source
+    assert "The report charges NOTHING for them" in local.source
+    assert "OVERLAPS" not in local.source
+
+
+def test_a_spilled_accumulator_is_shown_as_tier_2_not_asserted() -> None:
+    """The one place the program and the report model different machines (D62).
+
+    Squeeze A100's on-chip capacity to 2 kB per level and the 64x64 accumulator no longer
+    fits, so the report charges the partials a DRAM round trip. The walk keeps
+    them in ``partials`` regardless — where an accumulator lives is a capacity
+    heuristic, not a step of the decomposition — so the row is shown side by
+    side and left for a reader to judge, exactly as B's residency discount is.
+    Asserting it would make the program fail for modelling a different claim.
+    """
+    base = load_chip("a100_80gb")
+    cramped = base.model_copy(
+        update={
+            "memory": [
+                level.model_copy(update={"capacity_bytes": 2048.0}) if level.level < 3 else level
+                for level in base.memory
+            ],
+            "hypothetical": True,
+        }
+    )
+    program, report, *_ = _emit(chip=cramped, stationarity=Dataflow.WEIGHT_STATIONARY)
+    op = report.phases[0].ops[0]
+
+    assert op.reduction_placement is ReductionPlacement.DRAM
+    assert program.predicted["partial_dram_bytes"] > 0
+    assert "tier 2, and the one place this file and the report model different" in program.source
+    assert program.predicted["partial_sum_adds"] == 7 * 64 * 64, "the adds are still asserted"
