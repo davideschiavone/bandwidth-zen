@@ -2944,3 +2944,122 @@ integration test with a shape big enough to interleave.
 
 A second test asserts `--debug` changes no counted quantity: the flag is observation, and the
 tier-1/tier-2 table must be identical with and without it.
+
+## D62 — `ws` and `is` on a tensor core, and where a cut contraction's partials meet (2026-08-29)
+
+The user, having watched `os` and `ws` produce different tile grids on paper: *"the tensor cores need
+to stream out to L1 or L2 the partial C[x,y] and the GPU threads will need to know when those are
+there and make the additions — this is fine, I know performance wise it's gonna be worse — what I
+want is that we don't count for synchronization overheads, but we do double buffering, i.e. while
+the tensor core makes the next sub-C, the cuda cores do the previous additions."*
+
+Two things had to change for that to be answerable. An NVIDIA tensor core declared `os` alone, so
+`--stationarity ws` was refused before any of it was reached; and the model charged **nothing** for a
+K-on-the-grid reduction on any chip, on this reasoning:
+
+> the same units revisit the same output cell on a later wave, so the partials meet in an
+> accumulator that never leaves the chip, and this model has no on-chip bandwidth term to charge
+> that against (D5a)
+
+That is shape-dependent and unenforced. Tiles are handed out round-robin as `tile = k_slice ·
+n_tiles + column`, so the k-slices of one output column land on one unit only when `n_tiles ≡ 0 (mod
+units)` — true for Metis at N=8192, false at N=2560, and never on A100's 432 tensor cores:
+
+```
+does round-robin keep one output column on one core?
+  metis ws   units=4    k_tiles=16   n_tiles=16   -> True     <- by accident: 16 % 4 == 0
+  metis ws   units=4    k_tiles=16   n_tiles=5    -> False
+  a100 ws    units=432  k_tiles=256  n_tiles=256  -> False
+```
+
+### The placement, and why the rule is a declared capability rather than a dataflow
+
+Where partials meet is a property of the **hardware**, so it is now a `ReductionPlacement` decided by
+what the unit declares, not by the dataflow's name (`docs/MODEL.md` §6.1 has the full table):
+`NONE` when K is not cut, `LOCAL` when the unit declares an accumulator deep enough for K, `ON_CHIP`
+when they fit in on-chip capacity and a vector unit sums them, `DRAM` for split-K's two kernels or an
+accumulator too big to hold.
+
+`ComputeUnit.local_accumulation_inputs` is that declaration, and the Metis paper — the DOI the
+profile already cited — settles the case it was written for. ISSCC 2024 11.3, Fig. 11.3.1: *"local
+accumulation up to 16k input channels"*, and the MVM section says what that means: *"the integer
+arithmetic unit accumulates the partial products from a large MVM operation **without storing
+intermediate results back to memory**"*. Fig. 11.3.4(a)'s datapath is bit-serial feeder → 16 IMC
+banks → 512×26-bit accumulators → output serializer → integer arithmetic unit (across k-slices) →
+64×32-bit → DPU. The accumulation happens in **one AI core's periphery** and never reaches L1.
+
+One correction to the intuition that reached this: it is not "B static, A swapped" at the level that
+matters. Within one k-slice, yes — B sits in the bank and M streams past it, which is the model's
+`ws`. To accumulate *over* K the weights must **change**; what stays put is the accumulator. The four
+weight sets hide that reload, which the model already calls `b_dataflow: write-ahead` (D33).
+
+An MMA unit has no counterpart. Its accumulator is per-instruction, in one threadblock's registers,
+and nothing persists across k-slices landing on different SMs. That asymmetry is the whole finding,
+and it is why `local_accumulation_inputs` is 0 on all four MMA profiles.
+
+**A unit whose native dataflow already carries K on the grid and declares no depth keeps the old,
+unbounded claim.** `chip_a` and `chip_b` rest on that, so no documented number moved; the drawer says
+plainly that it is unfalsifiable until a depth is declared. The alternative — treating an undeclared
+depth as zero — would have charged every `chip_a` matmul a reduction at its own matrix rate, which
+is worse than the thing being fixed.
+
+### The overlap, and what is deliberately not charged
+
+`ON_CHIP` costs `(p−1)·M·N` additions on `machine.vector_unit`, **overlapped** with the matrix work,
+so an operation's compute is `max(t_matrix, t_vector)` and not their sum. That is the steady state of
+the pipeline the request describes; fill and drain are omitted exactly as `max(t_dram, t_compute)`
+omits them a level up (D19). Called **reduction overlap** everywhere, never "double buffering" —
+that name is already spoken for, between DRAM and compute, and D5a's story becomes unreadable if the
+two share a word.
+
+Not charged, and both named in `report.assumptions` at the point they are skipped: **synchronisation**
+between the two engines, per the request, and the **on-chip traffic** the partials imply — v1 has no
+on-chip bandwidth term (D5a/D5b), so pricing one direction of it and not the other would be a guess
+dressed as a measurement.
+
+### What it shows, which is not what was expected
+
+On A100 at 4096³ fp16, `ws` reports **the same latency as `os`**. The CUDA cores owe 4.28 G additions
+at 19.5 TOP/s = 219 µs against 442 µs of matrix work, and the overlap hides them completely. The
+ratio is not shape-dependent: the vector unit is 16× slower at `2 · rows` = 32× less work, so vector
+time tends to *half* matrix time on a 16-row array at any large K.
+
+So the cost of `ws` on a tensor core is not throughput — it is **capacity**, a live `M × N`
+accumulator. At 512×512×4096 that is a bargain: `ws` gets the same 99.81% occupancy `--split-k 8`
+buys and keeps `os`'s 4.72 MB of traffic instead of split-K's 13.1 MB, because the partials never
+leave the chip. At 8192×8192 the accumulator is 134 MB against 60.7 MB on chip, the placement flips
+to `DRAM`, and the same decomposition costs 39.8 ms against `os`'s 2.52 ms. The report says the
+placement *flipped* rather than merely reporting a bigger number: it is a cliff, and a reader who
+cannot see the discontinuity cannot act on it.
+
+### Two refusals rather than a plausible number
+
+`machine_model` falls back to the *matrix* unit when no non-systolic unit supports the dtype, so on
+A100 at int8 the "vector unit" **is** the tensor core. Charging elementwise adds at 437 TOP/s would
+have made `ws` look nearly as good as `os` — the exact opposite of the finding — so a requested
+K-on-grid stationarity at such a dtype returns `feasible: false` naming the chip, the dtype and the
+missing capability. Declaring int8 on the CUDA cores (DP4A) would unlock those cases, but
+`vector_unit` also prices every non-matrix op (D27), so it moves documented int8 figures and belongs
+in its own change. `--split-k` on a grid that already carries K is refused too: cutting the
+contraction twice is incoherent, and the flag is an output-stationary knob (D53).
+
+### The name is a misnomer, and the report says so
+
+"Weight-stationary" on a unit that holds no weights describes hardware the caller is not running: an
+MMA unit reads every operand from the register file per instruction (D30). The table, the drawer and
+the emitted program's docstring all say *nothing held, K on the grid* there, and keep "B stays
+resident" for Metis, where it is true.
+
+### Executable, as D54 requires
+
+`Partials.accumulate` counts what it adds — a first touch lands in a zeroed accumulator and is a
+copy, so `p` slices leave `p−1` additions per element — and `partial-sum additions` is a **tier-1**
+check: 28,672 at 64×64×128 under `ws` and `is`, 12,288 under `--split-k 4`, 0 under `os`. The
+emitted file quotes its own report's placement rather than one placement's price in a file emitted
+for another, and the fidelity table lists the overlap as *written down only*: it is a claim about
+time, and the program counts.
+
+One row is tier 2, for the one case where the program and the report model different machines: an
+accumulator the report found too big for on-chip capacity. Where an accumulator lives is a capacity
+heuristic and not a step of the walk, so the gap is shown rather than asserted — the same treatment
+B's residency discount already gets.

@@ -169,6 +169,17 @@ These are known-good behaviours. If a change breaks one, the change is wrong.
 - **Every stationarity issues the same `M*N*K` MACs.** `os` and `ws` disagree about how many tiles
   there are, which dimension each sweeps, and whether partial sums are owed — never about the flop
   count. A change that moves the arithmetic when only the dataflow changed is wrong (D53).
+- **Where a cut contraction's partials meet is the hardware's answer, not the dataflow's** (D62).
+  `ws` on A100 at 4096³ reports the *same latency* as `os`: the CUDA cores' 4.28 G additions overlap
+  the matrix work and are exactly half of it, because they are 16x slower at 32x less work. What
+  `ws` costs there is capacity — 16.8 M live accumulators — and at 8192x8192 those stop fitting, the
+  placement flips `ON_CHIP -> DRAM`, and the same decomposition costs 39.8 ms against 2.52 ms. If a
+  change makes `ws` cost latency at 4096³, or makes the 8192 case a slope rather than a cliff, it is
+  wrong. Metis stays free at every documented shape: K=8192 is inside its declared 16 384.
+- **The reduction's adds are never charged to a `systolic_dims` unit.** `machine.vector_unit` falls
+  back to the matrix unit when nothing non-systolic supports the dtype, and charging elementwise
+  adds at 437 TOP/s would report `ws` as nearly free — the opposite of the truth. That case is
+  refused with `feasible: false`, never costed (D62).
 - A chip asked for a dataflow it does not declare returns `feasible: false` naming the field and the
   capability — **refused, not clamped**, unlike the A/B strategy knobs. A clamp there would answer a
   different question than the one asked.
@@ -243,6 +254,11 @@ config store, Tailwind for layout, D3 for scales/axes and canvas for anything dr
   write the signed exponent — that is what the format means.
 - `ceil` in the shape-utilisation model must operate on the *padded* dimension, not the tile count,
   or small-M GEMMs report >100% utilization.
+- `ComputeUnit.local_accumulation_inputs` must be read through
+  `analysis/stationarity.accumulation_depth`, never directly: a unit whose *native* dataflow already
+  carries K on the grid claims such an accumulator by construction, and the depth it does not state
+  is unbounded there. Reading the field raw would charge `chip_a` and `chip_b` a reduction their own
+  declared dataflow says they do not owe (D62).
 - `analysis/stationarity.py` must stay the only place a tile grid is computed. It was duplicated in
   `pipeline.tile_count` and `tiling.systolic_utilisation` once, and the two drifted — the schedule
   drew a decomposition the utilisation figure was not costing (D53).

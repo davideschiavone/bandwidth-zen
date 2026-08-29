@@ -39,8 +39,9 @@ compute_units:                  # at least one
     structured_sparsity_speedup: 2.0    # default 1.0
     systolic_dims: [16, 16]             # optional; drives the M3 tail-effect model
     weight_sets: 1                      # array-sized weight tiles ONE unit holds; default 1
+    local_accumulation_inputs: 0        # contraction inputs it sums WITHOUT the partial leaving it
     dataflow: os                        # ws | os | is | rs, default ws — this unit's NATIVE one
-    supported_dataflows: []             # every one it can run; [] means just its native one
+    supported_dataflows: [os, ws, is]   # every one it can run; [] means just its native one
 
 memory:                         # innermost first, level numbers ascending, no duplicates
   - {name: L1,   level: 1, capacity_bytes: 3.3792e+7, bandwidth_bytes_per_s: 1.3e+14, latency_ns: 30}
@@ -66,14 +67,27 @@ persistent weight store. Set it only for in-memory compute, where a weight canno
 it has been written into a bank: `metis_aipu` declares 4, so its 4 AI cores hold 16 tiles and run
 4 (`docs/CORRECTIONS.md` D30).
 
+**`local_accumulation_inputs`** is how deep a contraction one unit sums **without the partial
+leaving it**, and it is what makes a K-on-the-grid dataflow free or expensive (`docs/CORRECTIONS.md`
+D62). `metis_aipu` declares `16384`, published in ISSCC 2024 11.3 Fig. 11.3.1 — *"local accumulation
+up to 16k input channels"* — where an integer arithmetic unit in the AI core's periphery sums a
+large MVM's partial products *"without storing intermediate results back to memory"*. Leave it at 0
+for anything whose accumulator is per-instruction, which is every MMA unit: its accumulator lives in
+one threadblock's registers, so k-slices on different SMs have nothing to meet in and their partials
+must be summed by the vector unit. A unit whose **native** dataflow already carries K on the grid
+and declares no depth is treated as unbounded — the claim the model has always made for such a grid,
+and one `report.assumptions` flags as unfalsifiable until a depth is declared.
+
 **`dataflow` and `supported_dataflows`** decide the whole decomposition (`docs/CORRECTIONS.md`
 D53): which dimensions form the parallel tile grid, which one each tile sweeps, and whether partial
 sums are owed. `dataflow` is the unit's **native** one — `os` for every matrix core, because cuBLAS
 and CUTLASS accumulate K in registers inside one output tile; `ws` for in-memory compute, whose
 weights *are* its memory. `supported_dataflows` lists everything it can run, and an empty list
-means the native one alone, which is the honest default: a tensor core has no weight storage (D30)
-and an IMC array cannot hold accumulators instead of weights. The native dataflow must appear in a
-non-empty `supported_dataflows`, which **is** validated here. `DeploymentSpec.stationarity`
+means the native one alone. The four MMA profiles declare all three of `os`, `ws` and `is` (D62) —
+not because a vendor runs a GEMM the other two ways, but so the decompositions can be measured
+against each other on one chip; an IMC array still declares `ws` alone, since it cannot hold
+accumulators instead of weights. The native dataflow must appear in a non-empty
+`supported_dataflows`, which **is** validated here. `DeploymentSpec.stationarity`
 (`--stationarity`) selects; a request outside the set returns `feasible: false` naming the field
 and the unit's real capability — refused, not clamped, because a clamp would answer a different
 question than the one asked.

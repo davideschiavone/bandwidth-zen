@@ -23,7 +23,7 @@ import pytest
 
 from bwz.analysis import analyze, idealised
 from bwz.kernels import matmul_kernel
-from bwz.report import Report
+from bwz.report import ReductionPlacement, Report
 from bwz.spec import DeploymentSpec, DType, MatmulSpec, load_chip, load_model
 from bwz.units import format_bytes, format_time
 
@@ -398,3 +398,66 @@ def test_cli_2_6_the_emitted_programs_counts() -> None:
     assert f"{occupancy:.4f}" == "0.9594"
     assert f"{padding:.4f}" == "0.9894"
     assert f"{big['utilization']:.4f}" == "0.9493"
+
+
+def test_cli_2_5_1_ws_buys_the_same_occupancy_and_pays_the_cuda_cores() -> None:
+    """``docs/CLI.md`` §2.5.1 and ``docs/MODEL.md`` §6.1 — the D62 comparison.
+
+    The same 512x512x4096 shape as the split-K block above, decomposed the other
+    way: K on the tile grid gives 256 x 32 = 8192 tiles and the same 99.81%
+    occupancy split-K bought, but the partials never leave the chip, so DRAM
+    traffic stays at plain ``os``'s 4.72 MB against split-K's 13.1 MB.
+
+    What it costs instead is vector time — 255 x 512 x 512 = 66,846,720 adds on
+    the CUDA cores — overlapped with the matrix work, and the ratio is the
+    finding: 3.43 µs against 6.9 µs, half, because the CUDA cores are 16x slower
+    at 32x less work. Latency is the max, so it is 6.9 µs.
+    """
+    report, _ = _matmul(512, 512, 4096, stationarity="ws")
+    op = report.phases[0].ops[0]
+
+    assert op.reduction_placement is ReductionPlacement.ON_CHIP
+    assert f"{op.utilization:.2%}" == "99.81%"
+    assert format_bytes(op.dram_bytes) == "4.72 MB"
+    assert op.dram_reduction_bytes == 0.0
+    assert (255 * 512 * 512) == 66_846_720
+    assert format_time(op.t_reduce_s) == "3.43 µs"
+    assert format_time(op.t_arith_s) == "6.9 µs"
+    assert format_time(op.latency_s) == "6.9 µs"
+
+
+def test_cli_2_5_1_the_capacity_cliff() -> None:
+    """``docs/CLI.md`` §2.5.1 — the numbers either side of the flip (D62).
+
+    Not idealised: the block on the page is the default run, where the CUDA
+    cores are at 13.6 TOP/s. 8192x8192 output at fp16 is 134 MB of live
+    accumulators against A100's 60.7 MB, so the placement flips to DRAM and the
+    partials cross it: 256 x 8192 x 8192 x 2 B x 2 = 68.7 GB.
+    """
+    spilled, _ = _matmul(8192, 8192, 4096, ideal=False, stationarity="ws")
+    plain, _ = _matmul(8192, 8192, 4096, ideal=False)
+    op = spilled.phases[0].ops[0]
+
+    assert op.reduction_placement is ReductionPlacement.DRAM
+    assert format_bytes(op.dram_reduction_bytes) == "68.7 GB"
+    assert format_time(op.t_reduce_s) == "1.25 ms"
+    assert format_time(op.latency_s) == "39.8 ms"
+    assert format_time(plain.phases[0].ops[0].latency_s) == "2.52 ms"
+
+
+def test_model_6_1_the_4096_cubed_comparison() -> None:
+    """``docs/MODEL.md`` §6.1's worked example: ws hides its reduction entirely.
+
+    4096^3 fp16 on A100, idealised. 256 k-slices leave 255 x 4096 x 4096 =
+    4.28 G additions at 19.5 TOP/s = 219 µs, against 442 µs of matrix work — so
+    the overlap hides it and ws reports the SAME latency as os. What ws really
+    costs at this shape is 16.8 M live accumulators.
+    """
+    plain, _ = _matmul(4096, 4096, 4096)
+    reduced, _ = _matmul(4096, 4096, 4096, stationarity="ws")
+    a, b = plain.phases[0].ops[0], reduced.phases[0].ops[0]
+
+    assert 255 * 4096 * 4096 == 4_278_190_080
+    assert format_time(b.t_reduce_s) == "219 µs"
+    assert format_time(b.t_arith_s) == "442 µs"
+    assert format_time(b.latency_s) == format_time(a.latency_s) == "442 µs"

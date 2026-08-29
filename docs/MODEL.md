@@ -384,11 +384,18 @@ the operands map as **input = A, weight = B, output = C**.
 | `is` input-stationary | A tile | `ceil(M/rows) × ceil(K/rows)` | N | yes | no |
 | `rs` row-stationary | one A row per PE | `ceil(M/rows) × ceil(N/cols)` | K, spread spatially | local to the array | no |
 
-`os` is what cuBLAS and CUTLASS do — K accumulates in registers inside one output tile — and is
-what `a100_80gb`, `h100_sxm`, `jetson_orin` and `mi300x` declare. `metis_aipu`, `chip_a` and
-`chip_b` declare `ws`: their weights *are* their memory, so an accumulator-resident dataflow is not
-something they could run. `rs` is defined for completeness after Eyeriss (Chen/Emer/Sze, ISCA 2016)
-and no profile declares it, so its numbers are labelled unvalidated in `report.assumptions`.
+`os` is what cuBLAS and CUTLASS do — K accumulates in registers inside one output tile — and is the
+**native** dataflow of `a100_80gb`, `h100_sxm`, `jetson_orin` and `mi300x`. All four also *declare*
+`ws` and `is` (D62), not because a vendor runs a GEMM either way but so that the other two
+decompositions can be measured against `os` on the same silicon; the native choice, and every
+default, is unchanged. `metis_aipu`, `chip_a` and `chip_b` declare `ws`: their weights *are* their
+memory, so an accumulator-resident dataflow is not something they could run. `rs` is defined for
+completeness after Eyeriss (Chen/Emer/Sze, ISCA 2016) and no profile declares it, so its numbers are
+labelled unvalidated in `report.assumptions`.
+
+"Weight-stationary" on a unit that holds no weights is a **misnomer**, and the report says so rather
+than repeating it: an MMA unit reads every operand from the register file per instruction (D30), so
+what `ws` changed there is the *grid* — its rows are slices of K — and that is what costs.
 
 `DeploymentSpec.stationarity` (`--stationarity`) selects; a chip that cannot run the choice is
 **refused** with `feasible: false`, not clamped, because a clamp would silently answer a different
@@ -422,28 +429,69 @@ separate GEMMs that fill the arrays alongside each other.
 Negligible on a large GEMM by construction and dominant on a small one, which is why the aggregate
 peak alone cannot compare two chips on anything small. The last two rows are the one place where a
 *more* accurate decomposition reports a *lower* number: `ws` claimed parallelism that only existed
-because every tile held a partial sum needing a reduction the model never charged (D53).
+because every tile held a partial sum needing a reduction the model did not then charge (D53). It
+does now — see the placement table below — so the trade those two rows describe is priced rather
+than merely noted: `ws` buys the occupancy and pays the vector unit for it.
 
-#### The reduction, when there is one
+#### The reduction, and where its partials meet (D62)
 
-Partial sums exist wherever K is cut across tiles. What they *cost* depends on whether they are
-**materialised**:
+Partial sums exist wherever K is cut across tiles: `p` slices leave `p` partial values for every
+output element, `p = ceil(K/rows)` when K is on the grid and `p = k_partitions` under split-K. What
+they *cost* is decided by **where they can meet**, which is a property of the hardware rather than
+of the dataflow's name. `ReductionPlacement` is that choice:
 
-- **Split-K under `os`** genuinely is two kernels — CUTLASS's *"partitionedK GEMM, and batched
-  reduction"* — so the partials go out to DRAM and come back. Charged in full: `p · M · N ·
-  acc_bytes` written and read (`OpResult.dram_reduction_bytes`, kept out of the operands' read/write
-  totals), `(p−1) · M · N` additions on the **vector** unit (`t_reduce_s`; a matrix engine does MAC
-  and nothing else, D27), and one extra dispatch.
-- **K on the grid itself** (`ws`, `is`) is not: the same unit revisits the same output cell on a
-  later wave, so the partials meet in an accumulator, and v1 has no on-chip bandwidth term to charge
-  that against (D5a). What it costs is *capacity*, and where the accumulator does not fit, a real
-  compiler re-blocks the output and re-reads A and B rather than spilling C — traffic §6.2 already
-  declines to model. `report.assumptions` names the working set and says the bound stays a lower
-  one.
+| placement | when | vector adds | DRAM bytes | dispatches | how it combines |
+|---|---|---|---|---|---|
+| `NONE` | K is not cut (`os`, `rs`) | 0 | 0 | 0 | — |
+| `LOCAL` | K on the grid, and `K ≤ local_accumulation_inputs` | 0 | 0 | 0 | — |
+| `ON_CHIP` | K on the grid, `M·N·acc_bytes` fits on chip | `(p−1)·M·N` | 0 | 0 | **`max(matrix, vector)`** |
+| `DRAM` | split-K, **or** an accumulator too big to hold | `(p−1)·M·N` | `2·p·M·N·acc_bytes` | 1 | `matrix + vector` |
+
+- **`LOCAL`** is a *declared* capability, not an assumption about the dataflow. Metis's `d_imc`
+  declares `local_accumulation_inputs: 16384` — ISSCC 2024 11.3 Fig. 11.3.1, *"local accumulation up
+  to 16k input channels"*, and the paper states the mechanism: an integer arithmetic unit sums a
+  large MVM's partial products *"without storing intermediate results back to memory"*. The
+  accumulation happens in one AI core's periphery and never reaches L1. Every documented Metis
+  figure is at K = 8192, half that depth, so it costs nothing; K = 32768 flips to `ON_CHIP` and the
+  DPU pays. A unit whose **native** dataflow already carries K on the grid but declares no depth
+  keeps the model's older, unbounded claim — that is what `chip_a` and `chip_b` rest on, and the
+  drawer says it is unfalsifiable as it stands.
+- **`ON_CHIP`** is the tensor-core case. An MMA unit's accumulator lives in one threadblock's
+  registers, so k-slices landing on different SMs have nothing to meet in: the partials go out to
+  the last-level cache and the **vector** unit adds them (`t_reduce_s`; a matrix engine does MAC and
+  nothing else, D27). Those adds **overlap** the matrix work — the array builds slice *n+1* while
+  the CUDA cores sum slice *n* — so compute is `max(t_matrix, t_vector)`, steady state only, exactly
+  as `max(t_dram, t_compute)` omits fill and drain a level up (D19). Synchronisation between the two
+  engines is **not** charged, and neither is the cache traffic: v1 has no on-chip bandwidth term
+  (D5a/D5b). Both are named in `report.assumptions`.
+- **`DRAM`** is split-K — genuinely two kernels, CUTLASS's *"partitionedK GEMM, and batched
+  reduction"* — or a K-on-grid walk whose `M × N` accumulator does not fit on chip. Charged in full:
+  `p · M · N · acc_bytes` written and read (`OpResult.dram_reduction_bytes`, kept out of the
+  operands' read/write totals), the adds serialised behind the arithmetic, and one extra dispatch.
+  The capacity case is a **cliff**: one output element less and the same decomposition would have
+  been `ON_CHIP`, so the report says the placement flipped rather than merely reporting a bigger
+  number. It is also an upper bound — a real compiler re-blocks the output and re-reads A and B
+  instead, traffic §6.2 already declines to model.
 
 The additions are **not new arithmetic**: `(K/p − 1)·p + (p − 1) = K − 1` for every `p`, so `2·M·N·K`
-already counts them. What split-K changes is that `(p−1)·M·N` of them leave the matrix engine's
-accumulator for a unit 16× slower.
+already counts them. What a cut K changes is that `(p−1)·M·N` of them leave the matrix engine's
+accumulator for a unit 16× slower, and the sliver this double-counts is the same count at the matrix
+rate — 1/16 of what it adds on A100.
+
+**Worked example, A100 fp16 at 4096³.** `ws` cuts K into `4096/16 = 256` slices, so the CUDA cores
+owe `255 · 4096 · 4096 = 4.28 G` additions at 19.5 TOP/s (ideal) = 219 µs, against 442 µs of matrix
+work. The ratio is not a coincidence and does not depend on the shape: the CUDA cores are 16× slower
+at `2 · rows = 32×` less work, so vector time tends to half matrix time on this array at any large
+K. The overlap therefore hides it entirely and `ws` reports the *same latency* as `os` — what it
+really costs is 16.8 M live accumulators. At 8192 × 8192 those stop fitting: the placement flips and
+the same decomposition costs 39.8 ms against `os`'s 2.52 ms. That is the finding, and it is a capacity
+finding, not a throughput one.
+
+A K-on-grid stationarity is **refused** (`feasible: false`) at a dtype whose fastest non-systolic
+unit does not exist — A100 at int8, where `machine.vector_unit` falls back to the tensor core
+itself. Charging elementwise adds at 437 TOP/s would price the decomposition as nearly free, which
+is the opposite of the truth. `--split-k` on a grid that already carries K is refused for the same
+reason a clamp is not offered: cutting the contraction twice is incoherent (D53).
 
 ### 6.1a Weight residency in the array itself
 

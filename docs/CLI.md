@@ -260,22 +260,98 @@ Utilisation goes 79.01% → 99.81% and latency 8.71 → 6.99 µs, but DRAM traff
 the extra 8.4 MB is eight full `512×512` partials written by the first kernel and read back by the
 second. Push the factor higher and `t_dram` overtakes `t_compute` — the flag lets you find where.
 
+**`ws` buys the same occupancy without the traffic** — and pays a different engine for it (D62).
+A100's tensor core declares all three grids so this comparison can be made on one chip:
+
+```bash
+uv run bwz matmul -M 512 -N 512 -K 4096 -c a100_80gb --ideal --no-pipeline --stationarity ws
+```
+
+```
+  DRAM traffic                   4.72 MB   reads + writes
+  stationarity                        ws   nothing held, K on the grid, 256 x
+                                           32 tiles (K x N) each sweeping M —
+                                           requested with --stationarity
+  reduction            on chip — 3.43 µs   66,846,720 adds on cuda_core at
+                                           19.5 TOP/s, overlapped with the
+                                           matrix work (compute is the max of
+                                           the two, not the sum): hidden under
+                                           6.9 µs of matrix work (50% of it),
+                                           so it costs capacity, not latency
+  shape utilisation               99.81%   shape padded to the 16x16 tile —
+                                           geometry, not a derating
+  t_compute                       6.9 µs   operations / (effective peak x
+                                           util), overlapped with the
+                                           reduction: max of the two engines
+  latency                         6.9 µs
+  verdict                  COMPUTE_BOUND
+```
+
+Same 99.81% occupancy as `--split-k 8`, same 4.72 MB of traffic as plain `os` — because K is on the
+tile grid rather than cut twice, the partials never leave the chip. What they cost instead is
+**vector time and capacity**: 256 k-slices leave `255 × 512 × 512 = 66.8 M` additions for the CUDA
+cores, which run 16× below the tensor cores. The array builds the next k-slice while they sum the
+last, so compute is `max(6.9, 3.43) µs` — and 3.43 is almost exactly half of 6.9 for a reason that
+does not depend on the shape: the vector unit is 16× slower at `2 × 16 =` 32× less work.
+
+The reduction is therefore **free of latency here and is still the thing to watch**, because its
+other cost is a live `M × N` accumulator. Past on-chip capacity the placement flips from `ON_CHIP`
+to `DRAM` and the same decomposition falls off a cliff — at `-M 8192 -N 8192 -K 4096` it is 39.8 ms
+against `os`'s 2.52 ms, the report naming the flip:
+
+```
+  reduction            through DRAM — 1.25 ms   17,112,760,320 adds on
+                                                cuda_core at 13.6 TOP/s plus
+                                                68.7 GB of round trip,
+                                                serialised after the matrix
+                                                work: the 134 MB of live
+                                                accumulators do NOT fit the
+                                                60.7 MB on chip, so the
+                                                placement flipped from on-chip
+                                                to DRAM — a cliff, not a slope
+```
+
+`docs/MODEL.md` §6.1 has the full placement table, including the `LOCAL` case: a unit that declares
+`local_accumulation_inputs` deep enough for K sums its partials in its own periphery and is charged
+nothing. Metis declares 16384 of them and the paper says why.
+
 **A chip that cannot run the choice is refused, not clamped** (CLAUDE.md #8). Unlike
 `--a-strategy`/`--b-dataflow`, which pick between orderings of the same work, a stationarity is a
 different decomposition, so a silent fallback would report a number for hardware you did not ask
 about:
 
 ```bash
-uv run bwz matmul -M 512 -N 512 -K 4096 -c a100_80gb --stationarity ws
+uv run bwz matmul -M 512 -N 512 -K 4096 -c a100_80gb --stationarity rs
 ```
 
 ```
 Infeasible.
-  • stationarity='ws' is not supported by tensor_core, which declares os.
-tensor_core declares weight_sets=1, i.e. no weight residency at all: both
-operands are re-read per instruction (D30), so there is nothing for a weight to
-stay stationary in. Drop the flag to use the chip's own dataflow, or pick one it
-declares.
+  • stationarity='rs' is not supported by tensor_core, which declares is, os,
+ws. Drop the flag to use the chip's own dataflow, or pick one it declares.
+```
+
+Two more refusals guard the reduction itself, and both are about pricing it to the wrong engine or
+cutting K twice:
+
+```bash
+uv run bwz matmul -M 4096 -N 4096 -K 4096 -c a100_80gb -d int8 --stationarity ws
+uv run bwz matmul -M 4096 -N 4096 -K 4096 -c a100_80gb --stationarity ws --split-k 4
+```
+
+```
+  • stationarity='ws' puts K on the tile grid, so partial sums leave tensor_core
+and something has to add them — but NVIDIA A100 SXM4 80GB declares no
+non-systolic compute unit supporting 'int8', so the only engine available is
+tensor_core itself. A matrix engine does matrix-multiply-accumulate and nothing
+else (D27), and charging elementwise adds at its rate would report this
+decomposition as nearly free. Refused rather than mispriced (D62). Non-systolic
+units here support ['fp16', 'fp32']; run at one of those dtypes, or use the
+chip's own dataflow.
+
+  • --split-k 4 cannot be combined with stationarity='ws': that grid already
+carries K on one of its axes, so the contraction would be cut twice and its
+partials summed twice. Split-K is an output-stationary knob (D53) — drop one of
+the two flags.
 ```
 
 Exit code 2, the same as any other infeasible report. `rs` is implemented but no profile declares
@@ -430,24 +506,29 @@ python /tmp/k.py
 NVIDIA A100 SXM4 80GB · fp16 · output-stationary
 backend: numpy;  16 threads, one per modelled core in use
 
-quantity                         predicted              measured  status
---------------------------------------------------------------------------
-tiles                                   16                    16  OK
-waves                                    1                     1  OK
-MACs                               524,288               524,288  OK
-MAC slots issued                   524,288               524,288  OK
-idle core-waves                        416                   416  OK
+quantity                          predicted              measured  status
+---------------------------------------------------------------------------
+tiles                                    16                    16  OK
+waves                                     1                     1  OK
+MACs                                524,288               524,288  OK
+MAC slots issued                    524,288               524,288  OK
+idle core-waves                         416                   416  OK
     a core with no tile this wave. This IS wave occupancy (D30).
-A staging events                         4                     4  OK
-A bytes                             16,384                16,384  OK
-C bytes                              8,192                 8,192  OK
-partial bytes                            0                     0  OK
-B bytes fetched                          0                65,536  differs
+A staging events                          4                     4  OK
+A bytes                              16,384                16,384  OK
+C bytes                               8,192                 8,192  OK
+partial bytes                             0                     0  OK
+partial-sum additions                     0                     0  OK
+    (p-1) x M x N, where p is how many k-slices each output element ends
+    up with. Not new arithmetic — 2*M*N*K already counts them — but the
+    report charges them to the VECTOR unit, because they have left the
+    matrix engine's own accumulator (D27/D62).
+B bytes fetched                           0                65,536  differs
     tier 2. The report charges compulsory traffic and then discounts it by a
     residency fraction a capacity heuristic supplies; this walk fetches what
     the tile order asks for. The gap above it is the tiling re-read that
     docs/MODEL.md 6.2 declines to model, measured rather than argued about.
-B bytes, first touch                     0                16,384  differs
+B bytes, first touch                      0                16,384  differs
     tier 2. What B costs if every byte of it crosses the bus exactly once.
 
 wave occupancy   0.0370   1 - idle core-waves / (WAVES * AVAILABLE_CORES)
@@ -562,9 +643,19 @@ decomposition is:
 
 That `partials` object has to exist under `ws` and does not under `os`, which is D53's claim in one
 line of code. Two cores can own `(kt, nt)` and `(kt', nt)` in the same wave, so it takes **a lock
-per output block** — an atomic on-chip accumulate, costing no bytes, which is what the cost model
-charges for it. Private per-core copies merged at the end would silently *be* split-K, which the
-model does charge for.
+per output block** — an atomic on-chip accumulate, costing no bytes. Private per-core copies merged
+at the end would silently *be* split-K, which is a different decomposition and is charged like one.
+
+`partials` also **counts what it adds**, and that count is tier 1 (D62). A first touch lands in a
+zeroed accumulator and is a copy, so `p` k-slices leave `p−1` additions per output element: 28,672
+at 64×64×128 under `ws` and `is`, 12,288 under `--split-k 4`, 0 under `os`. The report charges
+exactly those to the vector unit, so a disagreement fails the run.
+
+What the file does **not** execute is the *overlap*: that the vector unit sums slice *n* while the
+array builds slice *n+1* is a claim about time, and this program counts. Its own fidelity table says
+so, and its docstring quotes the placement its report actually charged — free in one AI core's
+periphery on Metis, on the CUDA cores and overlapped on A100, through DRAM when the accumulator does
+not fit.
 
 **It is not a benchmark, and the file says so before anything else.** It validates counts, not
 time: it runs one OS thread per modelled core whatever the host has, makes no attempt to be fast,
@@ -573,15 +664,19 @@ and its wall clock has no relationship to the predicted latency.
 #### Two tiers, and why the B rows are not asserted
 
 Tier 1 is asserted and must match exactly: `tiles`, `waves`, the useful MAC count, the MAC slots
-issued, the idle core-waves, A's staging events, A's bytes, C's bytes, split-K's partial round
-trip, and `C == A @ B`. These are quantities the model computes *structurally*, so a mismatch is a
+issued, the idle core-waves, A's staging events, A's bytes, C's bytes, split-K's partial round trip,
+the partial-sum additions, and `C == A @ B`. These are quantities the model computes *structurally*, so a mismatch is a
 real bug on one side or the other.
 
 Wave occupancy and shape padding are pinned as **integers** — `idle_core_waves` and `mac_slots` —
 rather than as floats, and the program prints the ratios from the counts it asserted. Same claim,
 no float comparison. The `if tile < TILES` inside `run_waves` *is* wave occupancy (D30), executable.
 
-Tier 2 is printed and not asserted, and the B rows above are it. The report charges compulsory
+Tier 2 is printed and not asserted, and the B rows above are it — with one more that appears only
+when the report's accumulator did not fit on chip: the partial *bytes*. There the report charges a
+DRAM round trip on a capacity judgement and the walk keeps its accumulator in `partials` whatever
+its size, because where an accumulator lives is a heuristic about a machine and not a step of the
+decomposition (D62). Same treatment, same reason. The report charges compulsory
 traffic — each operand crosses the bus once — and then discounts it by a residency fraction that
 comes from a capacity heuristic this file deliberately does not imitate; on a lone matmul whose B
 fits on chip, that discount is total and the charged figure is **zero**. The walk fetches what the

@@ -261,25 +261,32 @@ sweeps, and whether partial sums have to be reduced afterwards. For a matmul the
 | `is` input-stationary | an A tile | `⌈M/rows⌉ × ⌈K/rows⌉` | N | over K |
 | `rs` row-stationary | one A row per PE | `⌈M/rows⌉ × ⌈N/cols⌉` | K, spread spatially | inside the array |
 
-**The default is the chip's own.** Every matrix core here declares `os`, because that is what cuBLAS
-and CUTLASS do — K accumulates in registers inside one output tile, so no partial sum ever leaves a
-core. The in-memory-compute profiles declare `ws`: their weights *are* their memory, so an
-accumulator-resident dataflow is not something they could run. `rs` is implemented after Eyeriss and
-labelled unvalidated, since no shipped profile declares it.
+**The default is the chip's own.** Every matrix core here runs `os` natively, because that is what
+cuBLAS and CUTLASS do — K accumulates in registers inside one output tile, so no partial sum ever
+leaves a core. All four also *declare* `ws` and `is` so the three can be compared on one chip, which
+moves no default. The in-memory-compute profiles declare `ws` alone: their weights *are* their
+memory, so an accumulator-resident dataflow is not something they could run. `rs` is implemented
+after Eyeriss and labelled unvalidated, since no shipped profile declares it.
 
 **Every stationarity issues the same `2·M·N·K` operations.** They differ in how the work is cut up —
 so in quantisation loss, in how the operands are staged, and in whether a reduction is owed.
+
+**Where the partials meet is the hardware's answer, not the dataflow's.** A K-on-the-grid grid owes
+`(p−1)·M·N` additions, and what they cost depends on whether the unit declares an accumulator deep
+enough to sum them itself (Metis: 16 384 inputs, free), whether they fit on chip (the vector unit
+adds them, *overlapped* with the matrix work), or neither (a DRAM round trip, serialised). On A100
+at 4096³ that overlap hides the reduction entirely — `ws` costs the same latency as `os` — and what
+it really costs is 16.8 M live accumulators, which at 8192×8192 stop fitting and turn 2.52 ms into
+39.8 ms. `docs/MODEL.md` §6.1 has the table.
 
 **A chip asked for one it cannot run is refused, not clamped** — the one place this tool returns
 `feasible: false` for a *strategy* rather than a capacity problem:
 
 ```bash
-$ uv run bwz matmul -M 512 -N 512 -K 4096 -c a100_80gb --stationarity ws
+$ uv run bwz matmul -M 512 -N 512 -K 4096 -c a100_80gb --stationarity rs
 Infeasible.
-  • stationarity='ws' is not supported by tensor_core, which declares os. tensor_core declares
-    weight_sets=1, i.e. no weight residency at all: both operands are re-read per instruction
-    (D30), so there is nothing for a weight to stay stationary in. Drop the flag to use the
-    chip's own dataflow, or pick one it declares.
+  • stationarity='rs' is not supported by tensor_core, which declares is, os, ws. Drop the flag
+    to use the chip's own dataflow, or pick one it declares.
 ```
 
 The A/B knobs below clamp instead, and the difference is deliberate: `stage`/`stream`/`whole` are
