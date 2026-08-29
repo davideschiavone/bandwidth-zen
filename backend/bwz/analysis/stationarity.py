@@ -23,12 +23,12 @@ traffic and the reduction. :func:`grid_for` is the single place that decides.
 
 ``os`` is what cuBLAS/CUTLASS do by default — K accumulates in registers inside
 one output tile, so nothing crosses cores. ``ws`` and ``is`` put K on the grid,
-so each tile owns a slice of the contraction and the slices must be added; the
-same units revisit the same output cell on a later wave, so those partials meet
-in an accumulator rather than in DRAM. Asking for **split-K** is the one case
-that materialises them, because CUTLASS runs it as two kernels ("partitionedK
-GEMM, and batched reduction") — that is what :func:`reduction_cost` charges, and
-:attr:`TileGrid.materialises_partials` is where the line is drawn and why.
+so each tile owns a slice of the contraction and the slices must be added.
+*Where* they are added is not one answer but four, and :class:`ReductionPlacement`
+is the choice: in the unit's own periphery, on chip, or through DRAM. Asking for
+**split-K** always lands on the last, because CUTLASS runs it as two kernels
+("partitionedK GEMM, and batched reduction") and the partials have nowhere to
+live between them — :attr:`TileGrid.materialises_partials` is that case.
 """
 
 from __future__ import annotations
@@ -38,6 +38,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from bwz.graph.ops import MatmulAttrs
+from bwz.report import ReductionPlacement
 from bwz.spec.hardware_spec import ComputeUnit, Dataflow
 
 
@@ -178,26 +179,35 @@ class TileGrid:
 
     @property
     def materialises_partials(self) -> bool:
-        """Whether the partial results are written out and read back (D53).
+        """Whether the partials cross DRAM **because there are two kernels** (D53).
 
-        Narrower than :attr:`needs_reduction`, and the distinction is the whole
-        cost. Split-K is **two kernels** — CUTLASS's "partitionedK GEMM, and
-        batched reduction" — so its partials have nowhere to live but global
-        memory between them. A grid that merely carries K on its own axis does
-        not: the same units revisit the same output cell on a later wave, so the
-        partials meet in an accumulator that never leaves the chip, and this
-        model has no on-chip bandwidth term to charge that against (D5a).
+        Split-K alone. CUTLASS runs it as "partitionedK GEMM, and batched
+        reduction", so the GEMM has ended everywhere before any summing starts
+        and the partials have nowhere to live but global memory in between.
 
-        What the accumulator costs is *capacity*, and where it does not fit, a
-        real compiler re-blocks the output and re-reads A and B rather than
-        spilling C. Those re-reads are exactly the traffic ``docs/MODEL.md`` 6.2
-        already declines to model — "DRAM traffic is compulsory traffic … so a
-        DRAM-bound latency here is a lower bound". Charging a C spill here while
-        that stands would price one horn of the dilemma and not the other, on a
-        chip nobody has measured; the honest move is to say so in
-        ``report.assumptions`` and leave the bound where it is.
+        This is a property of the *schedule*, not of capacity, which is why it
+        stayed a boolean when :class:`ReductionPlacement` arrived: a K-on-grid
+        walk can also end up in DRAM, but for the other reason — an accumulator
+        too big to hold (D62). :func:`reduction_placement` is where the two
+        meet, and it is the one that decides what anything is charged.
         """
         return self.k_partitions > 1
+
+    @property
+    def k_slices(self) -> int:
+        """Partial results each output element ends up with — the ``p`` that
+        every reduction cost is ``(p - 1) * M * N`` additions of.
+
+        ``k_tiles`` when K is on the grid, since the grid's K axis *is* the cut;
+        ``k_partitions`` under split-K, which cuts a K that is swept inside the
+        tile. Never both: cutting K twice is refused rather than costed (D62).
+        1 when nothing is cut, which is ``os``'s whole advantage.
+        """
+        if self.row_dim is Dim.K:
+            return self.rows
+        if self.col_dim is Dim.K:
+            return self.cols
+        return self.k_partitions
 
     @property
     def accumulator_elements(self) -> int:
@@ -205,8 +215,9 @@ class TileGrid:
 
         The whole ``M x N`` output under a K-on-grid walk: it finishes one slice
         of the contraction across every output cell before starting the next, so
-        every cell has an open accumulator throughout. Reported so a reader can
-        see when the assumption that they stay on chip stops being plausible.
+        every cell has an open accumulator throughout. Load-bearing since D62:
+        whether these fit on chip is what separates a reduction that costs
+        vector time from one that costs a DRAM round trip.
         """
         return self.m * self.n
 
@@ -276,69 +287,193 @@ def grid_for(
     return grid(Operand.C, Dim.M, Dim.N, Dim.K, m_tiles, n_tiles, k_pieces=splits)
 
 
+K_ON_GRID = frozenset({Dataflow.WEIGHT_STATIONARY, Dataflow.INPUT_STATIONARY})
+"""Dataflows whose parallel grid carries K on one of its axes, so that several
+units hold partial values of the same output element (D53)."""
+
+UNBOUNDED_ACCUMULATION = math.inf
+"""What :func:`accumulation_depth` returns for a unit that runs a K-on-grid
+dataflow natively and states no depth: today's claim, unchanged and unfalsifiable
+until the profile says how deep the accumulator really is (D62)."""
+
+
+def accumulation_depth(unit: ComputeUnit) -> float:
+    """Contraction inputs *unit* sums without the partial leaving it (D62).
+
+    Three cases, and the middle one is why this is a function rather than a
+    field read:
+
+    * a **declared** ``local_accumulation_inputs`` wins outright. Metis's 16384
+      is published (ISSCC 2024 11.3, Fig. 11.3.1) and the paper states the
+      mechanism: an integer arithmetic unit sums a large MVM's partial products
+      "without storing intermediate results back to memory".
+    * a unit whose **native** dataflow already puts K on the grid and declares
+      no depth is claiming such an accumulator by construction — a profile
+      saying "I run ``ws``" while having nowhere to accumulate K would be
+      describing a machine that cannot run its own declared dataflow. That is
+      exactly the claim this model made for every K-on-grid grid before D62, so
+      it is preserved here, unbounded, and named in ``report.assumptions`` as
+      the unfalsifiable thing it is.
+    * everything else has **none**. An MMA unit's accumulator is
+      per-instruction, in one threadblock's registers; k-slices landing on
+      different SMs have nothing to meet in, which is the whole reason ``ws`` on
+      a tensor core is worth measuring.
+    """
+    if unit.local_accumulation_inputs > 0:
+        return float(unit.local_accumulation_inputs)
+    return UNBOUNDED_ACCUMULATION if unit.dataflow in K_ON_GRID else 0.0
+
+
 @dataclass(frozen=True, slots=True)
 class ReductionCost:
-    """What CUTLASS's second kernel costs, when the grid needs one.
+    """What summing a grid's partial results costs, and where they are summed.
 
-    Zero on every field when it does not, so callers can add it unconditionally.
+    Zero on every numeric field when nothing is reduced, so callers can add it
+    unconditionally; :attr:`placement` still says *why* it is zero, which is a
+    different fact for ``os`` (nothing to sum) than for Metis (summed in the
+    array's own periphery).
     """
 
+    placement: ReductionPlacement
+    """Where the partials meet — the choice that decides every field below, and
+    whether the vector time is added to the matrix time or overlapped with it."""
     partitions: int
     """Partial results per output element — how many pieces the contraction was
     cut into. 1 when nothing is reduced."""
     partial_sums: float
-    """Elementwise additions the reduction kernel performs, charged to the
-    *vector* unit — a matrix engine does matrix-multiply-accumulate and nothing
-    else (D27).
+    """Elementwise additions the reduction performs, charged to the *vector*
+    unit — a matrix engine does matrix-multiply-accumulate and nothing else
+    (D27).
 
     **Not new arithmetic.** ``2*M*N*K`` already counts them: accumulating K
     products into one output is ``K - 1`` additions however the contraction is
-    cut, and ``(K/p - 1)*p + (p - 1) = K - 1`` for every ``p``. What split-K
+    cut, and ``(K/p - 1)*p + (p - 1) = K - 1`` for every ``p``. What a cut K
     changes is *where* they run — ``(p-1)*M*N`` of them leave the matrix engine's
     own accumulator for the vector unit, which on A100 is 16x slower (D27). So
-    this is charged as vector time on top, and the sliver it double-counts is
-    the same count at the matrix rate: 1/16 of what it adds."""
+    this is charged as vector time, and the sliver it double-counts is the same
+    count at the matrix rate: 1/16 of what it adds."""
     dram_bytes: float
-    """Partials written out and read back. The GEMM kernel ends before the
-    reduction kernel starts, so they cannot stay in registers between the two."""
+    """Partials written out and read back, under :attr:`ReductionPlacement.DRAM`
+    only. Either the GEMM kernel ended before the reduction kernel started
+    (split-K), or the accumulator was too big to hold on chip — both mean the
+    partials cannot stay where they were produced."""
     dispatches: int
     """Extra kernel launches — one, for that second kernel."""
 
     @property
     def is_free(self) -> bool:
-        return self.dispatches == 0
+        """Whether this costs no time at all — nothing to sum, or summed in the
+        unit's own periphery. An ``ON_CHIP`` reduction is *not* free: it costs
+        vector time, even where the overlap hides it behind the matrix work."""
+        return self.placement in (ReductionPlacement.NONE, ReductionPlacement.LOCAL)
 
 
-NO_REDUCTION = ReductionCost(1, 0.0, 0.0, 0)
+NO_REDUCTION = ReductionCost(ReductionPlacement.NONE, 1, 0.0, 0.0, 0)
 
 
-def reduction_cost(grid: TileGrid, accumulator_bytes: float) -> ReductionCost:
-    """Cost of summing the partial results *grid* materialises.
+def reduction_placement(
+    grid: TileGrid,
+    accumulator_bytes: float,
+    *,
+    unit: ComputeUnit,
+    on_chip_capacity_bytes: float,
+) -> ReductionPlacement:
+    """Where this grid's partial sums meet, on this unit (D62).
 
-    ``partitions`` slices of the contraction each produce a full ``M x N``
-    partial, so summing them is ``(partitions - 1) * M * N`` additions on the
-    vector unit and a round trip of ``partitions * M * N`` accumulator-width
-    values — written by the GEMM kernel, read by the reduction kernel.
+    Four cases, in the order they are tested:
 
-    Charged for a grid that :attr:`~TileGrid.materialises_partials` — split-K,
-    the two-kernel case — and not for one that merely carries K on an axis,
-    where the partials meet in an on-chip accumulator that this model has no
-    bandwidth term for (see that property for why pricing it would be worse than
-    naming it). Returns :data:`NO_REDUCTION` otherwise, which is why plain
+    ``NONE``
+        K is not cut at all — ``os`` without split-K, or ``rs``, which spreads K
+        inside one array where the wiring sums it (D5a).
+    ``DRAM``
+        split-K, always: two kernels, so the partials cross global memory
+        between them whatever the capacity (:attr:`TileGrid.materialises_partials`).
+    ``LOCAL``
+        K is on the grid and ``K`` fits :func:`accumulation_depth` — the partials
+        never leave the unit that made them, so nothing is charged.
+    ``ON_CHIP``
+        K is on the grid, the partials must leave the unit, and the whole
+        ``M x N`` accumulator fits in on-chip capacity. This is the tensor-core
+        case D62 exists for: partials out to L2, summed by the vector unit,
+        overlapped with the matrix work.
+    ``DRAM`` again
+        K is on the grid and the accumulator does **not** fit on chip. A cliff,
+        not a slope, and the report has to say that it flipped.
+
+    Capacity is compared at *accumulator* width — the width the report writes C
+    at, which is what :func:`reduction_cost`'s caller passes — rather than at a
+    deployment knob, so the two cannot disagree about the same bytes.
+    """
+    if not grid.needs_reduction:
+        return ReductionPlacement.NONE
+    if grid.materialises_partials:
+        return ReductionPlacement.DRAM
+    if grid.k <= accumulation_depth(unit):
+        return ReductionPlacement.LOCAL
+    live_bytes = grid.accumulator_elements * accumulator_bytes
+    if live_bytes <= on_chip_capacity_bytes:
+        return ReductionPlacement.ON_CHIP
+    return ReductionPlacement.DRAM
+
+
+def reduction_cost(
+    grid: TileGrid,
+    accumulator_bytes: float,
+    *,
+    unit: ComputeUnit,
+    on_chip_capacity_bytes: float,
+) -> ReductionCost:
+    """Cost of summing the ``p`` partial results *grid* leaves per output element.
+
+    ``p`` slices of the contraction each produce a full ``M x N`` partial, so
+    summing them is ``(p - 1) * M * N`` additions on the vector unit wherever
+    they meet, plus — under :attr:`ReductionPlacement.DRAM` only — a round trip
+    of ``p * M * N`` accumulator-width values and the dispatch that reads them.
+
+    What :func:`reduction_placement` decides is not *whether* those additions
+    happen but *where*, and the two placements that are not free differ in more
+    than their byte count: ``ON_CHIP`` overlaps the adds with the matrix work
+    (the caller takes ``max``), ``DRAM`` serialises them behind it. Returns
+    :data:`NO_REDUCTION` when nothing is cut, which is why plain
     output-stationary is the cheap default (D53).
     """
-    if not grid.materialises_partials:
-        return NO_REDUCTION
-    partitions = grid.k_partitions
-    if partitions <= 1:
+    placement = reduction_placement(
+        grid, accumulator_bytes, unit=unit, on_chip_capacity_bytes=on_chip_capacity_bytes
+    )
+    partitions = grid.k_slices
+    if placement is ReductionPlacement.NONE or partitions <= 1:
         return NO_REDUCTION
     elements = float(grid.m) * float(grid.n)
+    if placement is ReductionPlacement.LOCAL:
+        return ReductionCost(placement, partitions, 0.0, 0.0, 0)
+    if placement is ReductionPlacement.ON_CHIP:
+        # No bytes: the v1 machine has no on-chip bandwidth term (D5a/D5b), so
+        # the honest position is that this reduction costs vector time and
+        # capacity, and that the L2 traffic it implies is unmodelled. Said in
+        # `report.assumptions` rather than silently priced at zero.
+        return ReductionCost(placement, partitions, (partitions - 1) * elements, 0.0, 0)
     return ReductionCost(
+        placement=placement,
         partitions=partitions,
         partial_sums=(partitions - 1) * elements,
         dram_bytes=partitions * elements * accumulator_bytes * 2.0,
         dispatches=1,
     )
+
+
+def residency_phrase(grid: TileGrid, unit: ComputeUnit) -> str:
+    """What is really held, in the vocabulary of the unit that holds it (D62).
+
+    "Weight-stationary" names a machine whose weights sit in the array while
+    activations stream past. Ask a tensor core for that grid and nothing is
+    held: it reads every operand from the register file per instruction (D30),
+    and what actually changed is that K moved onto the tile grid. Saying "B
+    resident" there would describe hardware the caller is not running, so the
+    grid — the real content of the choice — is named instead.
+    """
+    if grid.resident is Operand.B and unit.weight_sets <= 1:
+        return "nothing held, K on the grid"
+    return f"{grid.resident.value} resident"
 
 
 def refusal_reason(unit: ComputeUnit, requested: Dataflow) -> str | None:

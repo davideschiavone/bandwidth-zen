@@ -40,6 +40,16 @@ compute_units:
     # computation and weight reloading on different weight sets" (D30).
     weight_sets: 4
     dataflow: ws
+    # Fig 11.3.1: "local accumulation up to 16k input channels", and the MVM
+    # engine section says what that means — "the integer arithmetic unit
+    # accumulates the partial products from a large MVM operation WITHOUT
+    # storing intermediate results back to memory". The datapath of Fig
+    # 11.3.4(a) is bit-serial feeder -> 16 IMC banks -> 512x26-bit accumulators
+    # -> output serializer -> integer arithmetic unit (across k-slices) ->
+    # 64x32-bit -> DPU. So a contraction up to this deep is summed in ONE AI
+    # core's periphery and never reaches L1; past it, the partials leave and the
+    # DPU pays for them (docs/CORRECTIONS.md D62).
+    local_accumulation_inputs: 16384
   # The DPU: "a data processing unit (DPU) for element-wise vector operations and
   # activations". Distinct silicon from the MVM engine, so norms, requantisation
   # and activations do not get charged at the array's rate (docs/CORRECTIONS.md

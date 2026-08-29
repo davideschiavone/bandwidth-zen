@@ -6,7 +6,10 @@ operation::
 
     dram_bytes = (1 - r) * weight_bytes + input + output + scratch
     t_dram     = dram_bytes / (dram_bandwidth * bandwidth_efficiency)
-    t_compute  = flops / (peak_flops * achieved_fraction * shape_utilisation)
+    t_matrix   = flops / (peak_flops * achieved_fraction * shape_utilisation)
+    t_vector   = (p - 1) * M * N / vector_flops        [a cut contraction, D62]
+    t_compute  = max(t_matrix, t_vector)   [partials summed on chip, overlapped]
+               = t_matrix + t_vector       [summed through DRAM, serialised]
     t_fixed    = per_op_overhead, for dispatched operations only
     latency    = max(t_dram, t_compute) + t_fixed      [double buffering fits]
                = t_dram + t_compute      + t_fixed      [otherwise]
@@ -31,7 +34,7 @@ from bwz.calibration import (
 )
 from bwz.graph.ops import MatmulAttrs, Operation, OpType
 from bwz.operators.base import OpCost
-from bwz.report import Bound, OpResult
+from bwz.report import Bound, OpResult, ReductionPlacement
 from bwz.spec.dtypes import DType
 from bwz.spec.hardware_spec import ComputeUnit, Dataflow, HardwareSpec
 
@@ -249,23 +252,34 @@ def op_roofline(
         k_partitions=machine.k_partitions,
     )
     rate = machine.rate_for(op.op_type)
-    t_compute = cost.flops / (rate * utilisation) if cost.flops > 0 and utilisation > 0 else 0.0
+    t_matrix = cost.flops / (rate * utilisation) if cost.flops > 0 and utilisation > 0 else 0.0
 
     t_fixed = machine.per_op_overhead_s if op.op_type in DISPATCHED_OP_TYPES else 0.0
 
-    # Split-K's second kernel (D53). Nothing here fires unless the deployment
-    # asked for it: `reduction_cost` returns NO_REDUCTION for every grid whose
-    # partials meet in an accumulator instead of in DRAM. The three terms go to
-    # the three lanes that actually pay them — the round trip to DRAM, the
-    # additions to the *vector* unit (a matrix engine does MAC and nothing else,
-    # D27), the second launch to t_fixed.
+    # Summing the partials a cut contraction leaves (D53/D62). Nothing here fires
+    # for a grid that does not cut K, or for one whose unit accumulates K in its
+    # own periphery. The three terms go to the three lanes that actually pay
+    # them — the round trip to DRAM, the additions to the *vector* unit (a matrix
+    # engine does MAC and nothing else, D27), the second launch to t_fixed.
     reduction = _reduction_for(op, cost, machine)
     t_reduce = (
         reduction.partial_sums / machine.effective_vector_flops_per_s
         if machine.effective_vector_flops_per_s > 0
         else 0.0
     )
-    t_compute += t_reduce
+    # Reduction overlap, and NOT double buffering — that word is already spoken
+    # for, one level up, between the DRAM load and the compute (D5a). This is
+    # between the two *engines* inside compute: the matrix cores build slice n+1
+    # while the vector unit sums slice n, so the steady state is the slower of
+    # the two. Fill and drain are omitted, exactly as max(t_dram, t_compute)
+    # omits them a level up (D19). A DRAM reduction cannot pipeline that way —
+    # the GEMM has to have finished everywhere before the partials are all
+    # there — so it serialises, which is what split-K has always been charged.
+    t_compute = (
+        max(t_matrix, t_reduce)
+        if reduction.placement is ReductionPlacement.ON_CHIP
+        else t_matrix + t_reduce
+    )
     t_fixed += reduction.dispatches * machine.per_op_overhead_s
 
     # Kept out of read_bytes/write_bytes rather than split half and half into
@@ -291,7 +305,9 @@ def op_roofline(
         dram_weight_read_bytes=weight_read_bytes,
         dram_activation_read_bytes=activation_read_bytes,
         dram_reduction_bytes=reduction.dram_bytes,
+        t_arith_s=t_matrix,
         t_reduce_s=t_reduce,
+        reduction_placement=reduction.placement,
         arithmetic_intensity=cost.arithmetic_intensity,
         utilization=utilisation,
         t_dram_s=t_dram,
@@ -303,13 +319,14 @@ def op_roofline(
 
 
 def _reduction_for(op: Operation, cost: OpCost, machine: MachineModel) -> ReductionCost:
-    """What summing this operation's partial results costs (D53).
+    """What summing this operation's partial results costs (D53/D62).
 
     :data:`~analysis.stationarity.NO_REDUCTION` for everything but a matmul on a
-    grid that materialises partials, which today means split-K alone. The
-    accumulator width is read back out of the result the operator model already
-    sized — ``output_bytes / (M*N)`` — rather than taken from the deployment's
-    precision, so it is the same width the report writes C at.
+    grid that cuts the contraction. The accumulator width is read back out of the
+    result the operator model already sized — ``output_bytes / (M*N)`` — rather
+    than taken from the deployment's precision, so it is the same width the
+    report writes C at, and the same width the capacity test in
+    :func:`~analysis.stationarity.reduction_placement` measures against.
     """
     if not isinstance(op.attrs, MatmulAttrs) or machine.unit.systolic_dims is None:
         return NO_REDUCTION
@@ -317,7 +334,12 @@ def _reduction_for(op: Operation, cost: OpCost, machine: MachineModel) -> Reduct
     grid = grid_for(machine.stationarity, op.attrs, rows, cols, k_partitions=machine.k_partitions)
     elements = op.attrs.m * op.attrs.n
     accumulator_bytes = cost.output_bytes / elements if elements else 0.0
-    return reduction_cost(grid, accumulator_bytes)
+    return reduction_cost(
+        grid,
+        accumulator_bytes,
+        unit=machine.unit,
+        on_chip_capacity_bytes=machine.chip.on_chip_capacity_bytes,
+    )
 
 
 def classify(t_dram: float, t_compute: float, t_fixed: float) -> Bound:

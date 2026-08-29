@@ -15,7 +15,14 @@ from bwz.analysis.memory import infeasibility_reasons, plan_memory, usable_memor
 from bwz.analysis.pipeline import PipelineTrace, build_trace
 from bwz.analysis.roofline import MachineModel, compute_dtype, idealised, machine_model
 from bwz.analysis.schedule import run_phase
-from bwz.analysis.stationarity import refusal_reason
+from bwz.analysis.stationarity import (
+    K_ON_GRID,
+    UNBOUNDED_ACCUMULATION,
+    TileGrid,
+    accumulation_depth,
+    refusal_reason,
+    residency_phrase,
+)
 from bwz.graph.builder import build_graphs, phases_for
 from bwz.graph.ops import GraphPhase
 from bwz.operators.base import cost_of
@@ -25,16 +32,19 @@ from bwz.report import (
     FlipMargin,
     MemoryPlan,
     Meta,
+    OpResult,
     PhaseResult,
+    ReductionPlacement,
     Report,
     Summary,
     config_hash,
 )
 from bwz.spec.deployment import AStrategy, BDataflow, DeploymentSpec
-from bwz.spec.hardware_spec import Dataflow, HardwareSpec
+from bwz.spec.dtypes import DType
+from bwz.spec.hardware_spec import ComputeUnit, Dataflow, HardwareSpec
 from bwz.spec.loaders import AnyModelSpec
 from bwz.spec.model_spec import MatmulSpec, ModelFamily, TransformerSpec
-from bwz.units import format_bytes, format_quantity
+from bwz.units import format_bytes, format_quantity, format_time
 
 __all__ = [
     "MachineModel",
@@ -91,7 +101,9 @@ def analyze(model: AnyModelSpec, hardware: HardwareSpec, deployment: DeploymentS
             (u for u in hardware.compute_units if u.supports(dtype)),
             key=lambda u: u.peak_flops_per_s(hardware.clock_hz, dtype),
         )
-        refusal = refusal_reason(matrix_unit, deployment.stationarity)
+        refusal = refusal_reason(matrix_unit, deployment.stationarity) or _reduction_refusal(
+            hardware, dtype, matrix_unit, deployment
+        )
         if refusal is not None:
             return _infeasible(meta, (refusal,))
 
@@ -192,6 +204,64 @@ def trace_phases(
             ),
         )
         for result in report.phases
+    )
+
+
+def _reduction_refusal(
+    hardware: HardwareSpec,
+    dtype: DType,
+    matrix_unit: ComputeUnit,
+    deployment: DeploymentSpec,
+) -> str | None:
+    """Why a *requested* K-on-grid stationarity cannot be costed here (D62).
+
+    Two refusals, both about a cost that would otherwise be charged to the wrong
+    engine or counted twice — and both restricted to a stationarity the caller
+    asked for, because a unit is never refused its own declared dataflow.
+
+    **No genuine vector unit.** ``machine_model`` falls back to the matrix unit
+    when no non-systolic unit supports the dtype, so on A100 at int8 the "vector
+    unit" *is* the tensor core. Charging elementwise adds there would price them
+    at 437 TOP/s — free, physically nonsense, and wrong in the one direction
+    that matters: it would make ``ws`` look nearly as good as ``os``, which is
+    the opposite of the finding. Refused, naming the chip, the dtype and what is
+    missing. Declaring int8 on the CUDA cores (DP4A) would unlock these cases,
+    but ``vector_unit`` also prices every non-matrix op (D27), so that moves
+    documented int8 figures and belongs in its own change.
+
+    **``--split-k`` on a grid that already carries K.** Cutting the contraction
+    twice is incoherent, and the flag is an output-stationary knob (D53). Said
+    rather than accepted-and-ignored (CLAUDE.md #8).
+    """
+    requested = deployment.stationarity
+    if requested is None or requested not in K_ON_GRID:
+        return None
+    if deployment.split_k > 1:
+        return (
+            f"--split-k {deployment.split_k} cannot be combined with "
+            f"stationarity={requested.value!r}: that grid already carries K on one of its axes, "
+            f"so the contraction would be cut twice and its partials summed twice. Split-K is an "
+            f"output-stationary knob (D53) — drop one of the two flags."
+        )
+    machine = machine_model(hardware, dtype, stationarity=requested)
+    if machine.has_vector_unit or accumulation_depth(matrix_unit) == UNBOUNDED_ACCUMULATION:
+        return None
+    non_matrix = sorted(
+        {
+            d.value
+            for u in hardware.compute_units
+            if u.systolic_dims is None
+            for d in u.supported_dtypes
+        }
+    )
+    return (
+        f"stationarity={requested.value!r} puts K on the tile grid, so partial sums leave "
+        f"{matrix_unit.name} and something has to add them — but {hardware.name} declares no "
+        f"non-systolic compute unit supporting {dtype.value!r}, so the only engine available is "
+        f"{matrix_unit.name} itself. A matrix engine does matrix-multiply-accumulate and nothing "
+        f"else (D27), and charging elementwise adds at its rate would report this decomposition "
+        f"as nearly free. Refused rather than mispriced (D62). Non-systolic units here support "
+        f"{non_matrix or 'nothing'}; run at one of those dtypes, or use the chip's own dataflow."
     )
 
 
@@ -387,6 +457,9 @@ def _assumptions(
     )
 
     if isinstance(model, MatmulSpec):
+        # The one operation a MatmulSpec has, and the only place the reduction's
+        # placement and its two engine times are recorded (D62).
+        matmul_result = phases[0].ops[0] if phases and phases[0].ops else None
         out.append(
             f"Arithmetic runs at {model.operand_dtype.value}, the wider of the two operands "
             f"(A {model.a_dtype.value}, B {model.b_dtype.value}): both enter the array through "
@@ -403,7 +476,7 @@ def _assumptions(
             "instead (docs/CORRECTIONS.md D33)."
         )
         if dataflow is not None:
-            out.extend(_stationarity_assumptions(dataflow, machine))
+            out.extend(_stationarity_assumptions(dataflow, machine, matmul_result))
             if dataflow.a_strategy is AStrategy.STREAM:
                 a_line = (
                     f"A: streamed per tile (D31), {dataflow.tiles_per_a_event}x the staged total "
@@ -493,12 +566,17 @@ def _assumptions(
     return tuple(out)
 
 
-def _stationarity_assumptions(dataflow: DataflowPlan, machine: MachineModel) -> list[str]:
-    """What the decomposition is, who chose it, and what it costs (D53).
+def _stationarity_assumptions(
+    dataflow: DataflowPlan, machine: MachineModel, op: OpResult | None = None
+) -> list[str]:
+    """What the decomposition is, who chose it, and what it costs (D53/D62).
 
     Every one of these is load-bearing: the tile count, the wave occupancy and
     the reduction all follow from the stationarity, so a reader who cannot see
-    which one ran cannot check any of the three.
+    which one ran cannot check any of the three. *op* is the matmul's own
+    result, which is where the reduction's placement and its two engine times
+    are read from — recomputing them here would be a second opinion about the
+    same numbers.
     """
     grid = dataflow.grid
     if grid is None:
@@ -507,13 +585,14 @@ def _stationarity_assumptions(dataflow: DataflowPlan, machine: MachineModel) -> 
             f"array geometry, so there is no tile grid to decompose against and no reduction to "
             f"charge (D53)."
         ]
+    adds = (grid.k_slices - 1) * grid.m * grid.n
     chosen = (
         f"asked for with stationarity={dataflow.stationarity.value!r}"
         if dataflow.requested_stationarity is not None
         else f"{machine.unit.name}'s own declared dataflow"
     )
     out = [
-        f"Stationarity {dataflow.stationarity.value} — {grid.resident.value} stays resident "
+        f"Stationarity {dataflow.stationarity.value} — {residency_phrase(grid, machine.unit)} "
         f"({chosen}). The parallel grid is {grid.rows} x {grid.cols} tiles "
         f"({grid.row_dim.value} x {grid.col_dim.value}, cut by the "
         f"{grid.tile_rows}x{grid.tile_cols} array), each sweeping {grid.swept_dim.value}; "
@@ -547,16 +626,103 @@ def _stationarity_assumptions(dataflow: DataflowPlan, machine: MachineModel) -> 
                 f"flag is inert here and costs nothing. It is an output-stationary knob (D53)."
             )
         out.append(
-            f"{dataflow.stationarity.value} carries K on the tile grid, so each tile computes a "
-            f"partial result and the same unit revisits the same output cell on a later wave. "
-            f"The partials are assumed to meet in an on-chip accumulator, which this machine "
-            f"model charges no bandwidth for (D5a). Its working set is the whole output — "
-            f"{grid.accumulator_elements:,} accumulators — and where that does not fit, a real "
-            f"compiler re-blocks and re-reads A and B rather than spilling C. Those re-reads are "
-            f"the traffic docs/MODEL.md 6.2 already declines to model, so this stays a lower "
-            f"bound (D53)."
+            f"{dataflow.stationarity.value} carries K on the tile grid, so each of the "
+            f"{grid.k_slices:,} k-slices computes a partial value for every one of the "
+            f"{grid.accumulator_elements:,} output elements, and the {adds:,.0f} additions that "
+            f"sum them are NOT new arithmetic — 2*M*N*K already counts them. What changes is "
+            f"where they run: they leave the matrix engine's own accumulator, which is the whole "
+            f"cost. The sliver this double-counts is those same adds at the matrix rate (D53/D62)."
         )
+        out.extend(_placement_assumptions(grid, machine, op))
     return out
+
+
+def _placement_assumptions(grid: TileGrid, machine: MachineModel, op: OpResult | None) -> list[str]:
+    """Where this grid's partials met, and everything that was *not* charged (D62).
+
+    The three placements make three different claims, and each of them rests on
+    something this model does not have: an on-chip bandwidth term, a
+    synchronisation cost, or an enforced wave assignment. All three are named
+    here rather than left implicit — the reduction is the one part of a K-on-grid
+    decomposition whose cost is a modelling choice rather than an arithmetic
+    consequence.
+    """
+    if op is None:
+        return []
+    engine = machine.vector_unit.name
+    rate = format_quantity(machine.effective_vector_flops_per_s, "OP/s")
+    ratio = (
+        machine.effective_flops_per_s / machine.effective_vector_flops_per_s
+        if machine.effective_vector_flops_per_s > 0
+        else 0.0
+    )
+    depth = accumulation_depth(machine.unit)
+
+    if op.reduction_placement is ReductionPlacement.LOCAL:
+        source = (
+            f"{machine.unit.name} declares local_accumulation_inputs={depth:,.0f} and K="
+            f"{grid.k:,} is inside it, so every k-slice of an output element is summed in that "
+            f"unit's own periphery and never reaches on-chip memory. Nothing is charged, which "
+            f"is the hardware's answer rather than a modelling shortcut."
+            if depth != UNBOUNDED_ACCUMULATION
+            else f"{machine.unit.name} runs {machine.stationarity.value} natively but declares no "
+            f"local_accumulation_inputs, so this model assumes K accumulates locally at ANY "
+            f"depth and charges nothing. That is the claim it has always made for a K-on-grid "
+            f"grid, and it is unfalsifiable as it stands: declaring a depth would bound it."
+        )
+        return [
+            f"Reduction: LOCAL. {source}",
+            f"The locality that makes it free also needs the {grid.k_slices:,} k-slices of one "
+            f"output column to land on the SAME unit, and the model's round-robin tile order "
+            f"(tile = k_slice * {grid.cols} + column) only does that when the column count "
+            f"divides the unit count. That assignment is assumed, not enforced (D62).",
+        ]
+
+    if op.reduction_placement is ReductionPlacement.ON_CHIP:
+        binds = op.t_reduce_s >= op.t_arith_s
+        return [
+            f"Reduction: ON_CHIP. {machine.unit.name} declares no accumulator that survives "
+            f"across k-slices, so the partials go out to on-chip memory and "
+            f"{engine} adds them at {rate} — {ratio:.0f}x below {machine.unit.name} (D27). That "
+            f"is {format_time(op.t_reduce_s)} of vector work against "
+            f"{format_time(op.t_arith_s)} of matrix work, and "
+            + (
+                "the VECTOR unit is what binds: this operation is compute-bound on the engine "
+                "that is not doing the multiplies."
+                if binds
+                else "the matrix engine still binds, so the reduction costs no latency here at "
+                "all — it costs capacity."
+            ),
+            "Reduction overlap (NOT double buffering, which is the DRAM-to-compute overlap one "
+            "level up): the matrix engine builds the next slice while the vector unit sums the "
+            "last, so compute is max(matrix, vector) rather than their sum. Steady state only — "
+            "pipeline fill and drain are omitted, exactly as max(t_dram, t_compute) omits them "
+            "(D19) — and synchronisation between the two engines is NOT charged: the vector unit "
+            "is assumed to know when a partial has landed, for free.",
+            f"The partials' on-chip traffic is NOT charged: {grid.k_slices:,} passes over the "
+            f"whole output cross on-chip memory in each direction, and the v1 machine model has "
+            f"no on-chip bandwidth term to price them against (D5a/D5b). What IS charged is the "
+            f"capacity — {grid.accumulator_elements:,} live accumulators against "
+            f"{format_bytes(machine.chip.on_chip_capacity_bytes)} — and past that the placement "
+            f"flips to DRAM, discontinuously.",
+        ]
+
+    if op.reduction_placement is ReductionPlacement.DRAM and not grid.materialises_partials:
+        return [
+            f"Reduction: DRAM, by capacity. The {grid.accumulator_elements:,} live accumulators "
+            f"do not fit {format_bytes(machine.chip.on_chip_capacity_bytes)} of on-chip memory, "
+            f"so the partials cannot stay there: "
+            f"{format_bytes(op.dram_reduction_bytes)} of round trip, "
+            f"{format_time(op.t_reduce_s)} of adds on {engine}, and a second dispatch — "
+            f"serialised behind the matrix work rather than overlapped with it, since nothing can "
+            f"be summed until the slice that feeds it has been written. This is a CLIFF: one "
+            f"element of output less and the same decomposition would have been ON_CHIP.",
+            "A real compiler would re-block the output instead and re-read A and B, which is the "
+            "traffic docs/MODEL.md 6.2 already declines to model. Charging the spill while that "
+            "stands prices one horn of the dilemma and not the other, so read this as an upper "
+            "bound on the reduction and the re-blocked alternative as the lower one (D62).",
+        ]
+    return []
 
 
 def bound_of(report: Report, phase: GraphPhase) -> Bound | None:

@@ -39,6 +39,33 @@ class Bound(StrEnum):
     LATENCY_BOUND = "LATENCY_BOUND"
 
 
+class ReductionPlacement(StrEnum):
+    """Where a decomposition's partial sums are added up (D62).
+
+    Only ``os`` without split-K escapes the question. Every other grid cuts the
+    contraction across units, and what the cut costs depends entirely on where
+    the pieces meet — which is a property of the *hardware*, not of the
+    dataflow's name.
+    """
+
+    NONE = "none"
+    """K is not cut: nothing to add. ``os``, and ``rs`` — which spreads K inside
+    one array, where the wiring sums it and D5a gives no term to charge."""
+    LOCAL = "local"
+    """Summed in the unit's own periphery, free. Requires a declared accumulator
+    deep enough for K (``ComputeUnit.local_accumulation_inputs``): Metis's
+    16384-input local accumulation is the shipped example."""
+    ON_CHIP = "on_chip"
+    """Partials go out to the last-level cache and the *vector* unit adds them,
+    overlapped with the matrix work — so the phase costs ``max(matrix, vector)``,
+    not their sum. Costs vector time and on-chip capacity; the cache traffic
+    itself is unmodelled (D5a) and named in ``assumptions``."""
+    DRAM = "dram"
+    """Partials cross DRAM and come back, and the adds serialise behind the
+    arithmetic. Split-K's two kernels, or an accumulator too big to hold on
+    chip — a cliff the report has to announce, not a slope."""
+
+
 class Confidence(StrEnum):
     """How much weight a number deserves.
 
@@ -87,17 +114,37 @@ class OpResult:
     """The share of :attr:`dram_read_bytes` that is operand A plus scratch — the
     operand that streams *through* the array rather than sitting in it."""
     dram_reduction_bytes: float = 0.0
-    """Split-K only: the partial results' round trip, counted in
+    """``ReductionPlacement.DRAM`` only: the partial results' round trip, counted in
     :attr:`dram_bytes` and in **neither** :attr:`dram_read_bytes` nor
     :attr:`dram_write_bytes`. Those two are the operands' traffic — A and B in,
     C out — and this is neither: it is one kernel's output read back as the
     next kernel's input, half write and half read (D53). Kept apart so the
     three still sum to :attr:`dram_bytes` and the trace can draw the second
     kernel as the separate thing it is."""
+    t_arith_s: float = 0.0
+    """This operation's own arithmetic, on whichever engine runs it: the matrix
+    engine for a GEMM, the vector unit for a norm. :attr:`t_compute_s` is this
+    combined with :attr:`t_reduce_s` — their ``max`` or their sum, per
+    :attr:`reduction_placement` — and equals it exactly when nothing is reduced.
+
+    Carried so the two halves of a K-on-grid decomposition stay legible: without
+    it an overlapped reduction is invisible in the report, and "compute-bound"
+    hides which engine the compute was on (D62)."""
     t_reduce_s: float = 0.0
-    """Split-K only: the reduction kernel's additions, on the vector unit. Part
-    of :attr:`t_compute_s`, broken out so the trace can draw the second kernel
-    as the separate thing it is."""
+    """The reduction's additions, on the vector unit — ``(p-1)*M*N`` of them at
+    :attr:`MachineModel.effective_vector_flops_per_s`.
+
+    **Not necessarily a summand of** :attr:`t_compute_s` (D62). It was, while
+    split-K was the only reduction there was: a second kernel runs after the
+    first, so ``t_compute = t_matrix + t_vector``. Under
+    :attr:`ReductionPlacement.ON_CHIP` the two engines pipeline instead — the
+    matrix cores build the next slice while the vector unit sums the last — so
+    ``t_compute = max(t_matrix, t_vector)`` and this is the second argument, not
+    an addend. :attr:`reduction_placement` says which, and when it equals
+    ``t_compute_s`` the *vector* unit is what binds."""
+    reduction_placement: ReductionPlacement = ReductionPlacement.NONE
+    """Where this operation's partial sums met, and therefore how
+    :attr:`t_reduce_s` combines with the matrix time (D62)."""
 
 
 @dataclass(frozen=True, slots=True)

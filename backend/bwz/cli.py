@@ -27,7 +27,13 @@ from bwz.analysis.compare import head_to_head, prefill_crossover
 from bwz.analysis.dataflow import plan_dataflow
 from bwz.analysis.pipeline import Lane, PipelineTrace, build_trace, grid_of
 from bwz.analysis.roofline import MachineModel, compute_dtype
-from bwz.analysis.stationarity import grid_for
+from bwz.analysis.stationarity import (
+    UNBOUNDED_ACCUMULATION,
+    TileGrid,
+    accumulation_depth,
+    grid_for,
+    residency_phrase,
+)
 from bwz.emit import check as emit_check
 from bwz.emit import emit_matmul
 from bwz.figures import (
@@ -42,7 +48,7 @@ from bwz.graph import build_graph
 from bwz.graph.ops import GraphPhase, MatmulAttrs
 from bwz.kernels import encoder_layer_kernel, matmul_kernel
 from bwz.operators.base import cost_of
-from bwz.report import Bound, Report
+from bwz.report import Bound, OpResult, ReductionPlacement, Report
 from bwz.spec import (
     CNNSpec,
     CustomSpec,
@@ -263,6 +269,62 @@ def _colour_bound(bound: Bound) -> str:
         Bound.LATENCY_BOUND: "red",
     }[bound]
     return f"[{colour}]{bound.value}[/{colour}]"
+
+
+def _reduction_row(
+    op: OpResult, grid: TileGrid, machine: MachineModel, accumulator_bytes: float
+) -> tuple[str, str]:
+    """The ``value`` and ``derivation`` cells of the reduction row (D62).
+
+    The row exists because an overlapped reduction is otherwise *invisible*: it
+    changes no latency, so a table showing only latency reports ``ws`` and ``os``
+    as the same machine while hiding the entire mechanism that makes them
+    differ. What the reader needs is the count, the engine, its rate, and which
+    of the two engines binds.
+    """
+    slices = grid.k_slices
+    adds = (slices - 1) * grid.m * grid.n
+    engine = machine.vector_unit.name
+    rate = format_quantity(machine.effective_vector_flops_per_s, "OP/s")
+    depth = accumulation_depth(machine.unit)
+
+    if op.reduction_placement is ReductionPlacement.LOCAL:
+        how = (
+            f"declares local accumulation of {depth:,.0f} inputs and K={grid.k:,} is inside it"
+            if depth != UNBOUNDED_ACCUMULATION
+            else f"runs {machine.stationarity.value} natively and declares no accumulator depth, "
+            f"so the model assumes any K accumulates locally"
+        )
+        return "local — free", (
+            f"{slices:,} k-slices summed in {machine.unit.name}'s own periphery: it {how}, so the "
+            f"partials never leave the unit"
+        )
+
+    if op.reduction_placement is ReductionPlacement.ON_CHIP:
+        under = (
+            f"the VECTOR unit binds — {format_time(op.t_arith_s)} of matrix work runs under it"
+            if op.t_reduce_s >= op.t_arith_s
+            else f"hidden under {format_time(op.t_arith_s)} of matrix work "
+            f"({op.t_reduce_s / op.t_arith_s:.0%} of it), so it costs capacity, not latency"
+        )
+        return f"on chip — {format_time(op.t_reduce_s)}", (
+            f"{adds:,.0f} adds on {engine} at {rate}, overlapped with the matrix work "
+            f"(compute is the max of the two, not the sum): {under}"
+        )
+
+    live = format_bytes(grid.accumulator_elements * accumulator_bytes)
+    why = (
+        "CUTLASS's two kernels, so the partials have nowhere to live in between"
+        if grid.materialises_partials
+        else f"the {live} of live accumulators do NOT fit the "
+        f"{format_bytes(machine.chip.on_chip_capacity_bytes)} on chip, so the placement flipped "
+        f"from on-chip to DRAM — a cliff, not a slope"
+    )
+    return f"through DRAM — {format_time(op.t_reduce_s)}", (
+        f"{adds:,.0f} adds on {engine} at {rate} plus "
+        f"{format_bytes(op.dram_reduction_bytes)} of round trip, serialised after the matrix "
+        f"work: {why}"
+    )
 
 
 def _memory_table(report: Report) -> Table:
@@ -1120,7 +1182,7 @@ def matmul(
         table.add_row(
             "stationarity",
             machine.stationarity.value,
-            f"{grid.resident.value} resident, {grid.rows:,} x {grid.cols:,} tiles "
+            f"{residency_phrase(grid, machine.unit)}, {grid.rows:,} x {grid.cols:,} tiles "
             f"({grid.row_dim.value} x {grid.col_dim.value}) each sweeping {grid.swept_dim.value}"
             + (
                 f" — {machine.unit.name}'s own"
@@ -1135,6 +1197,15 @@ def matmul(
                 "CUTLASS's two kernels: partials out to DRAM and back, summed on "
                 f"{machine.vector_unit.name}",
             )
+        # The reduction, on the face of the table. Under an overlapped placement
+        # it costs no latency at all, and a table that shows only the latency
+        # would report the two decompositions as identical while hiding the
+        # entire mechanism that makes them differ (D62).
+        if op.reduction_placement is not ReductionPlacement.NONE:
+            table.add_row(
+                "reduction",
+                *_reduction_row(op, grid, machine, bytes_per_element(result)),
+            )
     table.add_row(
         "shape utilisation",
         f"{op.utilization:.2%}",
@@ -1145,7 +1216,20 @@ def matmul(
         ),
     )
     table.add_row("t_dram", format_time(op.t_dram_s), "traffic / effective bandwidth")
-    table.add_row("t_compute", format_time(op.t_compute_s), "operations / (effective peak x util)")
+    table.add_row(
+        "t_compute",
+        format_time(op.t_compute_s),
+        "operations / (effective peak x util)"
+        + (
+            ""
+            if op.reduction_placement in (ReductionPlacement.NONE, ReductionPlacement.LOCAL)
+            else (
+                ", overlapped with the reduction: max of the two engines"
+                if op.reduction_placement is ReductionPlacement.ON_CHIP
+                else ", plus the reduction serialised behind it"
+            )
+        ),
+    )
     table.add_row("t_fixed", format_time(op.t_fixed_s), "one kernel dispatch")
     table.add_row("[bold]latency[/bold]", f"[bold]{format_time(op.latency_s)}[/bold]", "")
     table.add_row("[bold]verdict[/bold]", _colour_bound(op.bound), "")

@@ -19,6 +19,16 @@ compute_units:
                                    # shape needing a cross-core reduction — is the exception,
                                    # for "too few threadblocks to efficiently occupy the
                                    # entire GPU". docs/CORRECTIONS.md D53.
+    supported_dataflows: [os, ws, is]
+                                   # os is what it runs; ws and is are declared so the other
+                                   # two decompositions can be MEASURED against it on the same
+                                   # silicon (D62). No vendor runs a GEMM either way: both put
+                                   # K on the tile grid, so several SMs hold partials of the
+                                   # same C indices, and a matrix-multiply-accumulate unit has
+                                   # no accumulator that persists across them — hence no
+                                   # local_accumulation_inputs here, and hence the partials
+                                   # must go through the last-level cache and be summed by the
+                                   # CUDA cores.
   - name: cuda_core
     count: 16896                   # 132 SMs x 128 FP32 lanes
     ops_per_cycle_per_unit: 1

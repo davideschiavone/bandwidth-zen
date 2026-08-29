@@ -24,6 +24,7 @@ from bwz.spec import (
     to_document,
     to_yaml,
 )
+from bwz.spec.hardware_spec import Dataflow
 from bwz.spec.loaders import _MODEL_ADAPTER, AnyModelSpec
 
 
@@ -225,3 +226,36 @@ def test_the_largest_array_ignores_units_with_no_geometry() -> None:
         for unit in chip.compute_units
         if unit.count == largest_declared_array()[0] and unit.name in largest_declared_array()[1]
     )
+
+
+def test_the_mma_units_declare_all_three_grids_and_no_local_accumulator() -> None:
+    """D62. The four matrix-core profiles can be *asked* for ``ws`` and ``is``.
+
+    They still run ``os`` natively — the declaration moves no default — and none
+    of them declares ``local_accumulation_inputs``, which is the physical claim
+    that makes the exercise interesting: an MMA unit's accumulator lives in one
+    threadblock's registers, so k-slices landing on different SMs have nothing
+    to meet in and their partials must go out to the last-level cache.
+    """
+    for chip_id in ("a100_80gb", "h100_sxm", "jetson_orin", "mi300x"):
+        unit = load_chip(chip_id).compute_units[0]
+        assert unit.dataflow is Dataflow.OUTPUT_STATIONARY, chip_id
+        assert set(unit.dataflows()) == {
+            Dataflow.OUTPUT_STATIONARY,
+            Dataflow.WEIGHT_STATIONARY,
+            Dataflow.INPUT_STATIONARY,
+        }, chip_id
+        assert unit.local_accumulation_inputs == 0, chip_id
+
+
+def test_metis_declares_the_16k_accumulator_the_paper_states() -> None:
+    """ISSCC 2024 11.3 Fig. 11.3.1: "local accumulation up to 16k input channels".
+
+    16k input channels is 32 of the array's own 512-input k-slices, so a
+    contraction up to K=16384 is summed inside one AI core's periphery and never
+    reaches L1 (D62). Every documented Metis shape is K=8192, half of it.
+    """
+    d_imc = load_chip("metis_aipu").compute_units[0]
+    assert d_imc.name == "d_imc"
+    assert d_imc.local_accumulation_inputs == 16384
+    assert d_imc.local_accumulation_inputs == 32 * d_imc.systolic_dims[0]  # type: ignore[index]

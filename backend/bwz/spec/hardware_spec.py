@@ -91,6 +91,28 @@ class ComputeUnit(SpecModel):
         gt=0,
         description="Array-sized weight tiles ONE unit holds at once. Metis declares 4.",
     )
+    local_accumulation_inputs: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Contraction inputs this unit can accumulate WITHOUT the partial sum "
+            "leaving it. 0 means no accumulator persists across k-slices."
+        ),
+    )
+    """How deep a contraction one unit can accumulate in its own periphery.
+
+    Metis declares 16384 (ISSCC 2024 11.3, Fig. 11.3.1: "local accumulation up
+    to 16k input channels"), and the paper is explicit about the mechanism — an
+    integer arithmetic unit sums the partial products of a large MVM
+    "without storing intermediate results back to memory". An MMA unit declares
+    nothing: its accumulator is per-instruction, in one threadblock's registers,
+    and nothing persists across k-slices that land on different SMs.
+
+    Read through :func:`~bwz.analysis.stationarity.accumulation_depth`, never
+    directly: a unit whose *native* dataflow already carries K on the tile grid
+    is claiming such an accumulator by construction, and the depth it does not
+    state is treated as unbounded there (D62).
+    """
     dataflow: Dataflow = Dataflow.WEIGHT_STATIONARY
     """This unit's *native* dataflow — the one it uses unless asked otherwise."""
     supported_dataflows: tuple[Dataflow, ...] = Field(
