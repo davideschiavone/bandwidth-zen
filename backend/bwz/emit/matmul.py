@@ -926,8 +926,16 @@ def _placement_note(placement: ReductionPlacement) -> tuple[str, ...]:
     a file emitted for another would be exactly the kind of adjacent-to-true
     comment this repository keeps having to correct.
     """
+    if placement is ReductionPlacement.NONE:
+        return (
+            "",
+            "    Not that there are any here: K fits inside ONE instruction tile at this shape,",
+            "    so the grid has a single k-slice, every block is written once and nothing is",
+            "    summed. The count below is 0, and the report charges no reduction.",
+        )
     if placement is ReductionPlacement.LOCAL:
         return (
+            "",
             "    The report charges NOTHING for them: this unit declares an accumulator deep",
             "    enough for the whole contraction, so the partials are summed in its own",
             "    periphery and never reach on-chip memory (D62). The count below is still",
@@ -935,6 +943,7 @@ def _placement_note(placement: ReductionPlacement) -> tuple[str, ...]:
         )
     if placement is ReductionPlacement.ON_CHIP:
         return (
+            "",
             "    The report charges these to the VECTOR unit — a matrix engine does",
             "    matrix-multiply-accumulate and nothing else (D27) — and OVERLAPS them with",
             "    the arithmetic above: it costs max(matrix, vector), not their sum. The",
@@ -942,6 +951,7 @@ def _placement_note(placement: ReductionPlacement) -> tuple[str, ...]:
         )
     if placement is ReductionPlacement.DRAM:
         return (
+            "",
             "    The report charges these to the VECTOR unit (D27) and, because the whole",
             "    M x N accumulator does not fit on chip, a DRAM round trip besides — so they",
             "    serialise behind the arithmetic rather than overlapping it (D62).",
@@ -992,7 +1002,6 @@ def _weight_nest(unit: ComputeUnit, placement: ReductionPlacement) -> list[Line]
             "    meet in `partials`, which counts the additions it performs. That `partials`",
             "    has to exist at all is the difference between this decomposition and",
             "    output-stationary, in one object.",
-            "",
             *_placement_note(placement),
             '    """',
             "    kt, nt = tile_row(tile), tile_col(tile)",
@@ -1053,7 +1062,6 @@ def _input_nest(placement: ReductionPlacement) -> list[Line]:
             "    than its width — so this tile owns a slice of the contraction exactly as a",
             "    weight-stationary one does, and produces PARTIALS over K (D53). They meet in",
             "    `partials`, which counts the additions it performs.",
-            "",
             *_placement_note(placement),
             '    """',
             "    mt, kt = tile_row(tile), tile_col(tile)",
