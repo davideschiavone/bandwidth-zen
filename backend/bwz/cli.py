@@ -573,17 +573,30 @@ def _draw_graph_figures(
 
 
 STATIONARITY_HELP = (
-    "Which operand stays resident, deciding the whole decomposition (D53): "
-    "os (C in the accumulator, K swept inside the tile — what cuBLAS does), "
-    "ws (B held, M streams past), is (A held, N streams past), rs (Eyeriss "
-    "row-stationary, unvalidated). Default: the chip's own. A chip that cannot "
-    "run the one you ask for is REFUSED, not clamped."
+    "Which operand stays resident — and therefore which two dimensions form the "
+    "parallel tile grid and which one each tile sweeps (D53). "
+    "os: C sits in the accumulator and K is swept INSIDE each tile, so nothing "
+    "crosses cores — what cuBLAS/CUTLASS do. "
+    "ws: the grid is K x N and M streams past each tile. "
+    "is: the grid is M x K and N streams past. "
+    "rs: Eyeriss row-stationary, unvalidated — no profile declares it. "
+    "ws and is put K ON the grid, so several cores end up holding partial values "
+    "of the SAME C elements and something has to add them: the vector unit does, "
+    "overlapped with the matrix work, unless the unit declares an accumulator deep "
+    "enough to sum them itself (D62). Default: the chip's own. One it cannot run "
+    "is REFUSED, not clamped."
 )
 SPLIT_K_HELP = (
-    "Cut the contraction into this many independent pieces when the output grid "
-    "alone cannot fill the chip. Only os has anything left to split; it costs "
-    "CUTLASS's second kernel — the partials' DRAM round trip, the adds on the "
-    "vector unit, one more dispatch (D53)."
+    "Cut the K contraction into this many independent pieces, so that ONE output "
+    "tile becomes N pieces of work instead of one. Under os a core owns an output "
+    "tile and sweeps all of K itself, so a small output leaves most of the chip "
+    "idle; splitting K multiplies the tile count by N and fills it. "
+    "The price: the N pieces each produce a partial value for the same output, "
+    "and CUTLASS sums them in a SECOND kernel — so N full M x N partials are "
+    "written to DRAM and read back, (N-1) x M x N adds run on the vector unit, "
+    "and there is one more dispatch (D53). "
+    "os only: ws and is already carry K on the tile grid, and cutting it twice is "
+    "refused rather than ignored (D62)."
 )
 
 

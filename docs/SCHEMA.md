@@ -273,7 +273,8 @@ num_chips: 2
 optimize_for: latency      # latency | throughput | energy
 constraints: {max_latency_s: 0.05, max_power_w: 700, max_memory_bytes: 8.0e+10}
 stationarity: null          # ws | os | is | rs; null = the chip's own (D53)
-split_k: 1                  # cut the contraction into N pieces; os only, costs a second kernel
+split_k: 1                  # cut K into N pieces so one output tile is N units of work; os
+                            # only, and the N partials cost CUTLASS's second kernel
 a_strategy: stage           # stage | stream | whole — a lone matmul's A residency (D33/D36)
 b_dataflow: write-ahead     # write-ahead | on-demand | persistent — when B's array write lands
 a_residency_tiles: null     # power-of-2 divisor of TILES_PER_GROUP; null = the whole grid row
@@ -289,8 +290,11 @@ iterations: 1                # invocations this report represents; only persiste
 **`stationarity` and `split_k` behave differently from the knobs below.** They are refused, not
 clamped, when the chip's matrix unit cannot run them (`feasible: false`, naming the field and the
 capability), because a stationarity is a different decomposition rather than a different ordering
-of the same work. `split_k` is meaningful only under `os` — `ws`/`is` already carry K on the grid —
-and is inert, not an error, elsewhere; `report.assumptions` says so. Unlike the knobs below they
+of the same work. `split_k` is meaningful only under `os`: it cuts K so that one output tile becomes
+`p` independent pieces of work, which is how a small output fills a large chip, and the `p` partial
+values of that tile then cost CUTLASS's second kernel. `ws`/`is` already carry K on the grid, so
+**asking for both is refused** rather than silently ignored (D62); on a chip whose *native* dataflow
+is `ws` the flag stays inert and `report.assumptions` says so. Unlike the knobs below they
 also apply to a network, since every matmul in it is decomposed the same way.
 
 **`a_strategy`, `b_dataflow` and `iterations` are single-matmul-only knobs** (`bwz matmul`,

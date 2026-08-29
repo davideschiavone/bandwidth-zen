@@ -294,9 +294,14 @@ orderings of the same work, so falling back still answers the question you asked
 a *different decomposition*, so substituting one would quietly report a number for hardware you
 never asked about.
 
-**`--split-k` cuts the contraction when the output grid alone cannot fill the chip**, which is the
-one thing that makes `os` owe a reduction. CUTLASS runs it as two kernels — a partitioned GEMM and a
-batched reduction — and the model charges both:
+**`--split-k` cuts K so that one output tile becomes several units of work.** Under `os` a core owns
+an output tile and sweeps the whole contraction inside it, so the parallelism available is the
+number of output tiles and nothing else — when that is smaller than the chip, most of the chip idles
+however long K is. Cutting K into `p` chunks makes `(tile, chunk)` the unit of work and gives `p`×
+as many. The arithmetic is unchanged; what changes is that the `p` chunks each hold a *partial*
+value of the same output, and those must be added. That is the one thing that makes `os` owe a
+reduction: CUTLASS runs it as two kernels — a partitioned GEMM and a batched reduction — and the
+model charges both.
 
 ```bash
 uv run bwz matmul -M 512 -N 512 -K 4096 -c a100_80gb --ideal --split-k 8

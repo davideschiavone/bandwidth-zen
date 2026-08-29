@@ -200,11 +200,14 @@ class DeploymentSpec(SpecModel):
         default=1,
         gt=0,
         description=(
-            "Cut the contraction into this many independent slices, for when the "
-            "output grid alone cannot fill the chip. Only meaningful under "
-            "stationarity=os, where it is the one thing that makes a reduction "
-            "necessary; ws/is already put K on the grid. Costs CUTLASS's second "
-            "kernel — see report.assumptions (D53)."
+            "Cut the K contraction into this many independent slices, so one "
+            "output tile becomes that many pieces of work: under os a core owns "
+            "an output tile and sweeps all of K itself, so a small output leaves "
+            "most of the chip idle. Each slice then holds a PARTIAL value of the "
+            "same output, and CUTLASS sums them in a second kernel — p full M x N "
+            "partials to DRAM and back, (p-1)*M*N adds on the vector unit, one "
+            "more dispatch (D53). Only meaningful under stationarity=os; ws/is "
+            "already carry K on the grid, and asking for both is refused (D62)."
         ),
     )
     a_strategy: AStrategy = AStrategy.STAGE

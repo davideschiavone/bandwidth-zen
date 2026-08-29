@@ -76,7 +76,7 @@ so a batch of 128 is `-M 128`.
 | `--ideal` | set both efficiency de-ratings to 1.0: a datasheet ceiling, not a prediction |
 | `--pipeline` / `--no-pipeline` | lane occupancy table (default on) |
 | `--stationarity` | `os` \| `ws` \| `is` \| `rs` — which operand stays resident, §2.5.1. Default: the chip's own |
-| `--split-k` | cut the contraction into N pieces (`os` only); costs CUTLASS's second kernel, §2.5.1 |
+| `--split-k` | cut K into N pieces so one output tile is N units of work (`os` only); the N partials cost CUTLASS's second kernel, §2.5.1 |
 | `--a-strategy` | `stage` (default, D33) \| `stream` (D31) \| `whole` — how A is loaded, §2.5.2 |
 | `--b-dataflow` | `write-ahead` (default, D33) \| `on-demand` \| `persistent` — when B's write lands |
 | `--a-residency-tiles` | override tiles served per A staging event; power-of-2 divisor of `TILES_PER_GROUP` |
@@ -234,9 +234,21 @@ uv run bwz matmul -M 512 -N 512 -K 4096 -c a100_80gb --ideal --no-pipeline
 ```
 
 79% is wave occupancy, not padding: 32 × 32 = 1024 output tiles over 432 tensor cores is 3 waves
-whose last is a third full. **`--split-k` buys the missing occupancy and pays DRAM for it**, which
-is exactly the trade CUTLASS documents — split-K exists for when *"there are too few threadblocks
-to efficiently occupy the entire GPU"*, and it runs as two kernels:
+whose last is a third full.
+
+**What `--split-k` is.** Under `os` one core owns an output tile and sweeps the *whole* contraction
+inside it, so the amount of parallelism available is the number of output tiles and nothing else —
+`M·N/(rows·cols)`. When that is smaller than the chip, most of the chip idles however long K is.
+Split-K cuts K into `p` chunks and makes `(output tile, chunk)` the unit of work, so there are `p`×
+as many pieces and the chip fills. Nothing about the arithmetic changes: each chunk does `1/p` of
+the same MACs.
+
+What changes is that the `p` chunks of one output tile each end up holding a **partial** value of
+it, and partials have to be added. CUTLASS does that in a *second kernel* — *"partitionedK GEMM, and
+batched reduction"* — so the first kernel writes `p` full `M × N` partials to DRAM and the second
+reads them back, adds `(p−1)·M·N` of them on the vector unit, and costs one more dispatch. That is
+the whole trade, and it is exactly what CUTLASS documents split-K for: when *"there are too few
+threadblocks to efficiently occupy the entire GPU"*.
 
 ```bash
 uv run bwz matmul -M 512 -N 512 -K 4096 -c a100_80gb --ideal --no-pipeline --split-k 8
