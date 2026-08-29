@@ -25,7 +25,7 @@ from bwz.analysis import (
 )
 from bwz.analysis.compare import head_to_head, prefill_crossover
 from bwz.analysis.dataflow import plan_dataflow
-from bwz.analysis.pipeline import Lane, PipelineTrace, build_trace, grid_of
+from bwz.analysis.pipeline import Lane, PipelineTrace, Stage, build_trace, grid_of
 from bwz.analysis.roofline import MachineModel, compute_dtype
 from bwz.analysis.stationarity import (
     UNBOUNDED_ACCUMULATION,
@@ -870,6 +870,14 @@ def _lane_table(trace: PipelineTrace) -> Table:
         Lane.CORE: "matrix arithmetic, plus the dispatches",
         Lane.VECTOR: "norms, activations, residuals — not the matrix engine",
     }
+    # A reduction is the one thing the vector lane does that is *part of* the
+    # matmul rather than beside it, and the generic label would have a reader
+    # hunting for norms in a graph that has none (D62).
+    if any(span.stage is Stage.REDUCE and span.lane is Lane.VECTOR for span in trace.spans):
+        descriptions[Lane.VECTOR] = (
+            "summing the partials K-on-the-grid leaves — elementwise work, so not "
+            "the matrix engine (D27)"
+        )
     for lane in Lane:
         mean, peak = concurrency[lane]
         if lane is Lane.SRAM:

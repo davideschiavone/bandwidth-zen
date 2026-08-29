@@ -666,3 +666,46 @@ def test_weight_sets_le_1_gate_falls_back_b_dataflow_to_write_ahead() -> None:
     # before that amortisation check ever runs.
     _, discounted_report = _trace(spec, "a100_80gb", b_dataflow=BDataflow.PERSISTENT, iterations=4)
     assert not any("amortised" in a for a in discounted_report.assumptions)
+
+
+def test_an_on_chip_reduction_is_drawn_alongside_the_array_not_behind_it() -> None:
+    """D62's overlap, in the picture as well as in the number.
+
+    ``ws`` on A100 puts K on the grid, so the CUDA cores sum partials while the
+    tensor cores build the next k-slice. The report charges ``max(matrix,
+    vector)`` for that, and a trace that queued the adds after the last wave
+    would draw a serialisation the report did not charge — and would push the
+    drawn span past the reported latency, which D19 forbids.
+
+    Split-K's reduction *is* a tail, and stays one: two kernels, so nothing can
+    be summed until the first has finished everywhere.
+    """
+    chip = idealised(load_chip("a100_80gb"))
+    spec = MatmulSpec.model_validate(
+        {"id": "t", "name": "t", "family": "matmul", "m": 2048, "n": 2048, "k": 4096}
+    )
+    deployment = DeploymentSpec.model_validate(
+        {"batch": 1, "input_tokens": 1, "output_tokens": 1, "stationarity": "ws"}
+    )
+    report = analyze(spec, chip, deployment)
+    assert report.feasible, report.infeasibility
+    graph = build_graph(spec, deployment, GraphPhase.STATIC)
+    machine = machine_model(chip, spec.operand_dtype, stationarity=Dataflow.WEIGHT_STATIONARY)
+    trace = build_trace(
+        graph, report.phases[0], machine, double_buffered=report.memory.double_buffered
+    )
+
+    op = report.phases[0].ops[0]
+    reduces = [s for s in trace.spans if s.stage is Stage.REDUCE]
+    executes = [s for s in trace.spans if s.stage is Stage.EXEC]
+    assert len(reduces) == 1 and reduces[0].lane is Lane.VECTOR
+    assert reduces[0].bytes_moved == 0.0, "on-chip partials are charged no DRAM traffic"
+
+    # The overlap: it starts while the array is still working, and the lane
+    # still sums to exactly the t_reduce_s the report charged (D19).
+    assert reduces[0].start_s < max(s.end_s for s in executes)
+    assert reduces[0].start_s == pytest.approx(min(s.end_s for s in executes))
+    assert reduces[0].duration_s == pytest.approx(op.t_reduce_s)
+    assert trace.total_s == pytest.approx(
+        max(s.end_s for s in trace.spans if s.lane is not Lane.VECTOR)
+    ), "hidden under the matrix work, so it does not extend the span"

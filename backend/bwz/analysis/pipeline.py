@@ -56,7 +56,7 @@ from typing import TYPE_CHECKING
 from bwz.analysis.roofline import MATRIX_OP_TYPES, MachineModel
 from bwz.analysis.stationarity import Operand, TileGrid, grid_for
 from bwz.graph.ops import ComputeGraph, GraphPhase, MatmulAttrs, Operation
-from bwz.report import OpResult, PhaseResult
+from bwz.report import OpResult, PhaseResult, ReductionPlacement
 from bwz.spec.deployment import AStrategy, BDataflow
 
 if TYPE_CHECKING:
@@ -355,18 +355,26 @@ def _reduction_spans(
     *,
     after: list[Span],
 ) -> list[Span]:
-    """The second kernel split-K needs, drawn after the first has finished (D53).
+    """The reduction, drawn where its placement puts it (D53/D62).
 
-    Two spans, not one: the partials' round trip on DRAM and the additions on
-    the vector unit, which a streaming reduction overlaps with each other but
-    with nothing in the GEMM — the two are separate launches, so this starts
-    where the tile schedule ends. Empty unless the grid materialised partials,
-    which is what keeps the ordinary trace exactly as it was.
+    Two shapes, and the difference is the whole of D62. A **DRAM** reduction is
+    a second kernel: the partials' round trip and the additions both start where
+    the tile schedule ends, because the GEMM has to have finished everywhere
+    first. An **on-chip** reduction pipelines against the GEMM instead — the
+    vector unit sums slice *n* while the matrix engine builds slice *n+1* — so
+    its span starts at the first wave's end and runs *alongside* the core lane.
+    Drawing it as a tail would contradict the ``max(matrix, vector)`` the report
+    charged.
 
-    The DRAM span's duration is the same seconds-per-byte the tile spans were
-    scaled by, so the lane still sums to ``t_dram`` exactly.
+    Empty when nothing is reduced, which keeps the ordinary trace as it was. The
+    DRAM span's duration is the same seconds-per-byte the tile spans were scaled
+    by, so the lane still sums to ``t_dram`` exactly.
     """
-    if result.dram_reduction_bytes <= 0 or grid is None:
+    if grid is None:
+        return []
+    if result.reduction_placement is ReductionPlacement.ON_CHIP:
+        return _overlapped_reduction_spans(result, phase, op_type, grid, alongside=after)
+    if result.dram_reduction_bytes <= 0:
         return []
     start = max((span.end_s for span in after), default=0.0)
     per_byte = result.t_dram_s / result.dram_bytes if result.dram_bytes > 0 else 0.0
@@ -402,6 +410,49 @@ def _reduction_spans(
             )
         )
     return spans
+
+
+def _overlapped_reduction_spans(
+    result: OpResult,
+    phase: GraphPhase,
+    op_type: str,
+    grid: TileGrid,
+    *,
+    alongside: list[Span],
+) -> list[Span]:
+    """The vector unit's share of a reduction that stays on chip (D62).
+
+    One span, on the vector lane, starting when the first wave has produced
+    something to add and running for the ``t_reduce_s`` the report charged. It
+    overlaps the core lane deliberately: that overlap **is** the model — compute
+    is ``max(matrix, vector)``, and a picture that queued the adds behind the
+    arithmetic would draw a cost the report did not charge.
+
+    No DRAM span, because no bytes are charged: the partials cross on-chip
+    memory, which the v1 machine has no bandwidth term for (D5a), and that is
+    named in ``report.assumptions`` rather than drawn as free traffic.
+    """
+    if result.t_reduce_s <= 0:
+        return []
+    executes = sorted(
+        (span for span in alongside if span.stage is Stage.EXEC), key=lambda s: s.end_s
+    )
+    start = executes[0].end_s if executes else 0.0
+    slices = grid.k_slices
+    return [
+        Span(
+            Lane.VECTOR,
+            Stage.REDUCE,
+            f"{slices - 1} x M x N adds, one k-slice behind the array",
+            start,
+            start + result.t_reduce_s,
+            -2,
+            phase,
+            op_type=op_type,
+            flops=(slices - 1) * float(grid.m) * float(grid.n),
+            grid=grid,
+        )
+    ]
 
 
 def _engine_work(group: list[OpResult], *, matrix: bool) -> tuple[float, float, str]:
