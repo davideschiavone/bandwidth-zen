@@ -428,7 +428,12 @@ def _emit_program(
         return
 
     path = Path(target)
-    destination = path / program.filename if path.is_dir() else path
+    # A trailing slash means "into this directory", whether or not it exists
+    # yet: `--out` creates the directory it is given and `--emit` refusing to is
+    # an inconsistency a reader meets as a traceback, not a message (D64).
+    directory = path.is_dir() or target.endswith(("/", "\\"))
+    destination = path / program.filename if directory else path
+    destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(program.source, encoding="utf-8")
     _wrote(destination)
     print(f"  run it: python {destination}")
