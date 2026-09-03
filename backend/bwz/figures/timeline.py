@@ -46,6 +46,7 @@ two precisions would be comparing two different amounts of traffic — so
 from __future__ import annotations
 
 import subprocess
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -54,7 +55,8 @@ from bwz.analysis import idealised, machine_model
 from bwz.analysis.dataflow import DataflowPlan, plan_dataflow
 from bwz.analysis.pipeline import Lane, PipelineTrace, Span, Stage, build_trace, grid_of
 from bwz.analysis.roofline import MATRIX_OP_TYPES, MachineModel, compute_dtype
-from bwz.analysis.stationarity import Dim, TileGrid
+from bwz.analysis.stationarity import Dim, TileGrid, residency_phrase
+from bwz.analysis.tiling import operation_tiles
 from bwz.deploy import check as check_deployment
 from bwz.deploy import deployment_of
 from bwz.emit import EmittedProgram, emit_matmul
@@ -65,7 +67,7 @@ from bwz.figures.timeline_html import Box, render
 from bwz.graph import GraphPhase, build_graph, build_graphs
 from bwz.graph.ops import Operation
 from bwz.operators.base import cost_of
-from bwz.report import Bound, PhaseResult, Report
+from bwz.report import Bound, PhaseResult, ReductionPlacement, Report
 from bwz.spec import AnyModelSpec, DeploymentSpec, DType, HardwareSpec, MatmulSpec
 from bwz.units import format_bandwidth, format_bytes, format_quantity, format_time
 
@@ -102,6 +104,13 @@ class Workload:
     """The machine this workload was analysed with, carrying the effective
     stationarity and split-K (D53). ``None`` where the defaults were used and a
     freshly derived model is identical."""
+    units_used: int = 0
+    """Arrays of the matrix engine that ever receive a tile in this workload —
+    ``min(count, tiles)``, maximised over its operations (D30). **Not** the
+    declared count and not wave occupancy: a two-tile matmul occupies two of
+    A100's 432 tensor cores and the other 430 never start, which is what a
+    resource row has to say rather than quoting the datasheet's 432. 0 where it
+    was not computed."""
     program: EmittedProgram | None = None
     """The runnable version of this decomposition (D54), when ``--emit`` asked
     for one. Built here rather than in the page so it comes from the same
@@ -159,8 +168,8 @@ class Row:
     colour: str = ""
 
 
-def rows_for(chip: HardwareSpec, dtype: DType) -> list[Row]:
-    """Resource rows, read off the chip profile.
+def rows_for(panel: Panel) -> list[Row]:
+    """Resource rows: what the profile declares, and how much of it this run uses.
 
     The v1 machine is three elements (``docs/CORRECTIONS.md`` D5a): the deepest
     memory level supplies bandwidth, the shallowest supplies capacity, the
@@ -168,7 +177,14 @@ def rows_for(chip: HardwareSpec, dtype: DType) -> list[Row]:
     drawn idle with the reason, which is more honest than leaving it out — an
     A100 has 40 MB of L2 this model never spends, and that omission is worth
     seeing next to a chip whose SRAM is the whole story.
+
+    A compute row names the arrays **this workload uses**, not the count on the
+    datasheet. "432 x 16x16 array" is what the chip has; a 17-cubed matmul runs
+    on two of them and the picture said 432, which is the number a reader would
+    have divided by. The panel is taken whole rather than a chip and a dtype so
+    that the row can ask its trace what happened.
     """
+    chip, dtype = panel.chip, panel.dtype
     rows: list[Row] = []
     deepest = chip.memory[-1]
     shallowest = chip.memory[0]
@@ -190,27 +206,83 @@ def rows_for(chip: HardwareSpec, dtype: DType) -> list[Row]:
                 Row(level.name, detail, None, "declared, not modelled — the roofline is flat (D5)")
             )
 
+    vector_busy = panel.work.trace.busy_s[Lane.VECTOR] > 0
     for unit in chip.compute_units:
         geometry = (
             f"{unit.systolic_dims[0]}x{unit.systolic_dims[1]} array"
             if unit.systolic_dims
             else f"{unit.ops_per_cycle_per_unit:g} MAC/cycle"
         )
-        detail = f"{unit.count} x {geometry}"
         peak = unit.peak_flops_per_s(chip.clock_hz, dtype) if unit.supports(dtype) else 0.0
         rate = f"peak {format_quantity(peak, 'OP/s')} at {dtype.value}"
         if unit is machine.unit:
-            rows.append(Row(unit.name, detail, Lane.CORE, f"matrix work — {rate}"))
+            # min(count, tiles): the arrays that ever hold one. Distinct from
+            # wave occupancy, which averages over the run and would report the
+            # same 0.5% whether one array worked or all 432 half-worked (D30).
+            used = min(panel.work.units_used or unit.count, unit.count)
+            idle = unit.count - used
+            why = (
+                f" · the grid has {used} tile{'s' if used != 1 else ''} at its widest, so "
+                f"{idle} of these arrays never start (D30)"
+                if idle > 0
+                else " · every array gets a tile"
+            )
+            rows.append(
+                Row(
+                    unit.name,
+                    _used_of(used, unit.count, geometry),
+                    Lane.CORE,
+                    f"matrix work — {rate}{why}",
+                )
+            )
         elif unit is machine.vector_unit:
             # A tensor core does matrix-multiply-accumulate and nothing else, so
-            # norms, activations and residuals have their own row on their own
-            # silicon (D27/D28).
-            rows.append(Row(unit.name, detail, Lane.VECTOR, f"norms, activations — {rate}"))
+            # norms, activations, residuals and any reduction have their own row
+            # on their own silicon (D27/D28/D62). How much of that unit runs them
+            # is not modelled: the cost is charged at the whole unit's rate, so
+            # the row says all of it is engaged and says that it assumed so.
+            rows.append(
+                Row(
+                    unit.name,
+                    _used_of(unit.count if vector_busy else 0, unit.count, geometry),
+                    Lane.VECTOR,
+                    f"norms, activations, reductions — {rate}"
+                    + (
+                        " · charged at the whole unit's rate, so all of it is assumed engaged"
+                        if vector_busy
+                        else " · no vector work in this graph"
+                    ),
+                )
+            )
         elif unit.supports(dtype):
-            rows.append(Row(unit.name, detail, None, "idle — no work of its kind in this graph"))
+            rows.append(
+                Row(
+                    unit.name,
+                    _used_of(0, unit.count, geometry),
+                    None,
+                    "idle — no work of its kind in this graph",
+                )
+            )
         else:
-            rows.append(Row(unit.name, detail, None, f"idle — no {dtype.value} datapath"))
+            rows.append(
+                Row(
+                    unit.name,
+                    _used_of(0, unit.count, geometry),
+                    None,
+                    f"idle — no {dtype.value} datapath",
+                )
+            )
     return rows
+
+
+def _used_of(used: int, count: int, geometry: str) -> str:
+    """``"2 of 432 x 16x16 array"`` — what this run uses, of what there is.
+
+    Both numbers, always, including when they are equal: a row reading "432 x
+    16x16 array" is a statement about the datasheet, and the question a reader
+    brings to a resource row is how much of it the workload reached.
+    """
+    return f"{used} of {count} x {geometry}"
 
 
 def panel_rows(panels: list[Panel]) -> list[Row]:
@@ -265,7 +337,7 @@ def panel_rows(panels: list[Panel]) -> list[Row]:
                     colour=CHIP_COLOURS[index % len(CHIP_COLOURS)],
                 )
             )
-        for row in rows_for(panel.chip, panel.dtype):
+        for row in rows_for(panel):
             rows.append(replace(row, panel=index))
     return rows
 
@@ -530,16 +602,24 @@ def _stationarity_banner(panels: list[Panel]) -> str:
     whose chips disagree, where one line could only be wrong about one of them;
     each chip's own listing states its grid in that case.
     """
+    # The FIRST span carrying a grid, not the first span: span 0 is the kernel
+    # dispatch, which has no tile to address, so reading its grid returned None
+    # and this banner silently never appeared on a matmul page at all.
     grids = {
-        panel.work.trace.spans[0].grid
+        next((span.grid for span in panel.work.trace.spans if span.grid is not None), None)
         for panel in panels
-        if panel.work.trace.spans and panel.work.trace.spans[0].grid is not None
     }
-    if len(grids) != 1:
+    only = {grid for grid in grids if grid is not None}
+    if len(only) != 1:
         return ""
-    grid = next(iter(grids))
+    grid = next(iter(only))
+    # "B stays resident" is a misnomer on a unit with no weight banks (D62), and
+    # two chips in a comparison can disagree about that even on one grid — so the
+    # phrase is only used when every panel's unit gives the same one.
+    phrases = {residency_phrase(grid, panel.machine.unit) for panel in panels}
+    held = phrases.pop() if len(phrases) == 1 else f"{grid.resident.value} stays resident"
     banner = (
-        f"<b>stationarity</b> {grid.stationarity.value} — {grid.resident.value} stays resident, "
+        f"<b>stationarity</b> {grid.stationarity.value} — {held}, "
         f"in a {grid.rows:,} x {grid.cols:,} tile grid "
         f"({grid.row_dim.value} x {grid.col_dim.value}) whose tiles each sweep "
         f"{grid.swept_dim.value}. Tile addresses on the bars below index into it."
@@ -549,7 +629,47 @@ def _stationarity_banner(panels: list[Panel]) -> str:
             f" <b>split-K</b> {grid.k_partitions}: the contraction is cut that many ways and "
             f"summed by a second kernel, drawn at the end of the DRAM and vector rows."
         )
-    return banner
+    return banner + _reduction_banner(panels, grid)
+
+
+def _reduction_banner(panels: list[Panel], grid: TileGrid) -> str:
+    """Where this grid's partials meet, when every panel agrees (D62).
+
+    The vector row grows a bar for a K-on-grid reduction and nothing on the page
+    said why; this is that sentence. Silent when the chips disagree — Metis sums
+    a contraction in its own periphery where A100 pays the CUDA cores, and one
+    line cannot be right about both. Silent too under split-K, whose own
+    sentence above already covers it.
+    """
+    placements = {
+        panel.work.phase.ops[0].reduction_placement
+        for panel in panels
+        if panel.work.phase is not None and panel.work.phase.ops
+    }
+    if grid.k_partitions > 1 or len(placements) != 1:
+        return ""
+    placement = placements.pop()
+    slices = grid.k_slices
+    adds = f"{(slices - 1) * grid.m * grid.n:,} additions"
+    if placement is ReductionPlacement.LOCAL:
+        return (
+            f" <b>reduction</b> local: each output element ends up with {slices} partial values, "
+            f"and this unit declares an accumulator deep enough to sum them in its own periphery "
+            f"— nothing is charged and no bar is drawn."
+        )
+    if placement is ReductionPlacement.ON_CHIP:
+        return (
+            f" <b>reduction</b> on chip: each output element ends up with {slices} partial "
+            f"values, so {adds} run on the vector row — overlapped with the matrix row, since "
+            f"the array builds the next slice while the vector unit sums the last (D62)."
+        )
+    if placement is ReductionPlacement.DRAM:
+        return (
+            f" <b>reduction</b> through DRAM: the {grid.accumulator_elements:,} live "
+            f"accumulators do not fit on chip, so the partials cross DRAM and {adds} follow the "
+            f"matrix work rather than overlapping it (D62)."
+        )
+    return ""
 
 
 def write_timeline(panels: list[Panel], command: str, out: Path) -> None:
@@ -935,7 +1055,7 @@ def write_animation(panel: Panel, command: str, out: Path) -> None:
             "note": row.note,
             "lane": row.lane.value if row.lane else None,
         }
-        for row in rows_for(panel.chip, panel.dtype)
+        for row in rows_for(panel)
     ]
     page = render_animation(
         title=_title([panel]),
@@ -1076,6 +1196,35 @@ def _git() -> str:
     return f" @ {sha}"
 
 
+def _units_used(ops: Sequence[Operation], machine: MachineModel) -> int:
+    """Arrays the matrix engine ever has busy at once, over a whole phase (D30).
+
+    The **max** over the phase's operations, not a sum or an average: the
+    resource row is a claim about the machine — this many arrays are reached by
+    this workload at its widest — and a graph whose largest GEMM fills the chip
+    has reached all of it even if a projection later occupies four cores.
+
+    Only matrix work counts. Norms and elementwise operations run on the vector
+    unit, which has no tile grid here (D27).
+    """
+    return max(
+        (
+            min(
+                machine.unit.count,
+                operation_tiles(
+                    op,
+                    machine.unit,
+                    stationarity=machine.stationarity,
+                    k_partitions=machine.k_partitions,
+                ),
+            )
+            for op in ops
+            if op.op_type in MATRIX_OP_TYPES
+        ),
+        default=0,
+    )
+
+
 def build_matmul(
     chip: HardwareSpec,
     spec: MatmulSpec,
@@ -1152,6 +1301,7 @@ def build_matmul(
         operation=graph.ops[0],
         dataflow=dataflow,
         machine=machine,
+        units_used=_units_used(graph.ops, machine),
         program=program,
     )
 
@@ -1196,6 +1346,7 @@ def build_phases(
                 phase.latency_s,
                 phase.bound,
                 phase=phase,
+                units_used=_units_used(graphs[phase.phase].ops, machine),
             )
         )
     return out

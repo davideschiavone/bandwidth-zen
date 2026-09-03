@@ -68,7 +68,6 @@ def systolic_utilisation(
     cols: int,
     *,
     units: int = 1,
-    independent: int = 1,
     fill_cycles: int | None = None,
     tiles: int | None = None,
 ) -> float:
@@ -114,12 +113,13 @@ def systolic_utilisation(
     is why a decode step on an edge NPU is nowhere near its TOPS number even
     when the weights are entirely on chip.
 
-    A **fourth** loss applies when the chip has more than one array. ``units`` is
-    how many run concurrently and ``independent`` how many copies of this GEMM
-    exist to spread across them — one for a matmul or a convolution, ``batch x
-    heads`` for attention, whose heads are genuinely separate GEMMs. See
-    :func:`wave_occupancy`. Both default to the single-array case, so a profile
-    that declares one unit gets exactly the three-term result above.
+    A **fourth** loss applies when the chip has more than one array: ``units`` is
+    how many run concurrently and ``tiles`` how many independent pieces of work
+    there are to spread across them — :func:`operation_tiles` counts those, and
+    for attention it is ``batch x heads`` times one head's grid, since the heads
+    are genuinely separate GEMMs. See :func:`wave_occupancy`. Both default to
+    the single-array case, so a profile that declares one unit gets exactly the
+    three-term result above.
     """
     if rows <= 0 or cols <= 0:
         return 1.0
@@ -152,12 +152,50 @@ def systolic_utilisation(
     grid_tiles = (
         tiles if tiles is not None else (padded(k, rows) // rows) * (padded(n, cols) // cols)
     )
-    return (
-        k_efficiency
-        * n_efficiency
-        * m_efficiency
-        * wave_occupancy(grid_tiles * max(independent, 1), units)
-    )
+    return k_efficiency * n_efficiency * m_efficiency * wave_occupancy(grid_tiles, units)
+
+
+def operation_tiles(
+    op: Operation,
+    unit: ComputeUnit,
+    *,
+    stationarity: Dataflow | None = None,
+    k_partitions: int = 1,
+) -> int:
+    """Independent tiles *op* gives *unit*'s arrays to spread across.
+
+    The count :func:`wave_occupancy` divides by ``units``, factored out so that
+    the figures can ask a second question of it: **how many arrays ever receive
+    a tile at all**. A matmul with two tiles occupies two of A100's 432 tensor
+    cores and the other 430 never start, which is a different statement from
+    "occupancy is 0.5%" and the one a resource row has to make (D30).
+
+    Attention multiplies by ``batch x heads`` because every (batch, head) pair
+    is a genuinely separate GEMM that fills the arrays alongside the others.
+
+    1 where there is no array geometry to tile against, and for work the arrays
+    do not run at all — norms and elementwise operations go to the vector unit
+    (D27), which this model does not decompose into tiles.
+    """
+    if unit.systolic_dims is None:
+        return 1
+    rows, cols = unit.systolic_dims
+    if isinstance(op.attrs, MatmulAttrs):
+        flow = stationarity if stationarity is not None else unit.dataflow
+        return grid_for(flow, op.attrs, rows, cols, k_partitions=k_partitions).tiles
+    if isinstance(op.attrs, ConvAttrs):
+        # im2col view, as in `operation_utilisation`: K is the filter volume and
+        # N the output channels, so the grid is the same K x N one `ws` implies.
+        conv = op.attrs
+        k = (conv.in_channels // conv.groups) * conv.kernel_h * conv.kernel_w
+        return (padded(k, rows) // rows) * (padded(conv.out_channels, cols) // cols)
+    if isinstance(op.attrs, AttentionAttrs):
+        attention = op.attrs
+        per_head = (padded(attention.head_dim, rows) // rows) * (
+            padded(attention.kv_len, cols) // cols
+        )
+        return per_head * max(attention.batch * attention.heads, 1)
+    return 1
 
 
 def operation_utilisation(
@@ -202,13 +240,6 @@ def operation_utilisation(
     fill = round(1 / multiplier) if 0 < multiplier < 1 else None
 
     if isinstance(op.attrs, MatmulAttrs):
-        grid = grid_for(
-            stationarity if stationarity is not None else unit.dataflow,
-            op.attrs,
-            rows,
-            cols,
-            k_partitions=k_partitions,
-        )
         return systolic_utilisation(
             op.attrs.m,
             op.attrs.k,
@@ -217,7 +248,7 @@ def operation_utilisation(
             cols,
             units=unit.count,
             fill_cycles=fill,
-            tiles=grid.tiles,
+            tiles=operation_tiles(op, unit, stationarity=stationarity, k_partitions=k_partitions),
         )
 
     if isinstance(op.attrs, ConvAttrs):
@@ -227,7 +258,14 @@ def operation_utilisation(
         m = conv.batch * conv.out_height * conv.out_width
         k = (conv.in_channels // conv.groups) * conv.kernel_h * conv.kernel_w
         return systolic_utilisation(
-            m, k, conv.out_channels, rows, cols, units=unit.count, fill_cycles=fill
+            m,
+            k,
+            conv.out_channels,
+            rows,
+            cols,
+            units=unit.count,
+            fill_cycles=fill,
+            tiles=operation_tiles(op, unit),
         )
 
     if isinstance(op.attrs, AttentionAttrs):
@@ -243,8 +281,8 @@ def operation_utilisation(
             rows,
             cols,
             units=unit.count,
-            independent=attention.batch * attention.heads,
             fill_cycles=fill,
+            tiles=operation_tiles(op, unit),
         )
 
     return 1.0

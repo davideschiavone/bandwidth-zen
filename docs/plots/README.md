@@ -47,9 +47,16 @@ a **new tab in an existing window** rather than a new window.
 - **hover** a bar and the tooltip names the transaction: `LOAD — operands in`,
   `STORE — result written back`, `EXEC — matmul`, `HOLD — on chip`, each with its bytes or
   operations and the rate
-- a **banner** naming the decomposition the bars are of: the stationarity, which operand it keeps
-  resident, the grid's extents and which of M/N/K each axis is, plus any split-K (D53). Tile
-  addresses in the hovers index into exactly that grid, so without it they cannot be read
+- a **banner** naming the decomposition the bars are of: the stationarity, what it keeps resident
+  (or *nothing held, K on the grid*, on a unit with no weight banks — D62), the grid's extents and
+  which of M/N/K each axis is, plus any split-K (D53) and, where K is cut, where the partials meet
+  and whether their additions overlap the matrix row or follow it (D62). Tile addresses in the
+  hovers index into exactly that grid, so without it they cannot be read
+- **compute rows name the units this run uses, not the datasheet's count**: `256 of 432 x 16x16
+  array` is the same `min(count, tiles)` the emitted program calls `USED_CORES`, and the note says
+  how many arrays never start and why (D30/D62). The vector row reads `0 of 6912` when nothing
+  elementwise reaches it, and its full count when something does — with the caveat that *how much*
+  of a vector unit runs the work is not modelled, so the cost is charged at the whole unit's rate
 - below the timeline, the same run's place on the **roofline**: both ceilings, the ridge point, the
   M=1 line, and this workload as a labelled point
 - below that, **how it is deployed on the chip — run it yourself**: the loop nest this model

@@ -3063,3 +3063,54 @@ One row is tier 2, for the one case where the program and the report model diffe
 accumulator the report found too big for on-chip capacity. Where an accumulator lives is a capacity
 heuristic and not a step of the walk, so the gap is shown rather than asserted — the same treatment
 B's residency discount already gets.
+
+## D63 — A resource row names the units the run uses, not the datasheet's count (2026-09-03)
+
+The user, on the HTML pipeline and animation pages: *"update the HTML pipeline and animation so that
+they show the max number of units USED (not available, but USED) … I am talking about the variable
+`USED_CORES` in the pipelines and so on"*.
+
+The compute row read `432 x 16x16 array` — A100's declared tensor cores. A 17-cubed matmul runs on
+**two** of them. The emitted program has said so since D54 (`USED_CORES = min(AVAILABLE_CORES,
+TILES)`) and the report's wave-occupancy term has charged it since D30, but the picture beside them
+quoted the datasheet, which is the number a reader would divide by.
+
+Rows now read `2 of 432 x 16x16 array`, with the note saying why: *"the grid has 2 tiles at its
+widest, so 430 of these arrays never start (D30)"*. Both numbers, always, including when they are
+equal — a row that only names the hardware is answering a question nobody asked of a *resource*
+row.
+
+**`used` is not occupancy, and that is why it needed its own term.** Occupancy averages over the
+run: 0.5% could mean one array busy throughout or all 432 busy 0.5% of the time. `min(units, tiles)`
+says which. For a phase it is the **max** over the phase's operations — the widest the workload ever
+gets — so a graph whose largest GEMM fills the chip has reached all of it even if a projection later
+occupies four cores.
+
+`analysis/tiling.operation_tiles` now owns that count. It was inline in `operation_utilisation`,
+where the attention case reached it as a separate `independent` multiplier; factoring it out let the
+figures ask the same function the utilisation term divides by, rather than re-deriving a tile count
+beside it — the failure mode D53 had already been through once. `systolic_utilisation` loses its
+`independent` parameter, which no caller now passes, and the multiplication happens once inside
+`operation_tiles`.
+
+**The vector row gets the same treatment, and an admission.** It reads `0 of 6912` when nothing
+elementwise reaches it — true of a lone output-stationary matmul, and the honest thing to draw — and
+its full count when something does. *How much* of a vector unit runs that work is not modelled: the
+cost is charged at the whole unit's rate, so the note says all of it is assumed engaged rather than
+implying a measurement. Under `--stationarity ws` the row goes from `0 of 6912` to `6912 of 6912`,
+which is D62 in one line of the picture.
+
+### Two things found while doing it
+
+**The stationarity banner had never rendered.** `_stationarity_banner` read `spans[0].grid`, and span
+0 is the kernel dispatch, which carries no tile to address — so the guard saw `None` and returned
+empty on every matmul page ever generated. It now takes the first span that *has* a grid. The page
+had been missing the line that says which decomposition its tile addresses index into, which is what
+makes them readable at all.
+
+**The banner said "B stays resident" on a tensor core.** Same misnomer D62 fixed in the table, the
+drawer and the emitted program, missed here. It now uses the same `residency_phrase`, and — where
+every panel agrees — adds where the partials meet: local and free, on chip and overlapped, or
+through DRAM and serialised. Silent when two chips disagree, by the rule that function already had:
+Metis sums a contraction in its own periphery where A100 pays the CUDA cores, and one line cannot be
+right about both.

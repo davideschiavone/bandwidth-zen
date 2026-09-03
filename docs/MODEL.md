@@ -409,13 +409,19 @@ multiplies by `count`, which assumes every array always has a tile. A fourth ter
 it does not (D30):
 
 ```
-tiles      = grid.tiles · independent          [the grid above, per stationarity]
+tiles      = operation_tiles(op, unit)         [the grid above, per stationarity]
 waves      = ceil(tiles / units)
 occupancy  = tiles / (waves · units)
+used       = min(units, tiles)                 [arrays that ever get one]
 ```
 
-`independent` is 1 for a matmul or convolution and `batch × heads` for attention, whose heads are
-separate GEMMs that fill the arrays alongside each other.
+`operation_tiles` is the grid's own tile count for a matmul or a convolution, and `batch × heads`
+times one head's grid for attention, whose heads are separate GEMMs that fill the arrays alongside
+each other.
+
+`used` is a different question from occupancy and the figures ask it: occupancy averages over the
+run, so 0.5% could mean one array busy or all 432 half-busy. A resource row has to say which, and
+it is the same `min(count, tiles)` the emitted program calls `USED_CORES`.
 
 | case | tiles / units | occupancy |
 |---|---|---|

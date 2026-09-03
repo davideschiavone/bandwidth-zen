@@ -204,3 +204,59 @@ def test_metis_holds_sixteen_weight_tiles_and_runs_four() -> None:
     tensor_core = load_chip("a100_80gb").compute_units[0]
     assert tensor_core.weight_sets == 1
     assert tensor_core.resident_tile_capacity() == 432
+
+
+def test_operation_tiles_is_what_wave_occupancy_divides_by() -> None:
+    """The count factored out of ``systolic_utilisation`` (D30), hand-computed.
+
+    A 1000x2000x3000 matmul on a 16x16 array: ``os`` gives ceil(1000/16) x
+    ceil(2000/16) = 63 x 125 = 7875 output tiles; ``ws`` gives ceil(3000/16) x
+    125 = 188 x 125 = 23,500 k-slices, which is the parallelism it buys and the
+    reason it also owes a reduction. The figures ask this same function how many
+    arrays ever receive a tile, so the picture and the utilisation term cannot
+    disagree about the decomposition.
+    """
+    from bwz.analysis.tiling import operation_tiles
+    from bwz.graph.ops import MatmulAttrs, Operation, OpType
+    from bwz.spec import load_chip
+    from bwz.spec.hardware_spec import Dataflow
+
+    unit = load_chip("a100_80gb").compute_units[0]
+    op = Operation(
+        id="m",
+        op_type=OpType.MATMUL,
+        inputs=(),
+        outputs=(),
+        attrs=MatmulAttrs(m=1000, n=2000, k=3000),
+    )
+
+    assert operation_tiles(op, unit) == 63 * 125, "os, the unit's own dataflow"
+    assert operation_tiles(op, unit, stationarity=Dataflow.WEIGHT_STATIONARY) == 188 * 125
+    assert operation_tiles(op, unit, k_partitions=4) == 63 * 125 * 4, "split-K multiplies it"
+
+
+def test_attention_tiles_count_every_head() -> None:
+    """Every (batch, head) pair is a separate GEMM, so they fill the arrays
+    alongside each other — counting one head's tiles would report a 32-head
+    attention as leaving a 4-core NPU idle (the ``independent`` term, now folded
+    into the tile count so there is one definition of it).
+    """
+    from bwz.analysis.tiling import operation_tiles
+    from bwz.graph.ops import AttentionAttrs, Operation, OpType
+    from bwz.spec import load_chip
+
+    unit = load_chip("a100_80gb").compute_units[0]
+    attrs = AttentionAttrs(
+        batch=1,
+        heads=32,
+        kv_heads=32,
+        q_len=1,
+        kv_len=2048,
+        head_dim=128,
+        causal=False,
+        materialize_scores=False,
+    )
+    op = Operation(id="a", op_type=OpType.ATTENTION, inputs=(), outputs=(), attrs=attrs)
+
+    per_head = (128 // 16) * (2048 // 16)
+    assert operation_tiles(op, unit) == per_head * 32

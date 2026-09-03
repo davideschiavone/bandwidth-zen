@@ -30,6 +30,7 @@ from bwz.figures import (
     write_animation,
     write_timeline,
 )
+from bwz.figures.timeline import _stationarity_banner, rows_for
 from bwz.kernels import encoder_layer_kernel, matmul_kernel
 from bwz.spec import DeploymentSpec, DType, load_chip
 
@@ -37,8 +38,13 @@ SHAPE = (256, 256, 256)
 """Big enough to have a grid worth drawing, small enough to build instantly."""
 
 
-def _matmul_panel(chip_id: str, dtype: DType = DType.FP16, **overrides: object) -> Panel:
-    m, n, k = SHAPE
+def _matmul_panel(
+    chip_id: str,
+    dtype: DType = DType.FP16,
+    shape: tuple[int, int, int] = SHAPE,
+    **overrides: object,
+) -> Panel:
+    m, n, k = shape
     spec = matmul_kernel(m, n, k, a_dtype=dtype, b_dtype=dtype)
     deployment = DeploymentSpec.model_validate(
         {"batch": 1, "input_tokens": 1, "output_tokens": 0, "phase": "prefill", **overrides}
@@ -245,3 +251,71 @@ def test_split_k_reaches_the_figure() -> None:
     assert plain.work.program is not None and split.work.program is not None
     assert split.work.program.predicted["tiles"] == 4 * plain.work.program.predicted["tiles"]
     assert machine_model(load_chip("a100_80gb"), DType.FP16).k_partitions == 1
+
+
+def test_a_compute_row_names_the_arrays_this_run_uses_not_the_datasheet_count() -> None:
+    """The count a reader would divide by has to be the one that ran.
+
+    256x256x256 on A100 is a 16 x 16 output grid — 256 tiles — so 256 of its 432
+    tensor cores ever hold one and 176 never start. The row used to read
+    "432 x 16x16 array", which is the datasheet, and the picture then showed a
+    chip four times busier than the schedule beside it. It is the same
+    ``min(count, tiles)`` the emitted program calls ``USED_CORES``.
+    """
+    rows = rows_for(_matmul_panel("a100_80gb"))
+    core = next(row for row in rows if row.title == "tensor_core")
+
+    assert core.detail == "256 of 432 x 16x16 array"
+    assert "176 of these arrays never start" in core.note
+
+    # When the grid is bigger than the chip, every array does get one.
+    big = rows_for(_matmul_panel("a100_80gb", shape=(4096, 4096, 4096)))
+    assert next(r for r in big if r.title == "tensor_core").detail == "432 of 432 x 16x16 array"
+    assert "every array gets a tile" in next(r for r in big if r.title == "tensor_core").note
+
+    # And on a 4-core chip whose array swallows the whole shape, one core works.
+    metis = rows_for(_matmul_panel("metis_aipu", DType.INT8))
+    assert next(r for r in metis if r.title == "d_imc").detail == "1 of 4 x 512x512 array"
+
+
+def test_the_vector_row_says_when_nothing_reaches_it() -> None:
+    """0 of 6912 is a fact about the workload, not a missing row (D27/D62).
+
+    A lone output-stationary matmul has no elementwise work at all, so the CUDA
+    cores are drawn and idle. Ask for ``ws`` on the same chip and the reduction
+    lands on them — which is the whole of D62, visible in one row.
+    """
+    idle = next(r for r in rows_for(_matmul_panel("a100_80gb")) if r.title == "cuda_core")
+    busy = next(
+        r for r in rows_for(_matmul_panel("a100_80gb", stationarity="ws")) if r.title == "cuda_core"
+    )
+
+    assert idle.detail == "0 of 6912 x 1 MAC/cycle"
+    assert "no vector work in this graph" in idle.note
+    assert busy.detail == "6912 of 6912 x 1 MAC/cycle"
+    assert "assumed engaged" in busy.note, "how much of it runs them is not modelled"
+
+
+def test_the_stationarity_banner_reaches_the_page() -> None:
+    """It never had: span 0 is the kernel dispatch and carries no grid, so the
+    guard reading ``spans[0].grid`` was always None and the banner was silently
+    empty on every matmul page ever generated.
+
+    The reduction sentence rides the same banner, so this is also what makes
+    D62's overlap explicable on the picture rather than only in the report.
+    """
+    banner = _stationarity_banner([_matmul_panel("a100_80gb", stationarity="ws")])
+
+    assert "</b> ws —" in banner
+    assert "nothing held, K on the grid" in banner, "the misnomer, per D62"
+    assert "reduction</b> on chip" in banner
+    assert "overlapped with the matrix row" in banner
+
+
+def test_the_banner_is_silent_when_two_chips_would_disagree() -> None:
+    """One line cannot be right about both: Metis sums a contraction in its own
+    periphery where A100 pays the CUDA cores for it (D62). The per-chip rows
+    still say which is which.
+    """
+    panels = [_matmul_panel("a100_80gb", dtype=DType.INT8), _matmul_panel("metis_aipu", DType.INT8)]
+    assert "reduction" not in _stationarity_banner(panels)
