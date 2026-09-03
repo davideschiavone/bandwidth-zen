@@ -34,7 +34,7 @@ COMMANDS = [
         "a100_80gb",
         "-d",
         "int8",
-        "--out",
+        "--c",
         "int32",
     ],
     ["matmul", "-M", "64", "-N", "64", "-K", "64", "-c", "a100_80gb", "--a", "fp16", "--b", "int8"],
@@ -235,3 +235,36 @@ def test_an_unsupported_dtype_is_a_report_not_a_crash() -> None:
     )
     assert result.exit_code == 2
     assert "no compute unit for 'fp16'" in result.output
+
+
+def test_the_result_width_flag_reaches_the_report() -> None:
+    """D64: ``--out`` meant two things on this command and the dtype half lost.
+
+    ``--out int32`` parsed as a *path* — the figure directory's flag of the same
+    name — so the widening accumulator was silently dropped and C came back at
+    the operand width. Every test that covered widening accumulators went
+    through ``analyze`` rather than the CLI, which is how a documented flag
+    stayed broken while the suite was green. This one goes through the CLI.
+    """
+    result = runner.invoke(
+        app,
+        [
+            "matmul",
+            "-M",
+            "512",
+            "-N",
+            "512",
+            "-K",
+            "512",
+            "-c",
+            "a100_80gb",
+            "-d",
+            "int8",
+            "--c",
+            "int32",
+            "--no-pipeline",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "512 x 512 x 4 B — widening accumulator" in result.output
+    assert "1.05 MB" in result.output, "512*512*4 B, not the 262 kB an int8 result would be"

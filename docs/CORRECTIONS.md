@@ -419,8 +419,8 @@ have the builder ignore `deployment.precision` entirely.
 
 ```
 bwz matmul -M 4096 -N 4096 -K 4096 --chip a100_80gb --dtype int8              # all int8
-bwz matmul -M 4096 -N 4096 -K 4096 --chip a100_80gb --dtype int8 --out int32  # int32 accumulator
-bwz matmul -M 4096 -N 4096 -K 4096 --chip a100_80gb --dtype fp16 --out fp32   # all float
+bwz matmul -M 4096 -N 4096 -K 4096 --chip a100_80gb --dtype int8 --c int32    # int32 accumulator
+bwz matmul -M 4096 -N 4096 -K 4096 --chip a100_80gb --dtype fp16 --c fp32     # all float
 bwz matmul -M 4096 -N 4096 -K 4096 --chip a100_80gb --a fp16 --b int8         # mixed operands
 ```
 
@@ -3114,3 +3114,27 @@ every panel agrees — adds where the partials meet: local and free, on chip and
 through DRAM and serialised. Silent when two chips disagree, by the rule that function already had:
 Metis sums a contraction in its own periphery where A100 pays the CUDA cores, and one line cannot be
 right about both.
+
+## D64 — `--out` was declared twice on `bwz matmul`, and the dtype half never ran (2026-09-03)
+
+Found while assembling a set of commands to demonstrate D62/D63: `bwz matmul` declared `--out`
+**twice** — once as the result width (`--out int32`, the widening accumulator, §2.3) and once as the
+figure directory (`--out ~/figs`, §3). Click keeps one. The directory won, so
+
+```bash
+uv run bwz matmul -M 512 -N 512 -K 512 -c a100_80gb -d int8 --out int32
+```
+
+parsed `int32` as a **path**, silently ignored the accumulator width, and printed `result C 262 kB`
+— 512×512×1 B, the int8 result — where the documentation promised 1.05 MB. No error, no warning: a
+documented flag that had not worked since the figure flag was added, quoted in `docs/CLI.md` §2.3,
+the README's widths block and D18's own example.
+
+The result width is now **`--c`**, which pairs with the `--a` and `--b` it belongs with: three
+operands, three flags. `--out` keeps the meaning it actually had — the figure directory, on `matmul`,
+`run` and `compare` alike, so one word does not mean two things across three commands.
+
+No number moved: the tests that cover widening accumulators (`test_documented_numbers` §2.3,
+`test_matmul_workload`) call `matmul_kernel`/`analyze` directly, which is exactly why they stayed
+green through a broken CLI. That is the gap worth naming — a CLI flag is only covered by a test that
+goes through the CLI, and `test_cli_smoke` did not try this one.

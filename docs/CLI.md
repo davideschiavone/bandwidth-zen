@@ -70,9 +70,9 @@ so a batch of 128 is `-M 128`.
 |---|---|
 | `-M`, `-N`, `-K` | the three dimensions (required) |
 | `-c`, `--chip` | chip profile id or path to YAML (required) |
-| `-d`, `--dtype` | width of both operands, and of the result unless `--out` (default `fp16`) |
+| `-d`, `--dtype` | width of both operands, and of the result unless `--c` (default `fp16`) |
 | `--a`, `--b` | per-operand widths, when they differ |
-| `--out` | result width — the **accumulator**. Defaults to the wider operand |
+| `--c` | result width — the **accumulator**. Defaults to the wider operand. (`--out` is the figure directory, §3) |
 | `--ideal` | set both efficiency de-ratings to 1.0: a datasheet ceiling, not a prediction |
 | `--pipeline` / `--no-pipeline` | lane occupancy table (default on) |
 | `--stationarity` | `os` \| `ws` \| `is` \| `rs` — which operand stays resident, §2.5.1. Default: the chip's own |
@@ -145,8 +145,8 @@ CLAUDE.md's `M=1 → ≈1/rows` sanity check is about:
 
 ```bash
 uv run bwz matmul -M 4096 -N 4096 -K 4096 -c a100_80gb -d int8            --ideal   # all int8
-uv run bwz matmul -M 4096 -N 4096 -K 4096 -c a100_80gb -d int8 --out int32 --ideal  # int32 result
-uv run bwz matmul -M 4096 -N 4096 -K 4096 -c a100_80gb -d fp16 --out fp32  --ideal  # all float
+uv run bwz matmul -M 4096 -N 4096 -K 4096 -c a100_80gb -d int8 --c int32 --ideal   # int32 result
+uv run bwz matmul -M 4096 -N 4096 -K 4096 -c a100_80gb -d fp16 --c fp32   --ideal  # all float
 uv run bwz matmul -M 4096 -N 4096 -K 4096 -c a100_80gb --a fp16 --b int8   --ideal  # mixed
 ```
 

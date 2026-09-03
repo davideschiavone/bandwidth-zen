@@ -930,9 +930,10 @@ def matmul(
     ),
     out_dtype: DType | None = typer.Option(
         None,
-        "--out",
-        help="Width of the M x N result. Defaults to the wider operand; set int32 or fp32 for a "
-        "widening accumulator",
+        "--c",
+        help="Width of the M x N result C. Defaults to the wider operand; set int32 or fp32 for a "
+        "widening accumulator. Named for the operand, alongside --a and --b: --out on this "
+        "command is the figure directory, and declaring both silently shadowed this one",
         rich_help_panel=PANEL_PRECISION,
     ),
     stationarity: Dataflow | None = typer.Option(

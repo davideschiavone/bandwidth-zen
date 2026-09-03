@@ -175,8 +175,8 @@ never operations:
 
 ```bash
 uv run bwz matmul -M 4096 -N 4096 -K 4096 -c a100_80gb --dtype int8               # all int8
-uv run bwz matmul -M 4096 -N 4096 -K 4096 -c a100_80gb --dtype int8 --out int32   # int32 accumulate
-uv run bwz matmul -M 4096 -N 4096 -K 4096 -c a100_80gb --dtype fp16 --out fp32    # all float
+uv run bwz matmul -M 4096 -N 4096 -K 4096 -c a100_80gb --dtype int8 --c int32     # int32 accumulate
+uv run bwz matmul -M 4096 -N 4096 -K 4096 -c a100_80gb --dtype fp16 --c fp32      # all float
 uv run bwz matmul -M 4096 -N 4096 -K 4096 -c a100_80gb --a fp16 --b int8          # mixed operands
 ```
 
@@ -239,8 +239,8 @@ phase, because one matmul has none of those.
 
 ```bash
 uv run bwz matmul -M 4096 -N 4096 -K 4096 -c a100_80gb --dtype int8               # all int8
-uv run bwz matmul -M 4096 -N 4096 -K 4096 -c a100_80gb --dtype int8 --out int32   # int32 accumulate
-uv run bwz matmul -M 4096 -N 4096 -K 4096 -c a100_80gb --dtype fp16 --out fp32    # all float
+uv run bwz matmul -M 4096 -N 4096 -K 4096 -c a100_80gb --dtype int8 --c int32     # int32 accumulate
+uv run bwz matmul -M 4096 -N 4096 -K 4096 -c a100_80gb --dtype fp16 --c fp32      # all float
 uv run bwz matmul -M 4096 -N 4096 -K 4096 -c a100_80gb --a fp16 --b int8          # mixed operands
 ```
 
