@@ -401,9 +401,13 @@ def _boxes(panels: list[Panel]) -> list[Box]:
                 "dram",
                 "MOVED OVER DRAM",
                 format_bytes(totals[Lane.DRAM]),
-                f"LOAD B {format_bytes(trace.operand_bytes[0])} · "
-                f"A {format_bytes(trace.operand_bytes[1])}\n"
-                f"STORE C {format_bytes(trace.direction_bytes[1])} · {rate} while active\n"
+                # `B=` rather than `B `: the operand's name and the byte unit are
+                # the same letter, so "LOAD B 0 B · A 512 B" read as an imperative
+                # ("load B") followed by an unparseable "0 B · A". The equals sign
+                # is what makes it a label.
+                f"LOAD B={format_bytes(trace.operand_bytes[0])} · "
+                f"A={format_bytes(trace.operand_bytes[1])}\n"
+                f"STORE C={format_bytes(trace.direction_bytes[1])} · {rate} while active\n"
                 f"{format_time(busy[Lane.DRAM])} — {busy[Lane.DRAM] / span:.0%} of the span",
                 band=band,
             ),
@@ -1095,8 +1099,8 @@ def _quantity(row: Row, trace: PipelineTrace) -> str:
         weights, activations = trace.operand_bytes
         return (
             f"{format_bytes(totals[Lane.DRAM])} @ {format_bandwidth(rate)}\n"
-            f"LOAD B {format_bytes(weights)} · A {format_bytes(activations)}\n"
-            f"STORE C {format_bytes(writes)}"
+            f"LOAD B={format_bytes(weights)} · A={format_bytes(activations)}\n"
+            f"STORE C={format_bytes(writes)}"
         )
     if row.lane is Lane.SRAM:
         mean, peak = concurrency[Lane.SRAM]
