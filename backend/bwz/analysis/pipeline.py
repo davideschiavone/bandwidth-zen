@@ -422,11 +422,19 @@ def _overlapped_reduction_spans(
 ) -> list[Span]:
     """The vector unit's share of a reduction that stays on chip (D62).
 
-    One span, on the vector lane, starting when the first wave has produced
-    something to add and running for the ``t_reduce_s`` the report charged. It
-    overlaps the core lane deliberately: that overlap **is** the model — compute
-    is ``max(matrix, vector)``, and a picture that queued the adds behind the
-    arithmetic would draw a cost the report did not charge.
+    **One bar per compute step, each trailing the step that produced its
+    partials** — because a partial cannot be summed before it exists (D66). The
+    vector unit starts when the first wave ends and finishes one step's worth of
+    adds *after the last wave*, so its last bar extends past the core lane. That
+    tail is the pipeline drain, and drawing the reduction as a single block
+    starting at the first wave hid it: the lane then ended before the array did,
+    which said the CUDA cores had finished summing partials that did not exist.
+
+    The overlap is still the model — compute is ``max(matrix, vector)``, and bar
+    *n* of this lane runs against bar *n+1* of the core lane. What the drain adds
+    is drawn span beyond the reported latency, exactly as the DRAM/compute
+    overlap already does: ``max`` is the steady state and
+    :attr:`PipelineTrace.fill_drain_s` is what it omits (D19).
 
     No DRAM span, because no bytes are charged: the partials cross on-chip
     memory, which the v1 machine has no bandwidth term for (D5a), and that is
@@ -437,21 +445,28 @@ def _overlapped_reduction_spans(
     executes = sorted(
         (span for span in alongside if span.stage is Stage.EXEC), key=lambda s: s.end_s
     )
-    start = executes[0].end_s if executes else 0.0
-    slices = grid.k_slices
+    if not executes:
+        return []
+    # Split evenly across the drawn steps rather than per k-slice: the core lane
+    # is already coalesced into these steps, and a vector lane cut a different
+    # way could not be read against it. Equal shares keep the lane summing to
+    # `t_reduce_s` exactly, which is D19's rule for every lane here.
+    share = result.t_reduce_s / len(executes)
+    adds = (grid.k_slices - 1) * float(grid.m) * float(grid.n) / len(executes)
     return [
         Span(
             Lane.VECTOR,
             Stage.REDUCE,
-            f"{slices - 1} x M x N adds, one k-slice behind the array",
-            start,
-            start + result.t_reduce_s,
+            f"summing wave {step + 1}/{len(executes)}'s partials — one wave behind the array",
+            execute.end_s,
+            execute.end_s + share,
             -2,
             phase,
             op_type=op_type,
-            flops=(slices - 1) * float(grid.m) * float(grid.n),
+            flops=adds,
             grid=grid,
         )
+        for step, execute in enumerate(executes)
     ]
 
 

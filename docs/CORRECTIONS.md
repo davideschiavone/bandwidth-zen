@@ -3185,3 +3185,56 @@ emission or figures called `emit_matmul`/`write_timeline` **directly**, where a 
 argument rather than a parse. `test_cli_smoke` ran `--emit` only with an explicit path, which is the
 one form that worked. Four tests now go through the CLI and assert the *set of files on disk* —
 which is the actual contract, and the thing neither bug could have passed.
+
+## D66 — A partial cannot be summed before it exists (2026-09-16)
+
+The user, looking at `timeline-a100_80gb-fp16-is.html` for 512³:
+
+> *"why is the reduction happening in the middle and nothing happens at the end? aren't we reducing
+> the final part?"*
+
+They are. D62 drew an `ON_CHIP` reduction as **one span** starting when the first wave ended and
+running for the whole `t_reduce_s`. On three waves that put the vector lane at 468→885 ns against a
+core lane running to 1194 ns — the CUDA cores finishing their additions **309 ns before the array
+produced the last partials they were adding**.
+
+The overlap D62 argued for is real; the shape drawn for it was not. Both of these have to hold at
+once, and the single block only had the first:
+
+- every bar but the last **overlaps** the core lane — the array builds wave *n+1* while the vector
+  unit sums wave *n*, which is what `max(t_matrix, t_vector)` means;
+- the last bar **follows** the last wave, because the partials it sums do not exist until then.
+
+So the lane is now one bar per compute step, each starting where its own step ended. The final bar
+is the pipeline **drain**, and the drawn span consequently runs past the reported latency — 1.33 µs
+against 1.09 µs, with the 243 ns named in `fill_drain_s` and printed under the figure. That is
+exactly how the DRAM/compute overlap has always worked (D19): `max` is the steady state, and the
+picture is where fill and drain become visible. Each lane still sums to the term it decomposes.
+
+### The root cause is a duplicated schedule, and the user named it
+
+> *"if you base the timeline code on the generated python code, it should be much more trivial"*
+
+Right about the diagnosis. `analysis/pipeline.py` and `bwz/emit/matmul.py` both encode the same
+walk — the grid, the wave assignment, the staging events, where the partials meet — and the emitted
+program has had the correct structure since D62: `partials.accumulate(...)` sits *inside*
+`run_tile`, so it trails each tile by construction and cannot be drawn in the wrong place. The trace
+re-derived that ordering by hand and got it wrong. This is the failure mode CLAUDE.md already
+records once, about the tile grid: *"it was duplicated in `pipeline.tile_count` and
+`tiling.systolic_utilisation` once, and the two drifted."*
+
+What it does **not** imply is that the timeline should be generated from the program. Three reasons,
+recorded so the idea is not re-proposed without them:
+
+1. **The dependency arrow.** `analysis → report → {api, cli, emit, figures}`. `analysis/pipeline.py`
+   importing `bwz/emit/` inverts it.
+2. **The program models counts, not time**, and says so before anything else — *"NOT A BENCHMARK …
+   its wall clock has no relationship to the latency the report predicts"*. The trace is entirely
+   about time.
+3. **A network has no program.** `bwz run` draws a per-operation trace where there is no tile grid
+   to walk (D5a), so the trace needs a path the emitter does not have.
+
+The fix the diagnosis actually points to is to hoist the shared thing **down** into `analysis/`: an
+ordered walk of `(wave, core, tile, stage)` events that `build_trace` assigns durations to and
+`emit` writes as loops, the way `analysis/stationarity.py` already owns the grid both of them read.
+Queued, not done here — it is a refactor across two thousand-line modules and wants its own change.

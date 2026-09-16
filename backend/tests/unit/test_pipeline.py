@@ -668,17 +668,27 @@ def test_weight_sets_le_1_gate_falls_back_b_dataflow_to_write_ahead() -> None:
     assert not any("amortised" in a for a in discounted_report.assumptions)
 
 
-def test_an_on_chip_reduction_is_drawn_alongside_the_array_not_behind_it() -> None:
-    """D62's overlap, in the picture as well as in the number.
+def test_an_on_chip_reduction_trails_each_wave_and_drains_after_the_last() -> None:
+    """D62's overlap and D66's drain, in the picture as well as in the number.
 
-    ``ws`` on A100 puts K on the grid, so the CUDA cores sum partials while the
-    tensor cores build the next k-slice. The report charges ``max(matrix,
-    vector)`` for that, and a trace that queued the adds after the last wave
-    would draw a serialisation the report did not charge — and would push the
-    drawn span past the reported latency, which D19 forbids.
+    ``ws`` on A100 puts K on the grid, so the CUDA cores sum wave *n*'s partials
+    while the tensor cores build wave *n+1*. Two things have to be true at once
+    and the first draft of this only had the first:
 
-    Split-K's reduction *is* a tail, and stays one: two kernels, so nothing can
-    be summed until the first has finished everywhere.
+    * every bar but the last **overlaps** the core lane — that overlap is the
+      model, and a trace that queued the adds after the array would draw a
+      serialisation the report did not charge;
+    * the last bar **follows** the last wave, because a partial cannot be summed
+      before it exists. Drawing the reduction as one block starting at the first
+      wave ended the lane *before* the array did, which claimed the CUDA cores
+      had finished summing partials nobody had computed yet.
+
+    That final bar is the pipeline drain, so the drawn span runs past the
+    reported latency — which is what ``fill_drain_s`` is for (D19), the same way
+    the DRAM/compute overlap already works.
+
+    Split-K's reduction is a tail in a different sense and stays one span: two
+    kernels, so nothing can be summed until the first has finished everywhere.
     """
     chip = idealised(load_chip("a100_80gb"))
     spec = MatmulSpec.model_validate(
@@ -696,16 +706,26 @@ def test_an_on_chip_reduction_is_drawn_alongside_the_array_not_behind_it() -> No
     )
 
     op = report.phases[0].ops[0]
-    reduces = [s for s in trace.spans if s.stage is Stage.REDUCE]
-    executes = [s for s in trace.spans if s.stage is Stage.EXEC]
-    assert len(reduces) == 1 and reduces[0].lane is Lane.VECTOR
-    assert reduces[0].bytes_moved == 0.0, "on-chip partials are charged no DRAM traffic"
+    reduces = sorted((s for s in trace.spans if s.stage is Stage.REDUCE), key=lambda s: s.start_s)
+    executes = sorted((s for s in trace.spans if s.stage is Stage.EXEC), key=lambda s: s.end_s)
+    assert reduces and all(s.lane is Lane.VECTOR for s in reduces)
+    assert len(reduces) == len(executes), "one bar per wave, each trailing its own"
+    assert all(s.bytes_moved == 0.0 for s in reduces), "on-chip partials cross no DRAM"
 
-    # The overlap: it starts while the array is still working, and the lane
-    # still sums to exactly the t_reduce_s the report charged (D19).
-    assert reduces[0].start_s < max(s.end_s for s in executes)
-    assert reduces[0].start_s == pytest.approx(min(s.end_s for s in executes))
-    assert reduces[0].duration_s == pytest.approx(op.t_reduce_s)
-    assert trace.total_s == pytest.approx(
-        max(s.end_s for s in trace.spans if s.lane is not Lane.VECTOR)
-    ), "hidden under the matrix work, so it does not extend the span"
+    # Each bar starts exactly where its wave ended — never before it.
+    for reduce_span, execute in zip(reduces, executes, strict=True):
+        assert reduce_span.start_s == pytest.approx(execute.end_s)
+
+    # The overlap: every bar but the last runs against a later wave's compute.
+    last_wave_end = executes[-1].end_s
+    assert reduces[0].start_s < last_wave_end
+    assert all(s.start_s < last_wave_end for s in reduces[:-1])
+
+    # The drain: the last bar follows the last wave, so the drawn span runs past
+    # the reported latency by exactly one wave's share of the adds (D19/D66).
+    assert reduces[-1].start_s == pytest.approx(last_wave_end)
+    assert trace.total_s > last_wave_end
+    assert trace.total_s == pytest.approx(reduces[-1].end_s)
+
+    # And the lane still sums to exactly the t_reduce_s the report charged.
+    assert sum(s.duration_s for s in reduces) == pytest.approx(op.t_reduce_s)
