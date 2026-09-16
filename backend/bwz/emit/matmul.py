@@ -95,10 +95,22 @@ _STATIONARITY_TITLE: dict[Dataflow, str] = {
 }
 
 
+def decomposition_suffix(stationarity: Dataflow, k_partitions: int) -> str:
+    """``-<stationarity>[-splitk<N>]`` — what makes two runs of one shape differ.
+
+    Shared with the figures deliberately (D65). A page and the program beside it
+    are two views of the *same* decomposition, so they are named alike, and two
+    stationarities of one shape can never overwrite each other's files. Naming
+    only the shape would have `--stationarity is` land on top of `os`'s page —
+    which is exactly what it did.
+    """
+    splits = f"-splitk{k_partitions}" if k_partitions > 1 else ""
+    return f"-{stationarity.value}{splits}"
+
+
 def default_filename(chip_id: str, dtype: DType, stationarity: Dataflow, k_partitions: int) -> str:
     """``matmul-<chip>-<dtype>-<stationarity>[-splitk<N>].py``."""
-    suffix = f"-splitk{k_partitions}" if k_partitions > 1 else ""
-    return f"matmul-{chip_id}-{dtype.value}-{stationarity.value}{suffix}.py"
+    return f"matmul-{chip_id}-{dtype.value}{decomposition_suffix(stationarity, k_partitions)}.py"
 
 
 def predicted_for(

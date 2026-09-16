@@ -82,7 +82,8 @@ so a batch of 128 is `-M 128`.
 | `--a-residency-tiles` | override tiles served per A staging event; power-of-2 divisor of `TILES_PER_GROUP` |
 | `--a-prefetch-depth` | override A's double-buffered staging depth (schedule-only) |
 | `--iterations` | invocations this report represents; only `persistent` reads it |
-| `--emit PATH` | write this decomposition as a **runnable Python program**, §2.6. `-` for stdout |
+| `--emit` | write this decomposition as a **runnable Python program** into `--out`, §2.6 |
+| `--emit-stdout` | print that program instead, and nothing else, so `… \| python -` runs it |
 | `--json` | the raw `Report` as JSON |
 
 ### 2.1 The datasheet check
@@ -510,8 +511,8 @@ deployment listing *is* now: the pseudo-C loop nest the figures used to print wa
 the same change, and `--timeline`'s page and `--animate`'s code pane both show this file.
 
 ```bash
-uv run bwz matmul -M 64 -N 64 -K 128 --chip a100_80gb --emit /tmp/k.py
-python /tmp/k.py
+uv run bwz matmul -M 64 -N 64 -K 128 --chip a100_80gb --emit --out ~/k
+python ~/k/matmul-a100_80gb-fp16-os.py
 ```
 
 ```
@@ -559,8 +560,8 @@ The emitted program takes one flag of its own. It prints which core takes which 
 when A is staged, and **every instruction tile** with its operand ranges:
 
 ```bash
-uv run bwz matmul --m 16 --n 16 --k 17 --chip a100_80gb --ideal --emit /tmp/k.py
-python /tmp/k.py --debug
+uv run bwz matmul --m 16 --n 16 --k 17 --chip a100_80gb --ideal --emit --out ~/k
+python ~/k/matmul-a100_80gb-fp16-os.py --debug
 ```
 
 ```
@@ -604,14 +605,15 @@ expect, from `PREDICTED["mac_slots"] // SLOTS_PER_MMA`, which *is* the `mma()` c
 1000x2000x3000 that is 1.48 million lines. Without the flag nothing changes: every narration site is
 guarded by `if DEBUG:`, so an unread line is never even formatted.
 
-`--emit -` writes to stdout and suppresses everything else, so the whole loop is one line:
+`--emit-stdout` writes to stdout and suppresses everything else, so the whole loop is one line:
 
 ```bash
-uv run bwz matmul -M 64 -N 64 -K 128 --chip a100_80gb --emit - | python -
+uv run bwz matmul -M 64 -N 64 -K 128 --chip a100_80gb --emit-stdout | python -
 ```
 
-`PATH` may be a file, a directory (the default name `matmul-<chip>-<dtype>-<stationarity>[-splitk<N>].py`
-goes in it), or `-`.
+The file is named `matmul-<chip>-<dtype>-<stationarity>[-splitk<N>].py` and lands in `--out`,
+beside the figures — the page and the program are two views of one decomposition, so they share a
+destination and an ending (D65). There is no separate path to give.
 
 **What the file contains, in order.** The constants first — the shape from the command line, the
 chip from its profile, the strategy, then the grid those imply — each with a comment naming where
@@ -696,7 +698,8 @@ tile order asks for. At 1000×2000×3000 on A100 the three numbers are far apart
 point:
 
 ```bash
-uv run bwz matmul -M 1000 -N 2000 -K 3000 --chip a100_80gb --emit /tmp/big.py && python /tmp/big.py
+uv run bwz matmul -M 1000 -N 2000 -K 3000 --chip a100_80gb --emit --out ~/k \
+  && python ~/k/matmul-a100_80gb-fp16-os.py
 ```
 
 ```
@@ -898,9 +901,15 @@ uv run bwz encoder-layer -c a100_80gb -S 512 --timeline --animate --out ~/figs
 ```
 
 ```
-wrote ~/figs/timeline-a100_80gb-fp16.html
-wrote ~/figs/animate-a100_80gb-fp16.html
+wrote ~/figs/timeline-a100_80gb-fp16-os.html
+wrote ~/figs/animate-a100_80gb-fp16-os.html
 ```
+
+**The name ends with the decomposition the page draws** — the same
+`-<stationarity>[-splitk<N>]` the emitted program carries, so `--stationarity is` cannot land on
+top of `os`'s page and a directory of them reads as a comparison (D65). A `--compare-with` page
+whose chips run *different* native dataflows has no single decomposition to name and keeps the
+plain stem, which is the same condition that leaves its stationarity banner blank.
 
 | flag | on | meaning |
 |---|---|---|
@@ -1045,7 +1054,7 @@ cd backend
 uv run bwz matmul -M 10000 -N 10000 -K 10000 -c a100_80gb --ideal --timeline \
   --out /absolute/path/you/want
 
-xdg-open /absolute/path/you/want/timeline-a100_80gb-fp16.html
+xdg-open /absolute/path/you/want/timeline-a100_80gb-fp16-os.html
 ```
 
 The time axis **zooms** (wheel, about the cursor), **pans** (drag) and **resets** (double-click),

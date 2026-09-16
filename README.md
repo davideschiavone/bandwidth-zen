@@ -165,7 +165,7 @@ fudge factor, and `--ideal` does not remove either.
 
 ```bash
 uv run bwz matmul -M 10000 -N 10000 -K 10000 --chip a100_80gb --ideal --timeline --out ..
-xdg-open ../timeline-a100_80gb-fp16.html
+xdg-open ../timeline-a100_80gb-fp16-os.html
 ```
 
 More in [Figures](#figures).
@@ -439,7 +439,7 @@ uv run bwz matmul -M 10000 -N 10000 -K 10000 --chip a100_80gb --dtype fp16 --ide
 uv run bwz matmul -M 10000 -N 10000 -K 10000 --chip a100_80gb --ideal --timeline --out ..
 
 # 3. open it
-xdg-open ../timeline-a100_80gb-fp16.html
+xdg-open ../timeline-a100_80gb-fp16-os.html
 ```
 
 `--out ..` puts them in the repo root, where they are gitignored. `xdg-open` prints nothing and

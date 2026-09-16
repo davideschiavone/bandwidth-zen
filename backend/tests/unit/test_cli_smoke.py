@@ -8,6 +8,8 @@ report path that raised. All of them would have failed here in a second.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from typer.testing import CliRunner
 
@@ -268,3 +270,159 @@ def test_the_result_width_flag_reaches_the_report() -> None:
     assert result.exit_code == 0, result.output
     assert "512 x 512 x 4 B — widening accumulator" in result.output
     assert "1.05 MB" in result.output, "512*512*4 B, not the 262 kB an int8 result would be"
+
+
+def test_emit_and_the_figures_share_one_destination(tmp_path: Path) -> None:
+    """D65: ``--emit`` used to carry a PATH of its own.
+
+    So ``--emit X --out Y`` was two destinations for one run's artifacts, and
+    ``--emit --timeline`` — the natural thing to type — consumed ``--timeline``
+    as that path and wrote the program to a file literally named ``--timeline``.
+    Both now land in ``--out``.
+    """
+    result = runner.invoke(
+        app,
+        [
+            "matmul",
+            "-M",
+            "512",
+            "-N",
+            "512",
+            "-K",
+            "512",
+            "-c",
+            "a100_80gb",
+            "--stationarity",
+            "is",
+            "--ideal",
+            "--emit",
+            "--timeline",
+            "--out",
+            str(tmp_path),
+            "-q",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert sorted(p.name for p in tmp_path.iterdir()) == [
+        "matmul-a100_80gb-fp16-is.py",
+        "timeline-a100_80gb-fp16-is.html",
+    ]
+
+
+def test_a_page_is_named_for_the_decomposition_it_draws(tmp_path: Path) -> None:
+    """Two stationarities of one shape must not overwrite each other (D65).
+
+    The page carries the same ``-<stationarity>[-splitk<N>]`` the emitted
+    program does, so a directory of them reads as the comparison it is. Before
+    this, ``--stationarity is`` landed on top of ``os``'s page and the only way
+    to tell them apart was to open one.
+    """
+    for flow in ("os", "is", "ws"):
+        result = runner.invoke(
+            app,
+            [
+                "matmul",
+                "-M",
+                "512",
+                "-N",
+                "512",
+                "-K",
+                "512",
+                "-c",
+                "a100_80gb",
+                "--stationarity",
+                flow,
+                "--ideal",
+                "--timeline",
+                "--out",
+                str(tmp_path),
+                "-q",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+    result = runner.invoke(
+        app,
+        [
+            "matmul",
+            "-M",
+            "512",
+            "-N",
+            "512",
+            "-K",
+            "512",
+            "-c",
+            "a100_80gb",
+            "--split-k",
+            "4",
+            "--ideal",
+            "--timeline",
+            "--out",
+            str(tmp_path),
+            "-q",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+    assert sorted(p.name for p in tmp_path.iterdir()) == [
+        "timeline-a100_80gb-fp16-is.html",
+        "timeline-a100_80gb-fp16-os-splitk4.html",
+        "timeline-a100_80gb-fp16-os.html",
+        "timeline-a100_80gb-fp16-ws.html",
+    ]
+
+
+def test_a_comparison_of_different_dataflows_names_neither(tmp_path: Path) -> None:
+    """A100 runs ``os`` natively and Metis ``ws``, so one page draws two
+    decompositions and there is no single one to put in its name — the same
+    condition that leaves the stationarity banner blank (D65)."""
+    result = runner.invoke(
+        app,
+        [
+            "matmul",
+            "-M",
+            "512",
+            "-N",
+            "512",
+            "-K",
+            "512",
+            "-c",
+            "a100_80gb",
+            "-d",
+            "int8",
+            "--compare-with",
+            "metis_aipu",
+            "--ideal",
+            "--timeline",
+            "--out",
+            str(tmp_path),
+            "-q",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert [p.name for p in tmp_path.iterdir()] == [
+        "timeline-compare-a100_80gb-vs-metis_aipu-int8.html"
+    ]
+
+
+def test_emit_stdout_prints_the_program_and_nothing_else() -> None:
+    """The ``| python -`` pipeline: a single stray line would be a syntax error."""
+    result = runner.invoke(
+        app,
+        [
+            "matmul",
+            "-M",
+            "64",
+            "-N",
+            "64",
+            "-K",
+            "128",
+            "-c",
+            "a100_80gb",
+            "--stationarity",
+            "ws",
+            "--emit-stdout",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert result.output.startswith("#!/usr/bin/env python3")
+    assert result.output.rstrip().endswith("raise SystemExit(main())")

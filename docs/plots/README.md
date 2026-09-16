@@ -36,8 +36,8 @@ the assumptions drawer come from `bwz matmul` / `bwz run`, and the plot scripts 
 One self-contained file — no server, no port, no download, no CDN. `file://` is enough:
 
 ```bash
-xdg-open docs/plots/timeline-a100_80gb-fp16.html
-# or: google-chrome docs/plots/timeline-a100_80gb-fp16.html
+xdg-open docs/plots/timeline-a100_80gb-fp16-os.html
+# or: google-chrome docs/plots/timeline-a100_80gb-fp16-os.html
 ```
 
 `xdg-open` prints nothing and hands the file to a browser that may already be running, so look for
@@ -96,8 +96,8 @@ Metis gets 6 (LPDDR4x, L2, L1, D-IMC, `d_imc`, `dpu`), A100 gets 5 (HBM2e, L2, L
 
 ```bash
 uv run bwz matmul -M 2048 -N 2048 -K 2048 -c metis_aipu -d int8 \
-    --b-dataflow on-demand --animate --out /tmp/anim
-xdg-open /tmp/anim/animate-metis_aipu-int8.html
+    --b-dataflow on-demand --animate --out ~/anim
+xdg-open ~/anim/animate-metis_aipu-int8-ws.html
 ```
 
 `bwz matmul` or `bwz encoder-layer`, and opt-in — it never runs as part of `make plots`. Not on

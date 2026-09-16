@@ -3138,3 +3138,50 @@ No number moved: the tests that cover widening accumulators (`test_documented_nu
 `test_matmul_workload`) call `matmul_kernel`/`analyze` directly, which is exactly why they stayed
 green through a broken CLI. That is the gap worth naming — a CLI flag is only covered by a test that
 goes through the CLI, and `test_cli_smoke` did not try this one.
+
+## D65 — A page is named for the decomposition it draws, and `--emit` loses its path (2026-09-16)
+
+The user, on `bwz matmul … --stationarity is --ideal --emit . --timeline --out .`:
+
+> *"so the html miss the -is in the name - plus, emit and timeline should both makes their output to
+> out field, emit should not have its own path"*
+
+Two bugs in one command, and the second is worse than it looks.
+
+### The page did not say which decomposition it was of
+
+`_figure_stem` was `<chip>-<dtype>`, deliberately so per D55 — *"unchanged from the names
+docs/plots/README.md documents … so a moved script does not orphan a figure a reader has a link
+to"*. That reasoning predates D53: when every chip had exactly one dataflow, the shape and the chip
+*were* the decomposition. Since `--stationarity` exists, they are not, and three runs of one shape
+wrote three different pages to **one filename** — the last one silently winning.
+
+The stem now ends with the same `-<stationarity>[-splitk<N>]` the emitted program has carried since
+D54, from a single `emit.decomposition_suffix`. A page and the program beside it are two views of
+one decomposition, so they are named alike; `matmul-a100_80gb-fp16-is.py` now sits next to
+`timeline-a100_80gb-fp16-is.html`.
+
+**Omitted where the page draws more than one.** A `--compare-with` page of A100 (`os` natively) and
+Metis (`ws`) has no single decomposition to name, so it keeps the plain stem — the same condition
+that already leaves its stationarity banner blank, now enforced in one place and read by both.
+Nothing tracked was renamed: `docs/plots/*.html` is gitignored and `make plots` regenerates it, so
+the churn was four links in three markdown files.
+
+### `--emit` carried a destination that `--out` already owned
+
+`--emit PATH` and `--out DIR` were two destinations for one run's artifacts. The failure that
+exposes it is not the duplication but the parse: **`--emit --timeline` consumed `--timeline` as the
+path** and wrote the program to a file named `--timeline`, with no error and no page. That file was
+sitting in `backend/` when this was found, which is how long it had gone unnoticed.
+
+`--emit` is now a flag and the program lands in `--out`. The stdout mode — the documented
+`| python -` pipeline, which is not a path but read like one — became its own flag,
+`--emit-stdout`, so nothing in the command line accepts a second destination.
+
+### The gap this pair shares with D64
+
+Both were CLI-shaped, and both survived a green suite for the same reason: every test that covered
+emission or figures called `emit_matmul`/`write_timeline` **directly**, where a filename is an
+argument rather than a parse. `test_cli_smoke` ran `--emit` only with an explicit path, which is the
+one form that worked. Four tests now go through the CLI and assert the *set of files on disk* —
+which is the actual contract, and the thing neither bug could have passed.

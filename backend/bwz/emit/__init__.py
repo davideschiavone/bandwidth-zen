@@ -21,6 +21,7 @@ import ast
 
 from bwz.emit.matmul import (
     EmittedProgram,
+    decomposition_suffix,
     default_filename,
     emit_matmul,
     predicted_for,
@@ -30,6 +31,7 @@ __all__ = [
     "EmittedProgram",
     "check",
     "constants_of",
+    "decomposition_suffix",
     "default_filename",
     "emit_matmul",
     "predicted_for",

@@ -35,7 +35,7 @@ from bwz.analysis.stationarity import (
     residency_phrase,
 )
 from bwz.emit import check as emit_check
-from bwz.emit import emit_matmul
+from bwz.emit import decomposition_suffix, emit_matmul
 from bwz.figures import (
     Panel,
     build_matmul,
@@ -381,7 +381,8 @@ def _emit_program(
     deployment: DeploymentSpec,
     report: Report,
     *,
-    target: str,
+    out: Path,
+    to_stdout: bool,
 ) -> None:
     """Write the matmul's decomposition out as a runnable program (D54).
 
@@ -421,18 +422,16 @@ def _emit_program(
     )
     emit_check(program)
 
-    if target == "-":
-        # Nothing else may reach stdout in this mode: `--emit - | python -` is
-        # the documented way to run what was just emitted.
+    if to_stdout:
+        # Nothing else may reach stdout in this mode: `--emit-stdout | python -`
+        # is the documented way to run what was just emitted.
         print(program.source, end="")
         return
 
-    path = Path(target)
-    # A trailing slash means "into this directory", whether or not it exists
-    # yet: `--out` creates the directory it is given and `--emit` refusing to is
-    # an inconsistency a reader meets as a traceback, not a message (D64).
-    directory = path.is_dir() or target.endswith(("/", "\\"))
-    destination = path / program.filename if directory else path
+    # The program lands where the figures land. It used to carry a PATH of its
+    # own, which made `--emit X --out Y` two destinations for one run's
+    # artifacts and invited exactly that (D65).
+    destination = out / program.filename
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(program.source, encoding="utf-8")
     _wrote(destination)
@@ -477,15 +476,36 @@ def _figure_chips(primary: str, compare_with: list[str], *, ideal: bool) -> list
     return [_chip_for(chip_id, ideal) for chip_id in [primary, *compare_with]]
 
 
-def _figure_stem(chips: list[HardwareSpec], dtype: DType, suffix: str = "") -> str:
+def _figure_stem(
+    chips: list[HardwareSpec],
+    dtype: DType,
+    suffix: str = "",
+    *,
+    panels: list[Panel] | None = None,
+) -> str:
     """The filename stem: one chip's id, or every chip's for a comparison.
 
-    Unchanged from the names ``docs/plots/README.md`` documents and ``make
-    plots`` regenerates, so a moved script does not orphan a figure a reader has
-    a link to (D55).
+    Ends with the decomposition the page draws — the same
+    ``-<stationarity>[-splitk<N>]`` the emitted program carries, from
+    :func:`bwz.emit.decomposition_suffix`, so a page and the program beside it
+    are named alike and two stationarities of one shape cannot overwrite each
+    other (D65). Omitted where the page draws *more than one*: a comparison of
+    chips whose native dataflows differ has no single decomposition to name,
+    which is the same condition that keeps the stationarity banner silent.
     """
     who = chips[0].id if len(chips) == 1 else "compare-" + "-vs-".join(c.id for c in chips)
-    return f"{who}{suffix}-{dtype.value}"
+    return f"{who}{suffix}-{dtype.value}{_decomposition_of(panels)}"
+
+
+def _decomposition_of(panels: list[Panel] | None) -> str:
+    """``-<stationarity>[-splitk<N>]`` when every panel agrees, else ``""``."""
+    if not panels:
+        return ""
+    machines = {(p.machine.stationarity, p.machine.k_partitions) for p in panels}
+    if len(machines) != 1:
+        return ""
+    stationarity, k_partitions = machines.pop()
+    return decomposition_suffix(stationarity, k_partitions)
 
 
 def _draw(
@@ -566,7 +586,12 @@ def _draw_graph_figures(
         # alone and naming it would be noise. Same filenames docs/plots/README.md
         # documents, so a moved script does not orphan an existing link.
         phase = panels[0].work.trace.spans[0].phase.value if panels[0].work.trace.spans else ""
-        stem = _figure_stem(chips, dtype, f"{suffix}-{phase}" if with_phase and phase else suffix)
+        stem = _figure_stem(
+            chips,
+            dtype,
+            f"{suffix}-{phase}" if with_phase and phase else suffix,
+            panels=panels,
+        )
         _draw(
             panels,
             command=_command(),
@@ -1038,15 +1063,20 @@ def matmul(
         "where a wall of tables per chip would drown the output",
         rich_help_panel=PANEL_OUTPUT,
     ),
-    emit: str | None = typer.Option(
-        None,
+    emit: bool = typer.Option(
+        False,
         "--emit",
-        metavar="PATH",
         help="Write this decomposition out as a RUNNABLE Python program: same tile "
         "grid, same staging events, same core assignment, counting what it moves and "
-        "asserting those counts against this report (D54). PATH may be a file, a "
-        "directory (the default filename goes in it), or '-' for stdout — with '-' "
-        "nothing else is printed, so `--emit - | python -` works.",
+        "asserting those counts against this report (D54). It lands in --out, beside "
+        "the figures, named for the chip, the dtype and the decomposition.",
+        rich_help_panel=PANEL_OUTPUT,
+    ),
+    emit_stdout: bool = typer.Option(
+        False,
+        "--emit-stdout",
+        help="Print that program to stdout instead, and nothing else — so "
+        "`bwz matmul ... --emit-stdout | python -` runs what was just emitted.",
         rich_help_panel=PANEL_OUTPUT,
     ),
     as_json: bool = typer.Option(
@@ -1119,10 +1149,12 @@ def matmul(
         k_partitions=split_k,
     )
 
-    if emit == "-":
-        # Stdout mode prints the program and nothing else, so `--emit - | python -`
-        # runs what was just emitted. The table would be a syntax error.
-        _emit_program(spec, _chip_for(chip, ideal), machine, deployment, report, target=emit)
+    if emit_stdout:
+        # Stdout mode prints the program and nothing else, so
+        # `--emit-stdout | python -` runs it. The table would be a syntax error.
+        _emit_program(
+            spec, _chip_for(chip, ideal), machine, deployment, report, out=out, to_stdout=True
+        )
         return
 
     summary = report.summary
@@ -1299,8 +1331,10 @@ def matmul(
     for assumption in report.assumptions:
         console.print(f"  • {assumption}", highlight=False)
 
-    if emit is not None:
-        _emit_program(spec, _chip_for(chip, ideal), machine, deployment, report, target=emit)
+    if emit:
+        _emit_program(
+            spec, _chip_for(chip, ideal), machine, deployment, report, out=out, to_stdout=False
+        )
 
     if timeline or animate:
         chips = _figure_chips(chip, compare_with, ideal=ideal)
@@ -1326,7 +1360,7 @@ def matmul(
             panels,
             command=_command(),
             out=out,
-            stem=_figure_stem(chips, spec.operand_dtype),
+            stem=_figure_stem(chips, spec.operand_dtype, panels=panels),
             timeline=timeline,
             animate=animate,
         )
