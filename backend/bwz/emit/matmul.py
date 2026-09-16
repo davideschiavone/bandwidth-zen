@@ -1054,7 +1054,11 @@ def _weight_nest(unit: ComputeUnit, placement: ReductionPlacement) -> list[Line]
         (
             "        partials.accumulate(m0, n0, product)     # a PARTIAL over K; nothing is"
             " stored",
-            "exec",
+            # "reduce", not "exec": this line IS the reduction the report charges
+            # to the vector unit and the trace draws on the vector lane (D62), so
+            # tagging it "exec" left the animation with a vector bar playing and
+            # no line lit under it (D66).
+            "reduce",
         ),
     ]
     out += _plain(["    counters.count_tile()"])
@@ -1104,7 +1108,11 @@ def _input_nest(placement: ReductionPlacement) -> list[Line]:
         (
             "        partials.accumulate(m0, n0, product)     # a PARTIAL over K; nothing is"
             " stored",
-            "exec",
+            # "reduce", not "exec": this line IS the reduction the report charges
+            # to the vector unit and the trace draws on the vector lane (D62), so
+            # tagging it "exec" left the animation with a vector bar playing and
+            # no line lit under it (D66).
+            "reduce",
         ),
     ]
     out += _plain(["    counters.count_tile()"])

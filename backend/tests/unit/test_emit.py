@@ -656,3 +656,24 @@ def test_a_spilled_accumulator_is_shown_as_tier_2_not_asserted() -> None:
     assert program.predicted["partial_dram_bytes"] > 0
     assert "tier 2, and the one place this file and the report model different" in program.source
     assert program.predicted["partial_sum_adds"] == 7 * 64 * 64, "the adds are still asserted"
+
+
+def test_every_stage_the_trace_plays_has_a_line_in_the_program() -> None:
+    """The animation highlights real lines of the real program (D54/D66).
+
+    A K-on-grid walk's `partials.accumulate(...)` is the reduction: the report
+    charges it to the vector unit and the trace draws it on the vector lane. It
+    was tagged ``exec``, the tag its neighbouring ``mma`` carries, so the
+    animation played a REDUCE bar with **no line lit under it** — the bars and
+    the highlighting come from different places, and for this one stage they did
+    not meet. Asserted here rather than noticed in a browser.
+    """
+    for flow in (Dataflow.WEIGHT_STATIONARY, Dataflow.INPUT_STATIONARY):
+        program, *_ = _emit("a100_80gb", stationarity=flow)
+        tags = {tag for tag, _ in program.stage_lines}
+        assert "reduce" in tags, f"{flow.value}: the accumulate line is the reduction"
+        assert "exec" in tags, f"{flow.value}: the mma line is still the arithmetic"
+
+    # os cuts nothing, so it owes no reduction and must claim no reduce lines.
+    plain, *_ = _emit("a100_80gb")
+    assert "reduce" not in {tag for tag, _ in plain.stage_lines}

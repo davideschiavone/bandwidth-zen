@@ -3238,3 +3238,23 @@ The fix the diagnosis actually points to is to hoist the shared thing **down** i
 ordered walk of `(wave, core, tile, stage)` events that `build_trace` assigns durations to and
 `emit` writes as loops, the way `analysis/stationarity.py` already owns the grid both of them read.
 Queued, not done here — it is a refactor across two thousand-line modules and wants its own change.
+
+### A second instance, found by asking the question
+
+Checking *how much* the pages already depend on the program turned one up. `figures/` does import
+`bwz.emit` — the code pane **is** the emitted program, and the animation lights its lines as the
+schedule plays, mapping each `Stage` onto a tag the emitter wrote. But `analysis/pipeline.py`, which
+decides the bars and their timing, imports nothing from it. So the bars and the highlighting come
+from two places, and for one stage they did not meet:
+
+```
+stage_lines tags in the emitted program: ['exec', 'load_a', 'load_b', 'store']
+stages the trace plays back:             ['exec', 'hold', 'load_a', 'reduce', 'store']
+```
+
+A K-on-grid walk's `partials.accumulate(...)` was tagged `exec` — the tag its neighbouring `mma`
+carries — so a `ws`/`is` animation played a REDUCE bar on the vector lane with **no line lit under
+it**. Only split-K's second kernel had ever claimed the `reduce` tag. That line *is* the reduction:
+the report charges it to the vector unit and the trace draws it there, so it is tagged `reduce` now,
+and a test asserts every stage the trace plays has lines in the program rather than leaving it to be
+noticed in a browser.
