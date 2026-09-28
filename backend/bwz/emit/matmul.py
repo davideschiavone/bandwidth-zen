@@ -368,10 +368,7 @@ def _constants(
     sub_cycles = _sub_cycles(machine)
     widths = ", ".join(f'"{dtype.value}"' for dtype in (a_dtype, b_dtype, c_dtype))
     k_tiles = max(1, math.ceil(grid.k / rows))
-    bounds = tuple(
-        (part * k_tiles // grid.k_partitions, (part + 1) * k_tiles // grid.k_partitions)
-        for part in range(grid.k_partitions)
-    )
+    bounds = _k_tile_bounds(grid, rows)
 
     out = [
         _rule("1. the shape"),
@@ -880,6 +877,155 @@ def _walk(
     return out
 
 
+def _k_tile_bounds(grid: TileGrid, rows: int) -> tuple[tuple[int, int], ...]:
+    """The K instruction tiles each split-K piece sweeps, as ``(first, past_last)``.
+
+    One piece — the whole of K — when there is no split-K.
+    """
+    # TODO(D67-open): "partition", "part", "piece", "k_partitions" and K_TILE_BOUNDS
+    # all name split-K's cut of K, and "k-slice" names the unrelated cut ws/is make
+    # by putting K on the grid. Rename to one clear vocabulary when the Axelera
+    # work starts; kept as-is until then so the emitted files stay diffable.
+    k_tiles = max(1, math.ceil(grid.k / rows))
+    return tuple(
+        (part * k_tiles // grid.k_partitions, (part + 1) * k_tiles // grid.k_partitions)
+        for part in range(grid.k_partitions)
+    )
+
+
+_PICTURE_MAX = 8
+"""The most grid rows or columns :func:`_grid_picture` draws; past it the middle is elided."""
+
+
+def _shown(count: int) -> list[int | None]:
+    """Which indices of *count* to draw: all of them, or the first and last few.
+
+    ``None`` marks the elided middle. Past :data:`_PICTURE_MAX` the picture keeps
+    the first four and the last three, so both edges — the ragged last tile
+    included — stay visible and the picture never grows past 8 x 8.
+    """
+    if count <= _PICTURE_MAX:
+        return list(range(count))
+    tail = (_PICTURE_MAX - 1) // 2
+    head = _PICTURE_MAX - 1 - tail
+    return [*range(head), None, *range(count - tail, count)]
+
+
+def _grid_picture(grid: TileGrid, unit: ComputeUnit) -> list[str]:
+    """LEVEL 3 drawn: the grid as a box of numbered tiles, then one tile's work.
+
+    The grid is the stationary operand cut into array-sized blocks, so its axes
+    are that operand's two dimensions (C: M x N, B: K x N, A: M x K) and the
+    third is swept (D53). The picture says so with this run's numbers, then
+    follows one tile through its sweep and says where its result goes — which
+    is where ``os`` and ``ws``/``is`` part company.
+    """
+    rows, cols = unit.systolic_dims or (1, 1)
+    side = {Dim.M: rows, Dim.N: cols, Dim.K: rows}
+    row_dim, col_dim, swept = grid.row_dim, grid.col_dim, grid.swept_dim
+    row_var, col_var, swept_var = _TILE_INDEX[row_dim], _TILE_INDEX[col_dim], _TILE_INDEX[swept]
+    shown_rows, shown_cols = _shown(grid.rows), _shown(grid.cols)
+    heads = [f"{col_var}={c}" if c is not None else "..." for c in shown_cols]
+    labels = [
+        f"t{r * grid.cols + c}"
+        for r in shown_rows
+        if r is not None
+        for c in shown_cols
+        if c is not None
+    ]
+    width = max(len(text) for text in [*heads, *labels]) + 2
+
+    def rule(left: str, middle: str, right: str) -> str:
+        return "  " + left + middle.join("─" * width for _ in shown_cols) + right
+
+    out = [
+        f"columns: {col_dim.value} = {grid.extent(col_dim)} -> {grid.cols} chunks of"
+        f" {side[col_dim]} ({col_var})",
+        f"rows:    {row_dim.value} = {grid.extent(row_dim)} -> {grid.rows} chunks of"
+        f" {side[row_dim]} ({row_var})",
+        "",
+        rule("┌", "┬", "┐"),
+    ]
+    for position, r in enumerate(shown_rows):
+        if r is None:
+            cells, tail = ["⋮".center(width) for _ in shown_cols], ""
+        else:
+            cells = [
+                (f"t{r * grid.cols + c}" if c is not None else "…").center(width)
+                for c in shown_cols
+            ]
+            tail = f"  {row_var} = {r}"
+        out.append("  │" + "│".join(cells) + "│" + tail)
+        last = position == len(shown_rows) - 1
+        out.append(rule("└", "┴", "┘") if last else rule("├", "┼", "┤"))
+    out.append("   " + " ".join(head.center(width) for head in heads))
+    out.append("")
+
+    operand = grid.resident.value
+    block = f"{side[row_dim]}x{side[col_dim]}"
+    grid_size = f"{grid.rows} x {grid.cols} = {grid.rows * grid.cols:,} tiles"
+    if swept is Dim.K:
+        out.append(f"{grid_size}, each one a {block} block of C, accumulated in place.")
+    elif unit.weight_sets <= 1 and operand == "B":
+        out.append(f"{grid_size}, each one a {block} block of B (stays put in name only here).")
+    else:
+        out.append(f"{grid_size}, each one a {block} block of {operand} that stays put.")
+    if grid.k_partitions > 1:
+        out += [
+            f"x SPLIT_K = {grid.k_partitions}: the whole grid is repeated once per piece of K,",
+            f"so there are {grid.tiles:,} tiles; tile = part x {grid.rows * grid.cols}"
+            f" + {row_var} x {grid.cols} + {col_var}. Only piece 0 is drawn.",
+        ]
+
+    # One tile, followed through its sweep.
+    at = {row_dim: min(1, grid.rows - 1), col_dim: min(1, grid.cols - 1)}
+    tile = at[row_dim] * grid.cols + at[col_dim]
+
+    def span(dim: Dim) -> str:
+        if dim is swept:
+            return f"{swept_var}-chunk"
+        first = at[dim] * side[dim]
+        return f"{first}:{min(first + side[dim], grid.extent(dim))}"
+
+    if swept is Dim.K:
+        low, high = _k_tile_bounds(grid, rows)[0]
+    else:
+        low, high = 0, max(1, math.ceil(grid.extent(swept) / side[swept]))
+    held = {"A": (Dim.M, Dim.K), "B": (Dim.K, Dim.N), "C": (Dim.M, Dim.N)}[operand]
+    out += [
+        "",
+        f"Tile t{tile} ({row_var}={at[row_dim]}, {col_var}={at[col_dim]}) holds"
+        f" {operand}[{span(held[0])}, {span(held[1])}]; its sweep is:",
+        "",
+        f"    for {swept_var} in {low}..{high - 1}:",
+        f"        C[{span(Dim.M)}, {span(Dim.N)}]  +=  A[{span(Dim.M)}, {span(Dim.K)}]"
+        f"  @  B[{span(Dim.K)}, {span(Dim.N)}]",
+        "",
+    ]
+    if swept is Dim.K and grid.k_partitions > 1:
+        out += [
+            "Every step adds into the same block of C, but only over piece 0's share of K:",
+            f"what the tile ends with is a PARTIAL. The other {grid.k_partitions - 1} pieces'"
+            " partials go",
+            "through DRAM too, and KERNEL 2 adds them all after the last wave.",
+        ]
+    elif swept is Dim.K:
+        out += [
+            "Every step adds into the same block of C in this core's accumulator, so",
+            "when the loop ends that block is finished: no partial ever leaves the tile.",
+        ]
+    else:
+        others = (grid.rows if row_dim is Dim.K else grid.cols) - 1
+        fixed = col_var if row_dim is Dim.K else row_var
+        whole = f"C[:, {span(Dim.N)}]" if row_dim is Dim.K else f"C[{span(Dim.M)}, :]"
+        out += [
+            f"Each step is only a PARTIAL: {whole} also needs the other {others} tile(s)",
+            f"with the same {fixed}, one per kt, which may run on other cores. Their",
+            "partials meet in `partials`, on chip.",
+        ]
+    return out
+
+
 def _levels_docstring(
     grid: TileGrid,
     dataflow: DataflowPlan,
@@ -929,7 +1075,11 @@ def _levels_docstring(
         "    one is swept. Inside a tile, A is staged into a buffer every core shares (once",
         f"    per {dataflow.group_name}), one operand stays put, and the others stream past it.",
         "",
+        "    LEVEL 3, drawn. Each box is one tile, numbered as `tile` is below:",
+        "",
     ]
+    lines += [f"      {line}" if line else "" for line in _grid_picture(grid, unit)]
+    lines += [""]
     lines += [f"    {line}" if line else "" for line in _explanation(grid, unit)]
     if grid.swept_dim is not Dim.K:
         lines += _placement_note(placement)
@@ -1004,6 +1154,8 @@ def _position(grid: TileGrid, indent: str) -> list[Line]:
     ]
     if grid.swept_dim is Dim.K:
         lines += [
+            # TODO(D67-open): "part"/"piece" is split-K's name for a cut of K; rename
+            # with the rest of that vocabulary (see _k_tile_bounds).
             _commented(f"{indent}part = tile // (GRID_ROWS * GRID_COLS)", "split-K piece"),
             _commented(f"{indent}{row} = tile % (GRID_ROWS * GRID_COLS) // GRID_COLS", rows_label),
         ]

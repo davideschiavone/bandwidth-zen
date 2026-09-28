@@ -246,6 +246,39 @@ def test_every_split_is_in_one_function() -> None:
         assert order == sorted(order), flow
 
 
+def test_walk_draws_its_own_tile_grid() -> None:
+    """The docstring draws LEVEL 3 for every stationarity, numbered as ``tile`` is.
+
+    The grid is the stationary operand cut into array-sized blocks, so its axes
+    must be that operand's two dimensions: C's M x N, B's K x N, A's M x K.
+    """
+    expected = {
+        Dataflow.OUTPUT_STATIONARY: ("rows:    M", "columns: N", "block of C", "no partial"),
+        Dataflow.WEIGHT_STATIONARY: ("rows:    K", "columns: N", "block of B", "PARTIAL"),
+        Dataflow.INPUT_STATIONARY: ("rows:    M", "columns: K", "block of A", "PARTIAL"),
+    }
+    for flow, phrases in expected.items():
+        program, *_ = _emit("a100_80gb", stationarity=flow)
+        doc = program.source.split("def walk(", 1)[1].split('"""', 2)[1]
+        assert "┌" in doc and "│  t0  │" in doc, flow
+        for phrase in phrases:
+            assert phrase in doc, (flow, phrase)
+
+
+def test_a_big_grid_is_drawn_with_its_middle_elided() -> None:
+    """Past 8 rows or columns the picture keeps both edges and elides the middle."""
+    program, *_ = _emit("a100_80gb", shape=(512, 1000, 256))
+    doc = program.source.split("def walk(", 1)[1].split('"""', 2)[1]
+    assert "32 x 63 = 2,016 tiles" in doc
+    for shown in ("mt = 3", "mt = 29", "mt = 31", "nt=62", "t2015"):
+        assert shown in doc, shown
+    for hidden in ("mt = 4", "mt = 28", "nt=4 "):
+        assert hidden not in doc, hidden
+    assert "⋮" in doc and "…" in doc
+    box = [line for line in doc.splitlines() if line.strip().startswith("│")]
+    assert len(box) == 8, "at most 8 rows of boxes"
+
+
 # ----------------------------------------------------------------------- constants
 
 

@@ -122,6 +122,8 @@ class TileGrid:
 
     def partition_of(self, tile_index: int) -> int:
         """Which split-K partition a flat tile index belongs to."""
+        # TODO(D67-open): partition / k_partitions / k_slices name two different
+        # cuts of K (split-K's, and K on the grid); rename when the Axelera work starts.
         return tile_index // (self.rows * self.cols)
 
     @property

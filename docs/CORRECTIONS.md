@@ -3303,3 +3303,16 @@ Repetition, deliberately: the generated file restates the grid arithmetic inline
 calling helpers, and the prologue repeats the grid-position lines. Counts, checks and animation
 stage tags are unchanged; every emitted program still asserts its tier-1 counts against the report.
 
+### Open: split-K's vocabulary (`TODO(D67-open)`)
+
+Two different cuts of K share overlapping names. Split-K's cut is a "partition" in
+`TileGrid.k_partitions`/`partition_of`, a "piece" or `part` in the emitted program, and
+`K_TILE_BOUNDS` in its constants; K on the grid under `ws`/`is` makes "k-slices", and
+`TileGrid.k_slices` counts *both*. `walk()`'s docstring now draws the grid and says which is which,
+but the names still invite the confusion. Deferred on purpose until the Axelera work, so the emitted
+files stay diffable against today's; the sites carry `TODO(D67-open)`.
+
+`walk()`'s docstring also draws LEVEL 3: the grid as numbered boxes (at most 8 x 8, the middle
+elided past that so both edges stay visible), then one tile followed through its sweep and where its
+result goes.
+
