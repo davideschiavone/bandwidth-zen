@@ -1484,7 +1484,7 @@ def _weight_body(grid: TileGrid, dataflow: DataflowPlan, unit: ComputeUnit) -> l
                     " The column's",
                     "    #    other k-slices go through its other sets, in other waves (D68).",
                 ]
-                if sums_locally(grid, unit)
+                if deal_for(grid, unit).keeps_k_on_unit
                 else []
             ),
         ]

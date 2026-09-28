@@ -344,9 +344,21 @@ def sums_locally(grid: TileGrid, unit: ComputeUnit) -> bool:
     column count happened to divide the unit count, so Metis at N=512, K=8192
     reported "summed in the periphery" for 16 k-slices spread over 4 cores.
     """
-    if not grid.needs_reduction or grid.k_slices <= 1 or grid.materialises_partials:
+    if not grid.needs_reduction or grid.k_slices <= 1:
         return False
-    if grid.row_dim is not Dim.K:
+    return can_sum_locally(grid, unit)
+
+
+def can_sum_locally(grid: TileGrid, unit: ComputeUnit) -> bool:
+    """Whether *unit* could sum this grid's K locally, however many slices K has.
+
+    :func:`sums_locally` without its "is there anything to sum" test. The deal
+    follows this one, so a unit that accumulates K in its periphery always runs
+    the column-per-unit deal — identical to round-robin when K is a single slice
+    (one grid row cannot be straddled), and the same walk in every emitted
+    program for that unit whatever K is.
+    """
+    if grid.materialises_partials or grid.row_dim is not Dim.K:
         return False
     return grid.k <= accumulation_depth(unit)
 
@@ -442,8 +454,8 @@ def deal(grid: TileGrid, units: int, *, keep_k_on_unit: bool) -> Deal:
 
 
 def deal_for(grid: TileGrid, unit: ComputeUnit) -> Deal:
-    """The deal *unit* runs *grid* with: column-per-unit exactly when it sums K locally."""
-    return deal(grid, unit.count, keep_k_on_unit=sums_locally(grid, unit))
+    """The deal *unit* runs *grid* with: column-per-unit wherever it can sum K locally."""
+    return deal(grid, unit.count, keep_k_on_unit=can_sum_locally(grid, unit))
 
 
 @dataclass(frozen=True, slots=True)
