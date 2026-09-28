@@ -618,41 +618,76 @@ destination and an ending (D65). There is no separate path to give.
 **What the file contains, in order.** The constants first — the shape from the command line, the
 chip from its profile, the strategy, then the grid those imply — each with a comment naming where
 its value came from and nothing anywhere that is a free parameter. Then a `PREDICTED` block, which
-is the report's own numbers. Then the loop nest, which is the part to read. The runtime that makes
-it run — counted DRAM, the shared staging buffer, the lockstep wave loop — is at the **bottom**,
-against convention and deliberately: 400 lines of machinery between the constants and the walk
-would bury the thing you came for.
+is the report's own numbers. Then **one function, `walk()`, which is the part to read**: every split
+the decomposition makes is in it, outermost first — waves, the core's tile, the tile's place in the
+grid, A's staging, what stays put, the sweep, one instruction, and where C lands after the last wave
+(D67). The runtime that makes it run — counted DRAM, the shared staging buffer, starting one thread
+per core — is at the **bottom**, against convention and deliberately: 400 lines of machinery
+between the constants and the walk would bury the thing you came for.
+
+`walk()`'s docstring is the hierarchy as a table, with this run's numbers:
+
+```
+      LEVEL 1  waves        1 = ceil(16 tiles / 432 cores)
+      LEVEL 2  cores        16 of 432 in use; each takes one tile per wave
+      LEVEL 3  tile grid    M x N = 4 x 4 = 16 tiles
+               (parallel)   the two dimensions ON the grid: M and N
+      LEVEL 4  the sweep    K: 8 steps of 16
+               (in order)   the one dimension NOT on the grid: K
+      LEVEL 5  one mma()    16 x 16 x 16 = 4,096 MAC slots, the bottom
+```
+
+and the code below it carries the same `# == LEVEL n` markers:
 
 ```python
-def run_tile(tile: int, dram: Dram, pad: Scratchpad) -> None:
-    """One output tile. C stays in the accumulator; K is swept INSIDE it.
+    def core(core_id: int, end_of_wave: Callable[[], None]) -> None:
+        for wave in range(WAVES):                           # LEVEL 1: waves, one after another
+            tile = wave * USED_CORES + core_id              # LEVEL 2: this core's tile
+            if tile >= TILES:
+                ...
+                counters.count_idle_core_wave()
+                end_of_wave()
+                continue
+            ...
+            # == LEVEL 3: the tile grid — where this tile sits in the M x N grid
+            part = tile // (GRID_ROWS * GRID_COLS)          # split-K piece
+            mt = tile % (GRID_ROWS * GRID_COLS) // GRID_COLS  # grid row    -> M
+            nt = tile % GRID_COLS                           # grid column -> N
+            ...
+            # -- what stays put: C, in this core's accumulator
+            acc = zeros(m1 - m0, n1 - n0, ACC_DTYPE)                # stays put
 
-    The whole contraction for this output block happens in one core's own
-    accumulator, which is exactly why output-stationary owes no reduction: no
-    partial sum ever leaves this function (D53).
-    """
-    mt, nt, part = tile_row(tile), tile_col(tile), partition_of(tile)
-    ...
-    acc = zeros(m1 - m0, n1 - n0, ACC_DTYPE)     # the accumulator that stays put
-    for kt in range(kt0, kt1):                   # K is swept INSIDE this tile
-        k0, k1 = kt * ROWS, min(kt * ROWS + ROWS, K)
-        a = sub(band, 0, m1 - m0, k0 - k_lo, k1 - k_lo)   # already on chip
-        b = dram.read_b(k0, k1, n0, n1)                   # crosses DRAM
-        mma(acc, a, b, COUNTERS, SLOTS_PER_MMA)
+            # == LEVEL 4: the sweep — K, INSIDE this tile
+            for kt in range(kt0, kt1):                              # K is swept INSIDE this tile
+                k0, k1 = kt * ROWS, min(kt * ROWS + ROWS, K)
+                a = sub(band, 0, m1 - m0, k0 - k_lo, k1 - k_lo)     # already on chip
+                b = dram.read_b(k0, k1, n0, n1)                     # crosses DRAM
+                # == LEVEL 5: one instruction
+                mma(acc, a, b, counters, SLOTS_PER_MMA)
 
-    dram.write_c(m0, n0, acc)                    # finished, not a partial
+            dram.write_c(m0, n0, acc)                               # finished, not a partial
 ```
+
+The code of levels 1, 2 and 5 is identical for every stationarity, so
+`diff matmul-a100_80gb-fp16-os.py matmul-a100_80gb-fp16-ws.py` lands every difference in the
+docstring's table and in levels 3 and 4.
 
 Ask the same shape for weight-stationary and the nest is a different shape, because the
 decomposition is:
 
 ```python
-    b = dram.read_b(k0, k1, n0, n1)              # the operand that stays put
-    band = stage_a(tile, dram, pad)
+            # == LEVEL 3: the tile grid — where this tile sits in the K x N grid
+            kt = tile // GRID_COLS                          # grid row    -> K
+            nt = tile % GRID_COLS                           # grid column -> N
+            ...
+            # -- what stays put: B's tile (in name only here: see the docstring)
+            b = dram.read_b(k0, k1, n0, n1)                         # stays put
 
-    for mt in range(M_TILES):                    # M streams past the resident tile
-        ...
-        partials.accumulate(m0, n0, product)     # a PARTIAL over K; nothing is stored
+            # == LEVEL 4: the sweep — M streams past, every step leaves a PARTIAL
+            for mt in range(M_TILES):                               # M streams past the resident tile
+                ...
+                mma(product, a, b, counters, SLOTS_PER_MMA)
+                partials.accumulate(m0, n0, product)                # a PARTIAL over K; nothing stored
 ```
 
 That `partials` object has to exist under `ws` and does not under `os`, which is D53's claim in one
@@ -684,7 +719,7 @@ real bug on one side or the other.
 
 Wave occupancy and shape padding are pinned as **integers** — `idle_core_waves` and `mac_slots` —
 rather than as floats, and the program prints the ratios from the counts it asserted. Same claim,
-no float comparison. The `if tile < TILES` inside `run_waves` *is* wave occupancy (D30), executable.
+no float comparison. The `if tile >= TILES` branch inside `walk()` *is* wave occupancy (D30), executable.
 
 Tier 2 is printed and not asserted, and the B rows above are it — with one more that appears only
 when the report's accumulator did not fit on chip: the partial *bytes*. There the report charges a

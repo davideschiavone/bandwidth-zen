@@ -149,7 +149,7 @@ def test_a_tiled_matmul_carries_its_runnable_program(tmp_path: Path) -> None:
     page = out.read_text(encoding="utf-8")
 
     assert "run it yourself" in page.lower()
-    assert "def run_tile(" in page
+    assert "def walk(" in page
     assert "matmul-a100_80gb-fp16-os.py" in page, "named, so --emit finds the same file"
 
 
@@ -165,7 +165,7 @@ def test_a_workload_with_no_tile_grid_falls_back_to_the_sequence_listing(
     write_timeline([_matmul_panel("a100_80gb", DType.FP32)], "bwz matmul (test)", out)
     page = out.read_text(encoding="utf-8")
 
-    assert "def run_tile(" not in page
+    assert "def walk(" not in page
     assert "declares no array geometry" in page
 
 
@@ -195,7 +195,7 @@ def test_a_comparison_page_covers_every_chip(tmp_path: Path) -> None:
     assert "Axelera Metis AIPU" in page
     # One program per chip: the mapping is exactly what differs between the two,
     # so this is the section a comparison must not render once (D54).
-    assert page.count("def run_tile(") == 2
+    assert page.count("def walk(") == 2
 
 
 def test_a_comparison_refuses_a_precision_a_chip_cannot_run() -> None:

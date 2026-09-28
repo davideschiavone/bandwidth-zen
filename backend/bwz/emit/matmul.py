@@ -28,6 +28,7 @@ from __future__ import annotations
 import ast
 import inspect
 import math
+import re
 from dataclasses import dataclass
 
 from bwz.analysis.dataflow import DataflowPlan
@@ -228,7 +229,7 @@ def emit_matmul(
         )
     )
     lines += _plain(["", ""])
-    lines += _loop_nest(grid, dataflow, unit, result.reduction_placement)
+    lines += _walk(grid, dataflow, unit, predicted, result.reduction_placement)
     lines += _plain(["", ""])
     lines += _main(chip, machine, grid, dataflow, result.reduction_placement)
     # The runtime goes last, against convention and on purpose: the loop nest is
@@ -734,37 +735,15 @@ def _tolerance(grid: TileGrid, acc_dtype: DType, operand_dtype: DType) -> float:
 
 
 # -------------------------------------------------------------------------- the walk
-
-
-def _loop_nest(
-    grid: TileGrid,
-    dataflow: DataflowPlan,
-    unit: ComputeUnit,
-    placement: ReductionPlacement,
-) -> list[Line]:
-    """The part a reader is meant to read: one tile, walked.
-
-    Returned as tagged lines. The tags are the animation's own stage vocabulary
-    (D42/D43) and they point at real statements — ``dram.read_b(...)`` is the B
-    load, ``mma(...)`` is the arithmetic — so the debug view highlights code that
-    performs the transfer rather than code that describes one (D54).
-    """
-    out: list[Line] = _plain([_rule("the walk")])
-    # Dispatch on the SWEPT dimension, not on the resident operand: what decides
-    # the shape of the nest is whether K is swept inside one tile — where it
-    # accumulates locally and owes nobody a partial (os, and rs, whose extra
-    # spreading of K happens inside one array) — or carried on the grid, where
-    # the tile owns a slice of the contraction and must hand partials on (D53).
-    if grid.swept_dim is Dim.K:
-        out += _accumulator_nest(grid, dataflow)
-    elif grid.swept_dim is Dim.M:
-        out += _weight_nest(grid, dataflow, unit, placement)
-    else:
-        out += _input_nest(grid, dataflow, placement)
-    if grid.materialises_partials:
-        out += _plain(["", ""]) + _reduction_kernel()
-    return out
-
+#
+# The emitted program has ONE function that walks the decomposition, `walk()`,
+# and every split lives in it, outermost first: waves, the core inside a wave,
+# the tile's place in the grid (and its split-K piece), A's staging, what stays
+# put, the sweep, one instruction, and where the result lands after the last
+# wave (D67). Only plumbing that is identical for every decomposition — counted
+# DRAM, the scratchpad, starting the threads — stays in the harness. The cost is
+# repetition in the generated file; the gain is that `diff` of two programs for
+# different stationarities lands every difference inside one function.
 
 _TILE_INDEX: dict[Dim, str] = {Dim.M: "mt", Dim.N: "nt", Dim.K: "kt"}
 """The loop variable naming a tile's position along each dimension, in every nest."""
@@ -772,19 +751,247 @@ _TILE_INDEX: dict[Dim, str] = {Dim.M: "mt", Dim.N: "nt", Dim.K: "kt"}
 _TILE_EXTENT: dict[Dim, str] = {Dim.M: "ROWS", Dim.N: "COLS", Dim.K: "ROWS"}
 """The array side that cuts each dimension: M and K by its rows, N by its columns."""
 
+_BODY = " " * 12
+"""Indent of one tile's work: ``walk`` > ``core`` > ``for wave`` > here."""
+
 
 def _commented(code: str, comment: str) -> str:
     """*code* with a trailing comment, aligned so a nest's comments read as a column."""
-    return f"{code.ljust(max(56, len(code) + 2))}# {comment}"
+    return f"{code.ljust(max(60, len(code) + 2))}# {comment}"
+
+
+_TRAILING_COMMENT = re.compile(r"^(\s*\S.*?)\s{2,}# (.*)$")
+"""A statement and its trailing comment, as :func:`_commented` wrote them."""
+
+
+def _indented(lines: list[Line], by: str) -> list[Line]:
+    """*lines* shifted right by *by*, blank lines left blank, tags kept.
+
+    Trailing comments are re-aligned after the shift, so a block built at one
+    depth and moved to another still reads as one column.
+    """
+    out: list[Line] = []
+    for text, tag in lines:
+        shifted = f"{by}{text}" if text else text
+        match = _TRAILING_COMMENT.match(shifted)
+        out.append((_commented(match[1], match[2]) if match else shifted, tag))
+    return out
+
+
+def _walk(
+    grid: TileGrid,
+    dataflow: DataflowPlan,
+    unit: ComputeUnit,
+    predicted: dict[str, float],
+    placement: ReductionPlacement,
+) -> list[Line]:
+    """``walk()``: the whole decomposition in one function, every split in it.
+
+    Returned as tagged lines. The tags are the animation's own stage vocabulary
+    (D42/D43) and they point at real statements — ``dram.read_b(...)`` is the B
+    load, ``mma(...)`` is the arithmetic — so the debug view highlights code that
+    performs the transfer rather than code that describes one (D54).
+    """
+    needs_partials = grid.swept_dim is not Dim.K
+    out: list[Line] = _plain(
+        [
+            _rule("the walk"),
+            "def walk(dram: Dram, pad: Scratchpad, counters: Counters) -> None:",
+            *_levels_docstring(grid, dataflow, unit, predicted, placement),
+        ]
+    )
+    if needs_partials:
+        out += _plain(
+            [
+                "    # Where the k-slices of one output block meet. It exists at all because K is",
+                "    # on the grid (D53); under os there is nothing here.",
+                "    partials = Partials(M, N, ROWS, COLS, ACC_DTYPE, counters)",
+                "",
+            ]
+        )
+    if dataflow.a_strategy is AStrategy.WHOLE:
+        out += _plain(
+            [
+                "    # a_strategy=whole: every band of A is ramped in before wave 0 instead of at",
+                "    # the row boundary that needs it. The same statements as the A step below,",
+                "    # the same bytes, the same event count — only the timing moves (D33), and",
+                "    # timing is the one thing this program does not measure.",
+                "    for tile in range(TILES):",
+            ]
+        )
+        out += _position(grid, " " * 8)
+        out += _stage_a(grid, dataflow, " " * 8, keep=False)
+        out += _plain([""])
+    out += _plain(
+        [
+            "    # == LEVEL 1 + 2: waves, and the cores inside each wave ====================",
+            "    # One thread per core, started by run_cores below. Every core runs this same",
+            "    # function; they differ only in core_id. end_of_wave() is a barrier: nobody",
+            "    # starts wave w+1 until every core has finished wave w (lockstep, D30).",
+            "    def core(core_id: int, end_of_wave: Callable[[], None]) -> None:",
+            _commented("        for wave in range(WAVES):", "LEVEL 1: waves, one after another"),
+            _commented(
+                "            tile = wave * USED_CORES + core_id", "LEVEL 2: this core's tile"
+            ),
+            "            if tile >= TILES:",
+            "                # More cores than tiles left: this core sits the wave out. THIS is",
+            "                # wave occupancy (D30), counted rather than assumed.",
+            "                if DEBUG:",
+            "                    log(",
+            '                        f"core {core_id:<5} wave {wave:<4} "',
+            '                        "idle -- no tile left (D30)"',
+            "                    )",
+            "                counters.count_idle_core_wave()",
+            "                end_of_wave()",
+            "                continue",
+            "            if DEBUG:",
+            '                log_block(f"core {core_id:<5} wave {wave:<4} tile {tile}")',
+            "",
+        ]
+    )
+    out += _position(grid, _BODY)
+    # Dispatch on the SWEPT dimension, not on the resident operand: what decides
+    # the shape of the nest is whether K is swept inside one tile — where it
+    # accumulates locally and owes nobody a partial (os, and rs, whose extra
+    # spreading of K happens inside one array) — or carried on the grid, where
+    # the tile owns a slice of the contraction and must hand partials on (D53).
+    if grid.swept_dim is Dim.K:
+        body = _accumulator_body(grid, dataflow)
+    elif grid.swept_dim is Dim.M:
+        body = _weight_body(grid, dataflow, unit)
+    else:
+        body = _input_body(grid, dataflow)
+    out += _indented(body, " " * 8)
+    out += _plain(
+        [
+            f"{_BODY}counters.count_tile()",
+            f"{_BODY}if DEBUG:",
+            f"{_BODY}    log_flush()",
+            _commented(f"{_BODY}end_of_wave()", "wait for every other core"),
+            "",
+            "    run_cores(",
+            "        USED_CORES, core,",
+            "        warn_above=LARGEST_DECLARED_CORES,",
+            f'        warn_source="{_largest_array()[1]}",',
+            "    )",
+        ]
+    )
+    out += _after_the_waves(grid, needs_partials)
+    return out
+
+
+def _levels_docstring(
+    grid: TileGrid,
+    dataflow: DataflowPlan,
+    unit: ComputeUnit,
+    predicted: dict[str, float],
+    placement: ReductionPlacement,
+) -> list[str]:
+    """``walk``'s docstring: the levels as a table with this run's numbers, then why.
+
+    The numbers are the constants above — the grid's, and the prediction's
+    waves and cores — restated, so a reader comparing two files sees the whole
+    difference in the first twenty lines before reading any code.
+    """
+    rows, cols = unit.systolic_dims or (1, 1)
+    side = {Dim.M: rows, Dim.N: cols, Dim.K: rows}
+    swept = grid.swept_dim
+    steps = max(1, math.ceil(grid.extent(swept) / side[swept]))
+    tiles, waves = grid.tiles, int(predicted["waves"])
+    used, available = int(predicted["used_cores"]), unit.count
+    grid_text = (
+        f"{grid.row_dim.value} x {grid.col_dim.value} = {grid.rows} x {grid.cols}"
+        + (f" x {grid.k_partitions} split-K pieces" if grid.k_partitions > 1 else "")
+        + f" = {tiles:,} tiles"
+    )
+    sweep_text = f"{swept.value}: {steps:,} steps of {side[swept]}" + (
+        f", cut into {grid.k_partitions} pieces" if grid.k_partitions > 1 else ""
+    )
+    lines = [
+        f'    """The whole {_STATIONARITY_TITLE[grid.stationarity]} decomposition,'
+        " in ONE function.",
+        "",
+        "    Every split this program makes is below, outermost first:",
+        "",
+        f"      LEVEL 1  waves        {waves:,} = ceil({tiles:,} tiles / {available:,} cores)",
+        f"      LEVEL 2  cores        {used:,} of {available:,} in use;"
+        " each takes one tile per wave",
+        f"      LEVEL 3  tile grid    {grid_text}",
+        f"               (parallel)   the two dimensions ON the grid: {grid.row_dim.value}"
+        f" and {grid.col_dim.value}",
+        f"      LEVEL 4  the sweep    {sweep_text}",
+        f"               (in order)   the one dimension NOT on the grid: {swept.value}",
+        f"      LEVEL 5  one mma()    {rows} x {cols} x {rows} = {rows * rows * cols:,} MAC slots,"
+        " the bottom",
+        "",
+        "    The code of LEVELS 1, 2 and 5 is the same for every stationarity. LEVEL 3 and",
+        "    LEVEL 4 are where they differ: which two of M, N, K form the grid, and which",
+        "    one is swept. Inside a tile, A is staged into a buffer every core shares (once",
+        f"    per {dataflow.group_name}), one operand stays put, and the others stream past it.",
+        "",
+    ]
+    lines += [f"    {line}" if line else "" for line in _explanation(grid, unit)]
+    if grid.swept_dim is not Dim.K:
+        lines += _placement_note(placement)
+    lines.append('    """')
+    return lines
+
+
+def _explanation(grid: TileGrid, unit: ComputeUnit) -> list[str]:
+    """The paragraph that says what this decomposition means, per stationarity."""
+    if grid.stationarity is Dataflow.ROW_STATIONARY:
+        return [
+            "Row-stationary: a row of A lives in each PE and K reduces across the array's",
+            "own columns, so no partial sum leaves a core. The difference from",
+            "output-stationary is INSIDE one array, which a program at this granularity",
+            "cannot show and does not pretend to (Eyeriss, ISCA 2016).",
+        ]
+    if grid.swept_dim is Dim.K:
+        return [
+            "Output-stationary: C stays in one core's accumulator while K is swept inside",
+            "the tile, which is exactly why it owes no reduction: no partial sum ever",
+            "leaves a tile (D53)."
+            + (
+                " Except under split-K, which cuts K on purpose and pays a second kernel."
+                if grid.k_partitions > 1
+                else ""
+            ),
+        ]
+    if grid.swept_dim is Dim.M:
+        holds = unit.weight_sets > 1
+        lines = [
+            "One weight tile. B stays resident; M streams past it."
+            if holds
+            else "One k-slice of the contraction. Nothing is held — K is on the grid.",
+            "",
+            "Weight-stationary: K is on the grid, so each tile owns one k-slice and",
+            "produces a PARTIAL over K, not a finished result. The slices of one output",
+            "block meet in `partials`, which counts the additions it performs — that it",
+            "has to exist at all is the difference from output-stationary.",
+        ]
+        if not holds:
+            lines += [
+                "",
+                f"{unit.name} declares weight_sets=1, so it stores no weights of its own and",
+                "the NAME of this dataflow is a misnomer here: the tile of B is read per",
+                "instruction like everything else (D30). What ws really changed is the",
+                "GRID — its rows are slices of K rather than bands of M.",
+            ]
+        return lines
+    return [
+        "Input-stationary: A's tile stays put and N streams past it. K is on the grid",
+        "(its columns), so each tile owns a slice of the contraction exactly as a",
+        "weight-stationary one does, and produces PARTIALS over K (D53). They meet in",
+        "`partials`, which counts the additions it performs.",
+    ]
 
 
 def _position(grid: TileGrid, indent: str) -> list[Line]:
-    """Section 1 of every ``run_tile``: which tile of the grid this is, and what it owns.
+    """LEVEL 3: which tile of the grid this is, and the slice of each dimension it owns.
 
-    Written out inline rather than behind ``tile_row``/``tile_col`` helpers so
-    two programs for different stationarities can be read — and diffed — side
-    by side: the index arithmetic is where the grid's two axes get their names,
-    and a helper would hide exactly the line that differs. Split-K stacks
+    Inline rather than behind ``tile_row``/``tile_col`` helpers: the index
+    arithmetic is where the grid's two axes get their names, and a helper would
+    hide exactly the line that differs between stationarities. Split-K stacks
     ``SPLIT_K`` whole grids one after another, so only a K-swept grid decodes a
     ``part``; a K-on-grid one has none to decode (D53).
     """
@@ -792,7 +999,8 @@ def _position(grid: TileGrid, indent: str) -> list[Line]:
     rows_label = f"grid row    -> {grid.row_dim.value}"
     cols_label = f"grid column -> {grid.col_dim.value}"
     lines = [
-        f"{indent}# -- 1. where: which tile of the {grid.row_dim.value} x {grid.col_dim.value} grid"
+        f"{indent}# == LEVEL 3: the tile grid — where this tile sits in the"
+        f" {grid.row_dim.value} x {grid.col_dim.value} grid"
     ]
     if grid.swept_dim is Dim.K:
         lines += [
@@ -819,14 +1027,13 @@ def _position(grid: TileGrid, indent: str) -> list[Line]:
 
 
 def _stage_a(grid: TileGrid, dataflow: DataflowPlan, indent: str, *, keep: bool) -> list[Line]:
-    """Section 2 of every ``run_tile``: A's band, staged into the shared scratchpad.
+    """A's band, staged into the scratchpad every core shares.
 
-    Inline in ``run_tile`` for the same reason as :func:`_position`. The same
-    lines open ``main`` under ``a_strategy=whole`` (*keep* false, nothing to
-    bind the band to): whole and stage move the same bytes and differ only in
-    *when* the events happen (D33), which this file shows by running the same
-    statement earlier. The key is (split-K piece, grid row, residency chunk);
-    one staging event per key is what makes the three A strategies one
+    The same lines open ``walk`` under ``a_strategy=whole`` (*keep* false,
+    nothing to bind the band to): whole and stage move the same bytes and differ
+    only in *when* the events happen (D33), which this file shows by running the
+    same statement earlier. The key is (split-K piece, grid row, residency
+    chunk); one staging event per key is what makes the three A strategies one
     mechanism (D31/D33).
     """
     row, col = _TILE_INDEX[grid.row_dim], _TILE_INDEX[grid.col_dim]
@@ -845,7 +1052,7 @@ def _stage_a(grid: TileGrid, dataflow: DataflowPlan, indent: str, *, keep: bool)
             "one band of M, this piece of K",
         )
     head = [
-        f"-- 2. A: staged once per {dataflow.group_name}, into ONE buffer all cores share",
+        f"-- A: staged once per {dataflow.group_name}, into ONE buffer all cores share",
         "   (consecutive tiles of a row run on DIFFERENT cores). A_RESIDENCY_TILES is",
         "   how many tiles one key serves: the whole row for stage/whole, so A crosses",
         "   DRAM once; 1 for stream, so every tile re-fetches (D31/D33).",
@@ -862,34 +1069,13 @@ def _stage_a(grid: TileGrid, dataflow: DataflowPlan, indent: str, *, keep: bool)
     ]
 
 
-def _accumulator_nest(grid: TileGrid, dataflow: DataflowPlan) -> list[Line]:
+# One tile's work, per stationarity. Written at indent 4 and shifted into place
+# by `_walk`, so each reads as a block and the three can be compared here too.
+
+
+def _accumulator_body(grid: TileGrid, dataflow: DataflowPlan) -> list[Line]:
     """``os``/``rs``: C stays in the accumulator and K is swept inside one tile."""
     out: list[Line] = _plain(
-        ["def run_tile(tile: int, dram: Dram, pad: Scratchpad, counters: Counters) -> None:"]
-    )
-    if grid.stationarity is Dataflow.ROW_STATIONARY:
-        out += _plain(
-            [
-                '    """One output tile. A row of A lives in each PE and K reduces across the',
-                "    array's own columns, so no partial sum leaves this core either. The",
-                "    difference from output-stationary is INSIDE one array, which a program at",
-                "    this granularity cannot show and does not pretend to (Eyeriss, ISCA 2016).",
-                '    """',
-            ]
-        )
-    else:
-        out += _plain(
-            [
-                '    """One output tile. C stays in the accumulator; K is swept INSIDE it.',
-                "",
-                "    The whole contraction for this output block happens in one core's own",
-                "    accumulator, which is exactly why output-stationary owes no reduction: no",
-                "    partial sum ever leaves this function (D53).",
-                '    """',
-            ]
-        )
-    out += _position(grid, "    ")
-    out += _plain(
         [
             "    if DEBUG:",
             '        log(f"  C[{m0}:{m1}, {n0}:{n1}]  piece {part}, sweeping kt {kt0}..{kt1}")',
@@ -900,12 +1086,10 @@ def _accumulator_nest(grid: TileGrid, dataflow: DataflowPlan) -> list[Line]:
     out += _plain(
         [
             "",
-            "    # -- 3. what stays put: C, in this core's accumulator",
-            _commented(
-                "    acc = zeros(m1 - m0, n1 - n0, ACC_DTYPE)", "the accumulator that stays put"
-            ),
+            "    # -- what stays put: C, in this core's accumulator",
+            _commented("    acc = zeros(m1 - m0, n1 - n0, ACC_DTYPE)", "stays put"),
             "",
-            "    # -- 4. the sweep: K, INSIDE this tile",
+            "    # == LEVEL 4: the sweep — K, INSIDE this tile",
             _commented("    for kt in range(kt0, kt1):", "K is swept INSIDE this tile"),
             "        k0, k1 = kt * ROWS, min(kt * ROWS + ROWS, K)",
             _commented(
@@ -922,6 +1106,7 @@ def _accumulator_nest(grid: TileGrid, dataflow: DataflowPlan) -> list[Line]:
             '                f"  {(m1 - m0) * (k1 - k0) * (n1 - n0):>9,} useful of "',
             '                f"{SLOTS_PER_MMA:,} slots"',
             "            )",
+            "        # == LEVEL 5: one instruction",
         ]
     )
     out += [
@@ -939,7 +1124,148 @@ def _accumulator_nest(grid: TileGrid, dataflow: DataflowPlan) -> list[Line]:
         out += [("    dram.write_partial(part, m0, n0, acc)", "store")]
     else:
         out += [(_commented("    dram.write_c(m0, n0, acc)", "finished, not a partial"), "store")]
-    out += _plain(["    counters.count_tile()"])
+    return out
+
+
+def _weight_body(grid: TileGrid, dataflow: DataflowPlan, unit: ComputeUnit) -> list[Line]:
+    """``ws``: K is on the grid and M streams past a tile of B, giving partials.
+
+    "Weight-stationary" is a claim about hardware and is a misnomer on an MMA
+    unit, which holds nothing (D30/D62); the comment says which one this is.
+    """
+    out: list[Line] = _plain(
+        [
+            "    if DEBUG:",
+            '        log(f"  B[{k0}:{k1}, {n0}:{n1}] resident, M streams past it")',
+            "",
+        ]
+    )
+    out += _stage_a(grid, dataflow, "    ", keep=True)
+    out += _plain(
+        [
+            "",
+            "    # -- what stays put: B's tile"
+            + ("" if unit.weight_sets > 1 else " (in name only here: see the docstring)"),
+        ]
+    )
+    out += [(_commented("    b = dram.read_b(k0, k1, n0, n1)", "stays put"), "load_b")]
+    out += _plain(
+        [
+            "",
+            "    # == LEVEL 4: the sweep — M streams past, every step leaves a PARTIAL",
+            _commented("    for mt in range(M_TILES):", "M streams past the resident tile"),
+            "        m0, m1 = mt * ROWS, min(mt * ROWS + ROWS, M)",
+            _commented("        a = sub(band, m0, m1, 0, k1 - k0)", "already on chip"),
+            "        product = zeros(m1 - m0, n1 - n0, ACC_DTYPE)",
+            "        if DEBUG:",
+            "            log(",
+            '                f"    mt={mt:<4} A[{m0}:{m1}, {k0}:{k1}] @ B[{k0}:{k1}, {n0}:{n1}]"',
+            '                f" -> PARTIAL into C[{m0}:{m1}, {n0}:{n1}]"',
+            "            )",
+            "        # == LEVEL 5: one instruction",
+        ]
+    )
+    return out + _partial_step()
+
+
+def _input_body(grid: TileGrid, dataflow: DataflowPlan) -> list[Line]:
+    """``is``: A stays resident and N streams past it, producing partials over K."""
+    out: list[Line] = _plain(
+        [
+            "    if DEBUG:",
+            '        log(f"  A[{m0}:{m1}, {k0}:{k1}] resident, N streams past it")',
+            "",
+        ]
+    )
+    out += _stage_a(grid, dataflow, "    ", keep=True)
+    out += _plain(
+        [
+            "",
+            "    # -- what stays put: A's tile, cut from the staged band",
+            _commented("    a = sub(band, 0, m1 - m0, k0, k1)", "stays put"),
+            "",
+            "    # == LEVEL 4: the sweep — N streams past, every step leaves a PARTIAL",
+            _commented("    for nt in range(N_TILES):", "N streams past the resident tile"),
+            "        n0, n1 = nt * COLS, min(nt * COLS + COLS, N)",
+        ]
+    )
+    out += [(_commented("        b = dram.read_b(k0, k1, n0, n1)", "crosses DRAM"), "load_b")]
+    out += _plain(
+        [
+            "        product = zeros(m1 - m0, n1 - n0, ACC_DTYPE)",
+            "        if DEBUG:",
+            "            log(",
+            '                f"    nt={nt:<4} A[{m0}:{m1}, {k0}:{k1}] @ B[{k0}:{k1}, {n0}:{n1}]"',
+            '                f" -> PARTIAL into C[{m0}:{m1}, {n0}:{n1}]"',
+            "            )",
+            "        # == LEVEL 5: one instruction",
+        ]
+    )
+    return out + _partial_step()
+
+
+def _partial_step() -> list[Line]:
+    """The instruction and the partial it hands on, shared by ``ws`` and ``is``."""
+    return [
+        ("        mma(product, a, b, counters, SLOTS_PER_MMA)", "exec"),
+        (
+            _commented(
+                "        partials.accumulate(m0, n0, product)", "a PARTIAL over K; nothing stored"
+            ),
+            # "reduce", not "exec": this line IS the reduction the report charges
+            # to the vector unit and the trace draws on the vector lane (D62), so
+            # tagging it "exec" left the animation with a vector bar playing and
+            # no line lit under it (D66).
+            "reduce",
+        ),
+    ]
+
+
+def _after_the_waves(grid: TileGrid, needs_partials: bool) -> list[Line]:
+    """What happens once every wave is done: where C finally lands.
+
+    ``os`` wrote C inside each tile, so nothing. A K-on-grid walk drains its
+    shared accumulator. Split-K runs its second kernel — inline here rather than
+    as its own function, because it is a split too: the one that undoes
+    ``SPLIT_K``.
+    """
+    if needs_partials:
+        return [
+            *_plain(
+                [
+                    "",
+                    "    # == after the last wave: C lands. The accumulator never crossed DRAM;",
+                    "    # C's own compulsory write does (D53).",
+                ]
+            ),
+            ("    partials.drain(dram, M, N)", "store"),
+        ]
+    if not grid.materialises_partials:
+        return []
+    out: list[Line] = _plain(
+        [
+            "",
+            "    # == after the last wave: KERNEL 2, sum the SPLIT_K partials into C (D53).",
+            "    # A separate launch in CUTLASS: the GEMM has to finish everywhere before any",
+            "    # of this can start, which is precisely why the partials could not stay in",
+            "    # registers and crossed DRAM twice. Not new arithmetic — 2*M*N*K already",
+            "    # counts these adds; they have merely left the array's own accumulator for",
+            "    # the vector unit, which is slower, and that is the trade split-K makes.",
+            "    for m0 in range(0, M, ROWS):",
+            "        for n0 in range(0, N, COLS):",
+            "            m1, n1 = min(m0 + ROWS, M), min(n0 + COLS, N)",
+            "            acc = copy_of(dram.read_partial(0, m0, m1, n0, n1))",
+            "            for part in range(1, SPLIT_K):",
+        ]
+    )
+    out += [
+        ("                add_into(acc, dram.read_partial(part, m0, m1, n0, n1))", "reduce"),
+        (
+            "                counters.count_partial_sum_adds((m1 - m0) * (n1 - n0))",
+            "reduce",
+        ),
+        ("            dram.write_c(m0, n0, acc)", "store"),
+    ]
     return out
 
 
@@ -982,210 +1308,6 @@ def _placement_note(placement: ReductionPlacement) -> tuple[str, ...]:
             "    serialise behind the arithmetic rather than overlapping it (D62).",
         )
     return ()
-
-
-def _weight_nest(
-    grid: TileGrid, dataflow: DataflowPlan, unit: ComputeUnit, placement: ReductionPlacement
-) -> list[Line]:
-    """``ws``: K is on the grid and M streams past a tile of B, giving partials.
-
-    The docstring it writes depends on the unit, because "weight-stationary" is
-    a claim about hardware and is a misnomer on half of them (D62). An array
-    with weight banks really does hold B; an MMA unit holds nothing — it reads
-    every operand from the register file per instruction (D30) — and what the
-    dataflow actually changed there is that K moved onto the tile grid. Saying
-    "B stays resident" on such a unit would describe a machine the reader is not
-    running.
-    """
-    holds = unit.weight_sets > 1
-    headline = (
-        "One weight tile. B stays resident; M streams past it."
-        if holds
-        else "One k-slice of the contraction. Nothing is held — K is on the grid."
-    )
-    out: list[Line] = _plain(
-        [
-            "def run_tile(",
-            "    tile: int, dram: Dram, pad: Scratchpad, partials: Partials, counters: Counters",
-            ") -> None:",
-            f'    """{headline}',
-            "",
-        ]
-        + (
-            []
-            if holds
-            else [
-                f"    {unit.name} declares weight_sets=1, so it stores no weights of its own and",
-                "    the NAME of this dataflow is a misnomer here: the tile of B below is read",
-                "    per instruction like everything else (D30). What ws really changed is the",
-                "    GRID — its rows are slices of K rather than bands of M — and that is what",
-                "    costs, because the slices of one output block are now on different cores.",
-                "",
-            ]
-        )
-        + [
-            "    This tile owns one slice of the contraction — a k-slice — so what it produces",
-            "    is a PARTIAL over K, not a finished result. The slices for one output block",
-            "    meet in `partials`, which counts the additions it performs. That `partials`",
-            "    has to exist at all is the difference between this decomposition and",
-            "    output-stationary, in one object.",
-            *_placement_note(placement),
-            '    """',
-        ]
-    )
-    out += _position(grid, "    ")
-    out += _plain(
-        [
-            "    if DEBUG:",
-            '        log(f"  B[{k0}:{k1}, {n0}:{n1}] resident, M streams past it")',
-            "",
-        ]
-    )
-    out += _stage_a(grid, dataflow, "    ", keep=True)
-    out += _plain(
-        [
-            "",
-            "    # -- 3. what stays put: B's tile"
-            + ("" if unit.weight_sets > 1 else " (in name only here: see the docstring)"),
-        ]
-    )
-    out += [
-        (_commented("    b = dram.read_b(k0, k1, n0, n1)", "the operand that stays put"), "load_b")
-    ]
-    out += _plain(
-        [
-            "",
-            "    # -- 4. the sweep: M streams past, and every step leaves a PARTIAL",
-            _commented("    for mt in range(M_TILES):", "M streams past the resident tile"),
-            "        m0, m1 = mt * ROWS, min(mt * ROWS + ROWS, M)",
-            _commented("        a = sub(band, m0, m1, 0, k1 - k0)", "already on chip"),
-            "        product = zeros(m1 - m0, n1 - n0, ACC_DTYPE)",
-        ]
-    )
-    out += _plain(
-        [
-            "        if DEBUG:",
-            "            log(",
-            '                f"    mt={mt:<4} A[{m0}:{m1}, {k0}:{k1}] @ B[{k0}:{k1}, {n0}:{n1}]"',
-            '                f" -> PARTIAL into C[{m0}:{m1}, {n0}:{n1}]"',
-            "            )",
-        ]
-    )
-    out += [
-        ("        mma(product, a, b, counters, SLOTS_PER_MMA)", "exec"),
-        (
-            _commented(
-                "        partials.accumulate(m0, n0, product)",
-                "a PARTIAL over K; nothing is stored",
-            ),
-            # "reduce", not "exec": this line IS the reduction the report charges
-            # to the vector unit and the trace draws on the vector lane (D62), so
-            # tagging it "exec" left the animation with a vector bar playing and
-            # no line lit under it (D66).
-            "reduce",
-        ),
-    ]
-    out += _plain(["    counters.count_tile()"])
-    return out
-
-
-def _input_nest(
-    grid: TileGrid, dataflow: DataflowPlan, placement: ReductionPlacement
-) -> list[Line]:
-    """``is``: A stays resident and N streams past it, producing partials over K."""
-    out: list[Line] = _plain(
-        [
-            "def run_tile(",
-            "    tile: int, dram: Dram, pad: Scratchpad, partials: Partials, counters: Counters",
-            ") -> None:",
-            '    """One input tile. A stays resident; N streams past it.',
-            "",
-            "    The grid's columns are slices of K here — K cut by the array's depth rather",
-            "    than its width — so this tile owns a slice of the contraction exactly as a",
-            "    weight-stationary one does, and produces PARTIALS over K (D53). They meet in",
-            "    `partials`, which counts the additions it performs.",
-            *_placement_note(placement),
-            '    """',
-        ]
-    )
-    out += _position(grid, "    ")
-    out += _plain(
-        [
-            "    if DEBUG:",
-            '        log(f"  A[{m0}:{m1}, {k0}:{k1}] resident, N streams past it")',
-            "",
-        ]
-    )
-    out += _stage_a(grid, dataflow, "    ", keep=True)
-    out += _plain(
-        [
-            "",
-            "    # -- 3. what stays put: A's tile, cut from the staged band",
-            _commented("    a = sub(band, 0, m1 - m0, k0, k1)", "the operand that stays put"),
-            "",
-            "    # -- 4. the sweep: N streams past, and every step leaves a PARTIAL",
-            _commented("    for nt in range(N_TILES):", "N streams past the resident tile"),
-            "        n0, n1 = nt * COLS, min(nt * COLS + COLS, N)",
-        ]
-    )
-    out += [(_commented("        b = dram.read_b(k0, k1, n0, n1)", "crosses DRAM"), "load_b")]
-    out += _plain(
-        [
-            "        product = zeros(m1 - m0, n1 - n0, ACC_DTYPE)",
-            "        if DEBUG:",
-            "            log(",
-            '                f"    nt={nt:<4} A[{m0}:{m1}, {k0}:{k1}] @ B[{k0}:{k1}, {n0}:{n1}]"',
-            '                f" -> PARTIAL into C[{m0}:{m1}, {n0}:{n1}]"',
-            "            )",
-        ]
-    )
-    out += [
-        ("        mma(product, a, b, counters, SLOTS_PER_MMA)", "exec"),
-        (
-            _commented(
-                "        partials.accumulate(m0, n0, product)",
-                "a PARTIAL over K; nothing is stored",
-            ),
-            # "reduce", not "exec": this line IS the reduction the report charges
-            # to the vector unit and the trace draws on the vector lane (D62), so
-            # tagging it "exec" left the animation with a vector bar playing and
-            # no line lit under it (D66).
-            "reduce",
-        ),
-    ]
-    out += _plain(["    counters.count_tile()"])
-    return out
-
-
-def _reduction_kernel() -> list[Line]:
-    out: list[Line] = _plain(
-        [
-            "def reduce_partials(dram: Dram, counters: Counters) -> None:",
-            '    """Kernel 2: sum the SPLIT_K partial results into C (D53).',
-            "",
-            "    A separate launch rather than more lines above: the GEMM has to finish",
-            "    everywhere before any of this can start, which is precisely why the partials",
-            "    could not stay in registers and crossed DRAM twice. Not new arithmetic —",
-            "    2*M*N*K already counts these adds; they have merely left the array's own",
-            "    accumulator for the vector unit, which is slower, and that is the trade",
-            "    split-K makes for its occupancy.",
-            '    """',
-            "    for m0 in range(0, M, ROWS):",
-            "        for n0 in range(0, N, COLS):",
-            "            m1, n1 = min(m0 + ROWS, M), min(n0 + COLS, N)",
-            "            acc = copy_of(dram.read_partial(0, m0, m1, n0, n1))",
-            "            for part in range(1, SPLIT_K):",
-        ]
-    )
-    out += [
-        ("                add_into(acc, dram.read_partial(part, m0, m1, n0, n1))", "reduce"),
-        (
-            "                counters.count_partial_sum_adds((m1 - m0) * (n1 - n0))",
-            "reduce",
-        ),
-        ("            dram.write_c(m0, n0, acc)", "store"),
-    ]
-    return out
 
 
 # -------------------------------------------------------------------------- the main
@@ -1286,12 +1408,6 @@ def _main(
     dataflow: DataflowPlan,
     placement: ReductionPlacement,
 ) -> list[Line]:
-    needs_partials = grid.swept_dim is not Dim.K
-    call = (
-        "run_tile(tile, dram, pad, partials, counters)"
-        if needs_partials
-        else "run_tile(tile, dram, pad, counters)"
-    )
     title = f"{chip.name} · {machine.dtype.value} · {_STATIONARITY_TITLE[grid.stationarity]}"
     lines = [
         _rule("run it"),
@@ -1324,41 +1440,11 @@ def _main(
         "    )",
         "    pad = Scratchpad(counters)",
     ]
-    if needs_partials:
-        lines.append("    partials = Partials(M, N, ROWS, COLS, ACC_DTYPE, counters)")
-    out: list[Line] = _plain(lines)
-    if dataflow.a_strategy is AStrategy.WHOLE:
-        out += _plain(
-            [
-                "",
-                "    # a_strategy=whole: every band is ramped in before wave 0 instead of at the",
-                "    # row boundary that needs it. The same statement as run_tile's section 2,",
-                "    # the same bytes, the same event count — only the timing moves, which is",
-                "    # D33's point and is also the one thing this program does not measure.",
-                "    for tile in range(TILES):",
-            ]
-        )
-        out += _position(grid, "        ")
-        out += _stage_a(grid, dataflow, "        ", keep=False)
-    lines = [
+    lines += [
         "",
-        "    run_waves(",
-        f"        USED_CORES, WAVES, TILES, counters, lambda tile: {call},",
-        "        warn_above=LARGEST_DECLARED_CORES,",
-        f'        warn_source="{_largest_array()[1]}",',
-        "    )",
+        "    walk(dram, pad, counters)                    # every split is in here",
     ]
-    out += _plain(lines)
-    if needs_partials:
-        # The one place a `ws`/`is` walk writes C: the shared accumulator drains
-        # once the grid is finished. Tagged "store" for the same reason `os`'s
-        # `dram.write_c` is — it IS the store, wherever it happens to live (D54).
-        out += _plain(
-            ["", "    # The accumulator never crossed DRAM; C's own compulsory write does (D53)."]
-        )
-        out += [("    partials.drain(dram, M, N)", "store")]
-    if grid.materialises_partials:
-        out += _plain(["", "    reduce_partials(dram, counters)"])
+    out: list[Line] = _plain(lines)
     tail = [
         "",
         "    error = max_abs_diff(c, reference(a, b, INTEGER))",

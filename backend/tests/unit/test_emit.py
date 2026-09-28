@@ -171,8 +171,8 @@ def test_split_k_emits_the_second_kernel() -> None:
     """Split-K is two kernels, and the emitted file has two (D53)."""
     plain, *_ = _emit("a100_80gb")
     split, *_ = _emit("a100_80gb", split_k=4)
-    assert "def reduce_partials" not in plain.source
-    assert "def reduce_partials" in split.source
+    assert "KERNEL 2" not in plain.source
+    assert "KERNEL 2" in split.source
     assert "dram.write_partial(part, m0, n0, acc)" in split.source
     assert split.predicted["partial_dram_bytes"] > 0
     assert plain.predicted["partial_dram_bytes"] == 0
@@ -198,29 +198,52 @@ def test_whole_ramps_the_staging_in_before_wave_zero() -> None:
     whole, *_ = _emit("a100_80gb", a_strategy="whole")
     assert whole.predicted["a_dram_bytes"] == staged.predicted["a_dram_bytes"]
     assert whole.predicted["staging_events"] == staged.predicted["staging_events"]
-    assert "for tile in range(TILES):\n        # -- 1. where" in whole.source
+    assert "for tile in range(TILES):\n        # == LEVEL 3" in whole.source
     assert "\n        pad.band(\n" in whole.source
     assert "for tile in range(TILES):" not in staged.source
-    # One staging statement, run early; run_tile's own is unchanged and hits the cache.
+    # One staging statement, run early; the tile's own is unchanged and hits the cache.
     assert whole.source.count("band = pad.band(") == staged.source.count("band = pad.band(") == 1
 
 
-def test_run_tile_is_readable_without_helpers() -> None:
-    """Every ``run_tile`` is self-contained and walks the same four numbered sections.
+def test_every_split_is_in_one_function() -> None:
+    """``walk()`` holds every split, and the levels come in the same order (D67).
 
-    Index decoding and A's staging used to live in ``tile_row``/``tile_col``/
-    ``partition_of``/``stage_a``, so comparing two stationarities meant chasing
-    four helpers whose bodies differed per program. Inline, a plain ``diff`` of
-    two emitted files lands every difference inside ``run_tile``, section by
-    section.
+    Waves, the core's tile, the grid position, the sweep and the instruction
+    used to be spread over ``run_waves`` in the harness, four helpers and
+    ``run_tile``, so seeing how one decomposition differs from another meant
+    reading six functions. Now there is one, and nothing it needs is defined
+    elsewhere under the old names.
     """
     for flow in (Dataflow.OUTPUT_STATIONARY, Dataflow.WEIGHT_STATIONARY, Dataflow.INPUT_STATIONARY):
         program, *_ = _emit("a100_80gb", stationarity=flow)
-        for helper in ("def tile_row", "def tile_col", "def partition_of", "def stage_a"):
-            assert helper not in program.source
-        body = program.source.split("def run_tile(", 1)[1].split("\ndef ", 1)[0]
-        headers = [line.strip()[:7] for line in body.splitlines() if "# -- " in line]
-        assert headers == ["# -- 1.", "# -- 2.", "# -- 3.", "# -- 4."], flow
+        for gone in (
+            "def tile_row",
+            "def tile_col",
+            "def partition_of",
+            "def stage_a",
+            "def run_tile",
+            "def run_waves",
+            "def reduce_partials",
+        ):
+            assert gone not in program.source, (flow, gone)
+        body = program.source.split("def walk(", 1)[1].split("\ndef main(", 1)[0]
+        body = body.split('"""', 2)[2]  # the code, not the docstring's table of it
+        levels = [
+            line.strip()[:10] for line in body.splitlines() if line.strip().startswith("# == LEVEL")
+        ]
+        assert levels == ["# == LEVEL"] * 4, (flow, levels)
+        order = [
+            body.index(marker)
+            for marker in (
+                "for wave in range(WAVES):",
+                "tile = wave * USED_CORES + core_id",
+                "LEVEL 3",
+                "LEVEL 4",
+                "LEVEL 5",
+                "mma(",
+            )
+        ]
+        assert order == sorted(order), flow
 
 
 # ----------------------------------------------------------------------- constants
@@ -329,9 +352,9 @@ def test_the_inlined_harness_is_the_module_on_disk() -> None:
     from bwz.emit import _harness
 
     program, *_ = _emit("a100_80gb")
-    assert "def run_waves(" in program.source
-    assert _harness.run_waves.__doc__ is not None
-    assert _harness.run_waves.__doc__.splitlines()[0] in program.source
+    assert "def run_cores(" in program.source
+    assert _harness.run_cores.__doc__ is not None
+    assert _harness.run_cores.__doc__.splitlines()[0] in program.source
 
 
 def test_the_harness_imports_nothing_from_bwz() -> None:

@@ -9,10 +9,10 @@ wrong outside all three.
 What it provides is the machinery an emitted program needs and nothing about any
 particular decomposition: counted memory (:class:`Dram`), the shared on-chip
 staging buffer (:class:`Scratchpad`), the accumulator where a K-on-the-grid
-walk's partial sums meet (:class:`Partials`), the lockstep wave runner
-(:func:`run_waves`), and one instruction tile (:func:`mma`). **Which tiles exist,
-which dimension each sweeps and where its result goes is the emitted loop nest's
-business** — that is the part a reader is meant to read, so none of it is hidden
+walk's partial sums meet (:class:`Partials`), the thread-per-core starter
+(:func:`run_cores`), and one instruction tile (:func:`mma`). **Which tiles exist,
+which dimension each sweeps, the waves, and where the result goes are the emitted
+``walk()``'s business** — that is the part a reader is meant to read, so none of it is hidden
 in here.
 
 Two constraints shape everything below:
@@ -586,23 +586,25 @@ class Partials:
                 dram.write_c(r0, c0, sub(self.acc, r0, r1, c0, c1))
 
 
-def run_waves(
+def run_cores(
     used_cores: int,
-    waves: int,
-    tiles: int,
-    counters: Counters,
-    run_tile: Callable[[int], None],
+    core: Callable[[int, Callable[[], None]], None],
     *,
     warn_above: int = 0,
     warn_source: str = "",
 ) -> None:
-    """Run *tiles* tiles as *waves* lockstep waves across *used_cores* cores.
+    """Start one thread per modelled core, each running ``core(core_id, end_of_wave)``.
+
+    Plumbing only. The waves, the tile each core takes, and the idle slot when
+    the last wave is partly empty are all in the emitted ``walk()``, where a
+    reader looks for them (D67); this starts the threads and hands each one the
+    barrier that makes the waves lockstep.
 
     Not a thread pool. ``waves = ceil(tiles / units)`` is *lockstep*: a core is
-    a persistent thing that takes one tile per wave, and the ``if tile < tiles``
-    below **is** wave occupancy (D30) — the last wave is partly empty and the
-    idle slots are counted rather than assumed. A task queue would deliver the
-    same answer while erasing the structure the report costed.
+    a persistent thing that takes one tile per wave, and ``end_of_wave`` is the
+    barrier that keeps any core from starting wave w+1 before every core has
+    finished wave w (D30). A task queue would deliver the same answer while
+    erasing the structure the report costed.
 
     One OS thread per modelled core, deliberately not capped to the host's CPU
     count: this program is about structure, not speed, and a
@@ -629,24 +631,15 @@ def run_waves(
     failures: list[BaseException] = []
     failure_lock = threading.Lock()
 
-    def core(core_id: int) -> None:
+    def end_of_wave() -> None:
+        barrier.wait()
+
+    def run(core_id: int) -> None:
         try:
-            for wave in range(waves):
-                tile = wave * used_cores + core_id
-                if tile < tiles:
-                    if DEBUG:
-                        log_block(f"core {core_id:<5} wave {wave:<4} tile {tile}")
-                    run_tile(tile)
-                    if DEBUG:
-                        log_flush()
-                else:
-                    if DEBUG:
-                        log(f"core {core_id:<5} wave {wave:<4} idle -- no tile left (D30)")
-                    counters.count_idle_core_wave()
-                barrier.wait()
+            core(core_id, end_of_wave)
         # Caught broadly and re-raised on the main thread: a core that dies while
         # its peers are inside barrier.wait() would hang the whole run, so the
-        # barrier is aborted and the first failure surfaces from run_waves.
+        # barrier is aborted and the first failure surfaces from run_cores.
         except BaseException as exc:
             # Flush whatever this core had narrated: on a failure that partial
             # block is the most useful thing on screen.
@@ -657,7 +650,7 @@ def run_waves(
             barrier.abort()
 
     threads = [
-        threading.Thread(target=core, args=(core_id,), name=f"core-{core_id}")
+        threading.Thread(target=run, args=(core_id,), name=f"core-{core_id}")
         for core_id in range(used_cores)
     ]
     for thread in threads:

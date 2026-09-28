@@ -762,7 +762,7 @@ disagree, one of them is wrong, and the disagreement is now findable.
 
 | quantity | the model's formula | what the program counts |
 |---|---|---|
-| tiles | `grid.tiles` (§6.1) | calls to `run_tile` |
+| tiles | `grid.tiles` (§6.1) | tiles `walk()` runs (`counters.count_tile`) |
 | waves | `ceil(tiles / used_cores)` | the wave loop's own bound |
 | MACs | `M·N·K`, invariant across stationarity (D53) | the operands' real extents, per `mma` |
 | MAC slots | `padded(M,rows)·padded(N,cols)·padded(K,rows)` | `ROWS·ROWS·COLS` per `mma` issued |
