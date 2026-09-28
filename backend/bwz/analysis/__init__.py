@@ -20,6 +20,7 @@ from bwz.analysis.stationarity import (
     UNBOUNDED_ACCUMULATION,
     TileGrid,
     accumulation_depth,
+    deal_for,
     refusal_reason,
     residency_phrase,
 )
@@ -670,12 +671,23 @@ def _placement_assumptions(grid: TileGrid, machine: MachineModel, op: OpResult |
             f"depth and charges nothing. That is the claim it has always made for a K-on-grid "
             f"grid, and it is unfalsifiable as it stands: declaring a depth would bound it."
         )
+        dealt = deal_for(grid, machine.unit)
+        units = machine.unit.count
+        idle = (
+            f" Here N gives only {grid.cols:,} output column(s) for {units:,} units, so "
+            f"{units - dealt.used_cores:,} of them never receive a tile: wave occupancy "
+            f"{dealt.occupancy:.1%}, charged in the utilisation. Spreading the k-slices over "
+            f"every unit would fill them, but then the partials would have to leave the unit "
+            f"and be summed elsewhere — a different decomposition, not modelled here."
+            if dealt.used_cores < units
+            else ""
+        )
         return [
             f"Reduction: LOCAL. {source}",
             f"The locality that makes it free also needs the {grid.k_slices:,} k-slices of one "
-            f"output column to land on the SAME unit, and the model's round-robin tile order "
-            f"(tile = k_slice * {grid.cols} + column) only does that when the column count "
-            f"divides the unit count. That assignment is assumed, not enforced (D62).",
+            f"output column to land on the SAME unit, and the deal enforces it (D68): a wave "
+            f"never straddles a grid row, so unit u keeps column round * "
+            f"{dealt.used_cores:,} + u for every k-slice.{idle}",
         ]
 
     if op.reduction_placement is ReductionPlacement.ON_CHIP:

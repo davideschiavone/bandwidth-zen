@@ -180,6 +180,10 @@ These are known-good behaviours. If a change breaks one, the change is wrong.
   back to the matrix unit when nothing non-systolic supports the dtype, and charging elementwise
   adds at 437 TOP/s would report `ws` as nearly free — the opposite of the truth. That case is
   refused with `feasible: false`, never costed (D62).
+- **A column's k-slices share one core, or they do not sum locally** (D68). Metis at N=512,
+  K=8192 runs on ONE of its four cores — 16 waves, 25% occupancy — because its periphery
+  accumulator belongs to one AI core. If a change spreads that column over four cores and still
+  reports `reduction: local — free`, it is wrong. N=K=2048 fills all four: 4 columns, 4 cores.
 - A chip asked for a dataflow it does not declare returns `feasible: false` naming the field and the
   capability — **refused, not clamped**, unlike the A/B strategy knobs. A clamp there would answer a
   different question than the one asked.

@@ -326,6 +326,126 @@ def accumulation_depth(unit: ComputeUnit) -> float:
     return UNBOUNDED_ACCUMULATION if unit.dataflow in K_ON_GRID else 0.0
 
 
+def sums_locally(grid: TileGrid, unit: ComputeUnit) -> bool:
+    """Whether *unit* sums this grid's k-slices in its own periphery (D62, D68).
+
+    Three conditions, all physical:
+
+    * K is actually cut on the grid — more than one k-slice, and not by split-K,
+      whose two kernels put the partials in DRAM whatever the unit can do;
+    * K is the grid's **row** axis (``ws``), so one output column's k-slices are
+      one column of the grid, which :func:`deal` can hand to a single unit. Under
+      ``is`` K is the column axis: a row's k-slices sit side by side and a wave
+      spreads them across units, so they cannot meet in one periphery;
+    * ``K`` fits :func:`accumulation_depth` — Metis's published 16384.
+
+    When this holds, :func:`deal` *enforces* the locality it claims. Before D68
+    it was assumed: the round-robin deal only kept a column on one unit when the
+    column count happened to divide the unit count, so Metis at N=512, K=8192
+    reported "summed in the periphery" for 16 k-slices spread over 4 cores.
+    """
+    if not grid.needs_reduction or grid.k_slices <= 1 or grid.materialises_partials:
+        return False
+    if grid.row_dim is not Dim.K:
+        return False
+    return grid.k <= accumulation_depth(unit)
+
+
+@dataclass(frozen=True, slots=True)
+class Deal:
+    """How a grid's tiles are dealt to units, wave by wave (D30, D68).
+
+    A wave is one tile per unit, run in lockstep; ``ranges[w]`` is the
+    ``[start, end)`` span of row-major tile indices wave ``w`` runs, one per
+    unit in order. The ranges are consecutive and cover every tile exactly
+    once, so a coalesced step of several waves is still one contiguous range.
+
+    Two deals, chosen by :func:`deal`:
+
+    ``round-robin`` (``keeps_k_on_unit`` False)
+        Consecutive tiles to consecutive units, ``units`` at a time, across row
+        boundaries. What every grid used before D68, and what every grid whose
+        partials leave the unit anyway still uses.
+    ``column-per-unit`` (``keeps_k_on_unit`` True)
+        A wave never straddles a grid row: each row (one k-slice) is split into
+        ``rounds`` waves of ``used_cores`` columns, and unit ``u`` gets column
+        ``round * used_cores + u`` in every row. So every k-slice of a column
+        lands on the same unit, one wave after another — through its weight sets
+        on Metis — and :func:`sums_locally`'s claim is true by construction.
+
+    Worked examples on Metis (4 cores, 512x512 arrays):
+
+    * N=2048, K=2048: 4 columns x 4 k-slices. Both deals give 4 waves of 4 —
+      the case where round-robin was right by luck (4 columns divide 4 cores).
+    * N=512, K=8192: 1 column x 16 k-slices. Column-per-unit: 1 core, 16 waves,
+      occupancy 16 / (16 x 4) = 25%. Round-robin gave 4 waves at 100% by
+      splitting the column over 4 cores, whose partials could not meet.
+    * N=1024, K=4096: 2 columns x 8 k-slices: 2 cores, 8 waves, occupancy 50%.
+    """
+
+    tiles: int
+    units: int
+    used_cores: int
+    ranges: tuple[tuple[int, int], ...]
+    keeps_k_on_unit: bool
+    rounds: int = 1
+    """Waves per grid row under column-per-unit: ``ceil(cols / used_cores)``."""
+
+    @property
+    def waves(self) -> int:
+        """Lockstep waves the units run."""
+        return len(self.ranges)
+
+    @property
+    def occupancy(self) -> float:
+        """Fraction of unit-waves that run a tile: ``tiles / (waves * units)``.
+
+        The wave-occupancy term of the utilisation (D30); the idle remainder is
+        ``waves * units - tiles`` unit-waves.
+        """
+        if self.units <= 1 or self.tiles <= 0:
+            return 1.0
+        return self.tiles / (self.waves * self.units)
+
+    def boundary(self, position: float) -> int:
+        """The tile index at *position* waves into the run, for coalescing.
+
+        Whole waves land on their range boundaries; a fractional position splits
+        a wave pro rata, which is what a drawn step covering 2.5 waves needs. On
+        the round-robin deal this is exactly ``floor(position * units)`` clamped
+        to ``tiles`` — the formula the pipeline used before D68.
+        """
+        whole = math.floor(position)
+        if whole >= self.waves:
+            return self.tiles
+        start, end = self.ranges[whole]
+        width = self.used_cores if self.keeps_k_on_unit else self.units
+        return min(end, start + math.floor((position - whole) * width))
+
+
+def deal(grid: TileGrid, units: int, *, keep_k_on_unit: bool) -> Deal:
+    """Deal *grid*'s tiles to *units* units — see :class:`Deal` for the two deals."""
+    units = max(1, units)
+    tiles = grid.tiles
+    if not keep_k_on_unit:
+        used = max(1, min(units, tiles))
+        ranges = tuple((start, min(start + used, tiles)) for start in range(0, tiles, used))
+        return Deal(tiles, units, used, ranges, keeps_k_on_unit=False)
+    used = max(1, min(units, grid.cols))
+    rounds = math.ceil(grid.cols / used)
+    ranges = tuple(
+        (row * grid.cols + first, row * grid.cols + min(first + used, grid.cols))
+        for row in range(grid.rows * grid.k_partitions)
+        for first in range(0, grid.cols, used)
+    )
+    return Deal(tiles, units, used, ranges, keeps_k_on_unit=True, rounds=rounds)
+
+
+def deal_for(grid: TileGrid, unit: ComputeUnit) -> Deal:
+    """The deal *unit* runs *grid* with: column-per-unit exactly when it sums K locally."""
+    return deal(grid, unit.count, keep_k_on_unit=sums_locally(grid, unit))
+
+
 @dataclass(frozen=True, slots=True)
 class ReductionCost:
     """What summing a grid's partial results costs, and where they are summed.
@@ -391,8 +511,10 @@ def reduction_placement(
         split-K, always: two kernels, so the partials cross global memory
         between them whatever the capacity (:attr:`TileGrid.materialises_partials`).
     ``LOCAL``
-        K is on the grid and ``K`` fits :func:`accumulation_depth` — the partials
-        never leave the unit that made them, so nothing is charged.
+        :func:`sums_locally` — K is the grid's row axis and fits
+        :func:`accumulation_depth`, and :func:`deal` keeps every k-slice of an
+        output column on one unit, so the partials never leave the unit that
+        made them and nothing is charged (D68).
     ``ON_CHIP``
         K is on the grid, the partials must leave the unit, and the whole
         ``M x N`` accumulator fits in on-chip capacity. This is the tensor-core
@@ -412,7 +534,7 @@ def reduction_placement(
         return ReductionPlacement.NONE
     if grid.materialises_partials:
         return ReductionPlacement.DRAM
-    if grid.k <= accumulation_depth(unit):
+    if sums_locally(grid, unit):
         return ReductionPlacement.LOCAL
     live_bytes = grid.accumulator_elements * accumulator_bytes
     if live_bytes <= on_chip_capacity_bytes:

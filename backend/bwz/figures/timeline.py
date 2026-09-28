@@ -56,7 +56,7 @@ from bwz.analysis.dataflow import DataflowPlan, plan_dataflow
 from bwz.analysis.pipeline import Lane, PipelineTrace, Span, Stage, build_trace, grid_of
 from bwz.analysis.roofline import MATRIX_OP_TYPES, MachineModel, compute_dtype
 from bwz.analysis.stationarity import Dim, TileGrid, residency_phrase
-from bwz.analysis.tiling import operation_tiles
+from bwz.analysis.tiling import operation_cores
 from bwz.deploy import check as check_deployment
 from bwz.deploy import deployment_of
 from bwz.emit import EmittedProgram, emit_matmul
@@ -1213,14 +1213,11 @@ def _units_used(ops: Sequence[Operation], machine: MachineModel) -> int:
     """
     return max(
         (
-            min(
-                machine.unit.count,
-                operation_tiles(
-                    op,
-                    machine.unit,
-                    stationarity=machine.stationarity,
-                    k_partitions=machine.k_partitions,
-                ),
+            operation_cores(
+                op,
+                machine.unit,
+                stationarity=machine.stationarity,
+                k_partitions=machine.k_partitions,
             )
             for op in ops
             if op.op_type in MATRIX_OP_TYPES

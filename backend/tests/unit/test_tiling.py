@@ -260,3 +260,31 @@ def test_attention_tiles_count_every_head() -> None:
 
     per_head = (128 // 16) * (2048 // 16)
     assert operation_tiles(op, unit) == per_head * 32
+
+
+def test_metis_charges_the_cores_a_single_column_leaves_idle() -> None:
+    """D68: one output column's k-slices share one core, so N=512 uses 1 of 4.
+
+    512x512x8192 INT8 on Metis. Every padding term is whole except K's
+    sub-cycle fill, and the deal keeps the 16 k-slices on one core:
+
+        shape  = (512/512) x (512/512) x 8192/(8192 + 1)
+        occupancy = 16 tiles / (16 waves x 4 cores) = 0.25
+        chip   = 0.25 x 8192/8193 = 0.249970
+
+    Before D68 the round-robin deal spread the column over all four cores and
+    reported 0.99988 — the four partials of each output landing in four
+    different peripheries, summed by nobody.
+    """
+    from bwz.analysis.tiling import operation_cores
+
+    unit = load_chip("metis_aipu").compute_units[0]
+    op = Operation(
+        id="m",
+        op_type=OpType.MATMUL,
+        inputs=(),
+        outputs=(),
+        attrs=MatmulAttrs(m=512, n=512, k=8192),
+    )
+    assert operation_utilisation(op, unit, DType.INT8) == pytest.approx(0.25 * 8192 / 8193)
+    assert operation_cores(op, unit) == 1

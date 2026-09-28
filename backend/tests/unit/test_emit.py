@@ -265,6 +265,29 @@ def test_walk_draws_its_own_tile_grid() -> None:
             assert phrase in doc, (flow, phrase)
 
 
+def test_metis_walks_each_column_on_one_core() -> None:
+    """D68: the emitted walk deals column-per-core where the unit sums K locally.
+
+    512x512x1024 INT8: one column, two k-slices -> 1 core, 2 waves. The program
+    must say so in its constants and its LEVEL 2, and predict what the report
+    charged: 2 x 4 - 2 = 6 idle core-waves.
+    """
+    program, *_ = _emit("metis_aipu", (512, 512, 1024), "int8")
+    constants = constants_of(program.source)
+    assert (constants["USED_CORES"], constants["ROUNDS"], constants["WAVES"]) == (1, 1, 2)
+    assert "kt, round_ = divmod(wave, ROUNDS)" in program.source
+    assert "nt = round_ * USED_CORES + core_id" in program.source
+    assert program.predicted["idle_core_waves"] == 6
+    assert "SAME core's, in its other waves" in program.source
+
+
+def test_a100_keeps_the_round_robin_deal() -> None:
+    """No local accumulator on a tensor core, so nothing about its walk changes."""
+    program, *_ = _emit("a100_80gb", stationarity=Dataflow.WEIGHT_STATIONARY)
+    assert "tile = wave * USED_CORES + core_id" in program.source
+    assert "ROUNDS" not in program.source
+
+
 def test_the_header_draws_which_operand_is_which_shape() -> None:
     """Right after the command: A[M, K] @ B[K, N] -> C[M, N], with this run's sizes."""
     program, *_ = _emit("a100_80gb", shape=(64, 1000, 128), dtype="int8")

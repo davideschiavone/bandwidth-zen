@@ -33,7 +33,7 @@ from dataclasses import dataclass
 
 from bwz.analysis.dataflow import DataflowPlan
 from bwz.analysis.roofline import MachineModel
-from bwz.analysis.stationarity import Dim, TileGrid
+from bwz.analysis.stationarity import Dim, TileGrid, deal_for, sums_locally
 from bwz.analysis.tiling import padded
 from bwz.emit import _harness
 from bwz.report import OpResult, ReductionPlacement
@@ -137,8 +137,11 @@ def predicted_for(
     rows, cols = unit.systolic_dims if unit.systolic_dims is not None else (1, 1)
     tiles = grid.tiles
     available = max(unit.count, 1)
-    used = max(1, min(available, tiles))
-    waves = math.ceil(tiles / used)
+    # The deal is decided once, in analysis/stationarity.py (D68): the same one
+    # the utilisation and the trace read, so waves and idle slots cannot differ.
+    dealt = deal_for(grid, unit)
+    used = dealt.used_cores
+    waves = dealt.waves
     events = grid.a_events * (dataflow.tiles_per_a_event // max(1, dataflow.residency_tiles))
     return {
         "tiles": tiles,
@@ -546,13 +549,7 @@ def _constants(
         ),
         "",
         "# Two core counts, and the gap between them is the whole of wave occupancy:",
-        *_constant(
-            f"USED_CORES = {int(predicted['used_cores'])}",
-            "min(AVAILABLE_CORES, TILES) — what there is",
-            "work for. One OS thread each, deliberately NOT",
-            "capped to this host's CPUs: structure, not speed.",
-        ),
-        *_constant(f"WAVES = {int(predicted['waves'])}", "ceil(TILES / USED_CORES)"),
+        *_deal_constants(grid, unit, predicted),
         "",
         _rule("5. the prediction"),
         "# What bwz said. Everything here is asserted after the run except the two rows",
@@ -566,6 +563,37 @@ def _constants(
         out.append(f'    "{key}": {rendered},')
     out.append("}")
     return out
+
+
+def _deal_constants(grid: TileGrid, unit: ComputeUnit, predicted: dict[str, float]) -> list[str]:
+    """USED_CORES and WAVES, and — for a unit that sums K locally — ROUNDS (D68)."""
+    used, waves = int(predicted["used_cores"]), int(predicted["waves"])
+    if not deal_for(grid, unit).keeps_k_on_unit:
+        return [
+            *_constant(
+                f"USED_CORES = {used}",
+                "min(AVAILABLE_CORES, TILES) — what there is",
+                "work for. One OS thread each, deliberately NOT",
+                "capped to this host's CPUs: structure, not speed.",
+            ),
+            *_constant(f"WAVES = {waves}", "ceil(TILES / USED_CORES)"),
+        ]
+    rounds = math.ceil(grid.cols / used)
+    return [
+        *_constant(
+            f"USED_CORES = {used}",
+            "min(AVAILABLE_CORES, GRID_COLS): ONE output column",
+            f"per core, because {unit.name} sums K in its own",
+            "periphery, so a column's k-slices must share a",
+            "core (D68). One OS thread each — structure, not speed.",
+        ),
+        *_constant(f"ROUNDS = {rounds}", "ceil(GRID_COLS / USED_CORES): waves per k-slice"),
+        *_constant(
+            f"WAVES = {waves}",
+            "GRID_ROWS * ROUNDS: a wave never straddles a",
+            "grid row, so each core keeps its column",
+        ),
+    ]
 
 
 def _largest_array() -> tuple[int, str]:
@@ -896,12 +924,10 @@ def _walk(
             "    # One thread per core, started by run_cores below. Every core runs this same",
             "    # function; they differ only in core_id. end_of_wave() is a barrier: nobody",
             "    # starts wave w+1 until every core has finished wave w (lockstep, D30).",
+            *_deal_comment(grid, unit),
             "    def core(core_id: int, end_of_wave: Callable[[], None]) -> None:",
             _commented("        for wave in range(WAVES):", "LEVEL 1: waves, one after another"),
-            _commented(
-                "            tile = wave * USED_CORES + core_id", "LEVEL 2: this core's tile"
-            ),
-            "            if tile >= TILES:",
+            *_deal_lines(grid, unit),
             "                # More cores than tiles left: this core sits the wave out. THIS is",
             "                # wave occupancy (D30), counted rather than assumed.",
             "                if DEBUG:",
@@ -1097,6 +1123,42 @@ def _grid_picture(grid: TileGrid, unit: ComputeUnit) -> list[str]:
     return out
 
 
+def _deal_comment(grid: TileGrid, unit: ComputeUnit) -> list[str]:
+    """Why a unit that sums K locally deals its tiles column by column (D68)."""
+    if not deal_for(grid, unit).keeps_k_on_unit:
+        return []
+    return [
+        "    #",
+        f"    # Column-per-core deal (D68). {unit.name} sums K in its OWN periphery, so every",
+        "    # k-slice of an output column must run on the SAME core — a partial from",
+        "    # another core would have nowhere to meet it. So a wave never straddles a",
+        "    # grid row: core c keeps column nt = round_ * USED_CORES + c, and successive",
+        "    # waves walk that column's k-slices (kt) through the core's weight sets.",
+    ]
+
+
+def _deal_lines(grid: TileGrid, unit: ComputeUnit) -> list[str]:
+    """LEVEL 2: which tile this core takes in this wave, under the deal it runs."""
+    if not deal_for(grid, unit).keeps_k_on_unit:
+        return [
+            _commented(
+                "            tile = wave * USED_CORES + core_id", "LEVEL 2: this core's tile"
+            ),
+            "            if tile >= TILES:",
+        ]
+    return [
+        _commented(
+            "            kt, round_ = divmod(wave, ROUNDS)", "this wave's k-slice, and column group"
+        ),
+        _commented(
+            "            nt = round_ * USED_CORES + core_id",
+            "LEVEL 2: this core's column, the SAME for every kt",
+        ),
+        _commented("            tile = kt * GRID_COLS + nt", "the grid's own tile number"),
+        "            if nt >= GRID_COLS:",
+    ]
+
+
 def _levels_docstring(
     grid: TileGrid,
     dataflow: DataflowPlan,
@@ -1130,9 +1192,7 @@ def _levels_docstring(
         "",
         "    Every split this program makes is below, outermost first:",
         "",
-        f"      LEVEL 1  waves        {waves:,} = ceil({tiles:,} tiles / {available:,} cores)",
-        f"      LEVEL 2  cores        {used:,} of {available:,} in use;"
-        " each takes one tile per wave",
+        *_levels_deal_lines(grid, unit, waves, tiles, used, available),
         f"      LEVEL 3  tile grid    {grid_text}",
         f"               (parallel)   the two dimensions ON the grid: {grid.row_dim.value}"
         f" and {grid.col_dim.value}",
@@ -1156,6 +1216,26 @@ def _levels_docstring(
         lines += _placement_note(placement)
     lines.append('    """')
     return lines
+
+
+def _levels_deal_lines(
+    grid: TileGrid, unit: ComputeUnit, waves: int, tiles: int, used: int, available: int
+) -> list[str]:
+    """The LEVEL 1 and 2 rows of ``walk``'s table, for the deal this run uses (D68)."""
+    if not deal_for(grid, unit).keeps_k_on_unit:
+        return [
+            f"      LEVEL 1  waves        {waves:,} = ceil({tiles:,} tiles / {available:,} cores)",
+            f"      LEVEL 2  cores        {used:,} of {available:,} in use;"
+            " each takes one tile per wave",
+        ]
+    rounds = math.ceil(grid.cols / used)
+    return [
+        f"      LEVEL 1  waves        {waves:,} = {grid.rows:,} k-slices x {rounds:,} round(s)"
+        f" of {used:,} columns",
+        f"      LEVEL 2  cores        {used:,} of {available:,} in use; core c keeps ONE output"
+        " column for",
+        "                            every k-slice, so K sums in its own periphery (D68)",
+    ]
 
 
 def _explanation(grid: TileGrid, unit: ComputeUnit) -> list[str]:
@@ -1398,6 +1478,15 @@ def _weight_body(grid: TileGrid, dataflow: DataflowPlan, unit: ComputeUnit) -> l
             "",
             "    # -- what stays put: B's tile"
             + ("" if unit.weight_sets > 1 else " (in name only here: see the docstring)"),
+            *(
+                [
+                    f"    #    written into one of this core's {unit.weight_sets} weight sets."
+                    " The column's",
+                    "    #    other k-slices go through its other sets, in other waves (D68).",
+                ]
+                if sums_locally(grid, unit)
+                else []
+            ),
         ]
     )
     out += [(_commented("    b = dram.read_b(k0, k1, n0, n1)", "stays put"), "load_b")]
@@ -1417,7 +1506,7 @@ def _weight_body(grid: TileGrid, dataflow: DataflowPlan, unit: ComputeUnit) -> l
             "        # == LEVEL 5: one instruction",
         ]
     )
-    return out + _partial_step(grid)
+    return out + _partial_step(grid, local=sums_locally(grid, unit))
 
 
 def _input_body(grid: TileGrid, dataflow: DataflowPlan) -> list[Line]:
@@ -1453,15 +1542,16 @@ def _input_body(grid: TileGrid, dataflow: DataflowPlan) -> list[Line]:
             "        # == LEVEL 5: one instruction",
         ]
     )
-    return out + _partial_step(grid)
+    return out + _partial_step(grid, local=False)
 
 
-def _partial_step(grid: TileGrid) -> list[Line]:
+def _partial_step(grid: TileGrid, *, local: bool) -> list[Line]:
     """The instruction and the partial it hands on, shared by ``ws`` and ``is``.
 
     The comment above ``partials.accumulate`` is the one place the program says
     who else writes the block this step produces: nothing in the loop shows it,
-    because the other writers are other tiles, on other cores.
+    because the other writers are other tiles — on other cores, or (*local*,
+    D68) on this same core in other waves.
     """
     k_on_rows = grid.row_dim is Dim.K
     slices = grid.rows if k_on_rows else grid.cols
@@ -1472,6 +1562,19 @@ def _partial_step(grid: TileGrid) -> list[Line]:
             "-- where the product goes: K fits in ONE instruction tile here, so this",
             "   tile is the only writer of every block it touches. Nothing is added;",
             "   `partials` just holds C until partials.drain() writes it out.",
+        ]
+    elif local:
+        note = [
+            "-- where the product goes. It is C[m0:m1, n0:n1] over K = k0:k1 ONLY:",
+            f"   1 of the {slices} k-slices that block needs. The other {slices - 1} are this",
+            f"   SAME core's, in its other waves: the deal keeps column {fixed_var} here (D68),",
+            "   so every k-slice of it meets in this core's periphery accumulator and no",
+            "   partial ever leaves the core. That is why the report charges nothing for",
+            "   these additions. `partials` stands in for that accumulator; it still",
+            "   counts the additions, since the work is real even when it is free.",
+            "",
+            f"   Steps of THIS loop never add to each other — each {swept_var} is a different",
+            "   block of C. The finished C leaves the chip once, in partials.drain().",
         ]
     else:
         note = [

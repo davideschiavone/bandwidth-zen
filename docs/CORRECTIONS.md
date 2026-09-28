@@ -3316,3 +3316,47 @@ files stay diffable against today's; the sites carry `TODO(D67-open)`.
 elided past that so both edges stay visible), then one tile followed through its sweep and where its
 result goes.
 
+## D68 — A column's k-slices share one core, or they do not sum locally (2026-09-28)
+
+### What was wrong
+
+`LOCAL` placement (D62) charges nothing for a K-on-grid reduction because Metis's periphery sums
+the k-slices "without storing intermediate results back to memory". That periphery belongs to one
+AI core. The deal that put tiles on cores was round-robin — tile `t` to core `t mod units`, across
+grid rows — so a column's k-slices only shared a core when the column count happened to divide the
+core count. The report even said so: *"That assignment is assumed, not enforced (D62)."*
+
+It mattered exactly where it was assumed away. Metis, `512 x 512 x 8192`: one output column, 16
+k-slices, dealt four to each of four cores in four waves at 100% occupancy — and the drawer said
+all 16 were summed in one periphery. They were in four.
+
+### The fix
+
+`analysis/stationarity.py` now decides the deal as well as the grid. `sums_locally(grid, unit)` is
+the placement's condition — K cut on the grid's **row** axis, not by split-K, within
+`accumulation_depth` — and when it holds `deal()` keeps each column on one unit: a wave never
+straddles a grid row, unit `u` takes column `round · used + u` in every row, `used = min(units,
+cols)`, `waves = rows · ceil(cols / used)`. Otherwise the round-robin deal is unchanged.
+
+`Deal` is read by the utilisation's wave-occupancy term (`tiling.operation_utilisation`, via
+`operation_deal`), the pipeline's wave count and tile ranges, the timeline's "arrays reached", and
+the emitted program, whose LEVEL 2 now reads `kt, round_ = divmod(wave, ROUNDS)` /
+`nt = round_ * USED_CORES + core_id` — the column a core keeps, visibly the same for every kt.
+`is` grids no longer qualify for `LOCAL` on any unit: their K is the column axis, and a wave
+spreads a row's k-slices across units.
+
+### What moved
+
+Only what was wrong. Metis `512 x 512 x 8192`: utilisation 99.99% → 25.00%, `t_compute` 20.5 →
+81.9 µs (latency unchanged at 131 µs — DRAM-bound). `512 x 1024 x 4096`: → 49.99%, 41 µs.
+MobileNetV3 on Metis and `chip_a` +3.4% (convolutions whose output channels give fewer 512-wide
+columns than cores). Every A100 and GPU figure, every transformer figure in the documented tables,
+Metis at N = K = 2048 and 8192³: identical.
+
+### What it does not do
+
+Spreading one column's k-slices over idle cores *and* summing their partials on the DPU is a real
+alternative when N is narrow — more occupancy, paid for in cross-core traffic and DPU time. It is a
+different decomposition, not modelled; the drawer names it where cores sit idle. Choosing between
+the two would need the DPU's throughput, which the paper does not publish.
+

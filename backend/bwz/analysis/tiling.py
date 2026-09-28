@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import math
 
-from bwz.analysis.stationarity import grid_for
+from bwz.analysis.stationarity import Deal, TileGrid, deal_for, grid_for
 from bwz.graph.ops import (
     AttentionAttrs,
     ConvAttrs,
@@ -70,6 +70,7 @@ def systolic_utilisation(
     units: int = 1,
     fill_cycles: int | None = None,
     tiles: int | None = None,
+    occupancy: float | None = None,
 ) -> float:
     """Fraction of a ``rows x cols`` array a ``[M,K]x[K,N]`` GEMM keeps busy.
 
@@ -152,7 +153,11 @@ def systolic_utilisation(
     grid_tiles = (
         tiles if tiles is not None else (padded(k, rows) // rows) * (padded(n, cols) // cols)
     )
-    return k_efficiency * n_efficiency * m_efficiency * wave_occupancy(grid_tiles, units)
+    # A caller that knows how the tiles are dealt passes the deal's occupancy
+    # (D68): a unit that sums K locally keeps each output column on one unit, so
+    # its waves cannot be packed as tightly as tiles/units says.
+    waves_term = occupancy if occupancy is not None else wave_occupancy(grid_tiles, units)
+    return k_efficiency * n_efficiency * m_efficiency * waves_term
 
 
 def operation_tiles(
@@ -249,6 +254,7 @@ def operation_utilisation(
             units=unit.count,
             fill_cycles=fill,
             tiles=operation_tiles(op, unit, stationarity=stationarity, k_partitions=k_partitions),
+            occupancy=_occupancy(op, unit, stationarity=stationarity, k_partitions=k_partitions),
         )
 
     if isinstance(op.attrs, ConvAttrs):
@@ -266,6 +272,7 @@ def operation_utilisation(
             units=unit.count,
             fill_cycles=fill,
             tiles=operation_tiles(op, unit),
+            occupancy=_occupancy(op, unit),
         )
 
     if isinstance(op.attrs, AttentionAttrs):
@@ -311,3 +318,77 @@ def tile_bytes(unit: ComputeUnit, bytes_per_element: float) -> float:
     """
     rows, cols = unit.systolic_dims if unit.systolic_dims is not None else (128, 128)
     return rows * cols * bytes_per_element
+
+
+def operation_grid(
+    op: Operation,
+    unit: ComputeUnit,
+    *,
+    stationarity: Dataflow | None = None,
+    k_partitions: int = 1,
+) -> TileGrid | None:
+    """The tile grid *op* is decomposed into on *unit*, or None where there is none.
+
+    A matmul gets the grid its stationarity implies. A convolution gets the
+    im2col ``K x N`` weight grid :func:`operation_tiles` has always counted —
+    ``M`` output pixels, ``K`` the filter volume, ``N`` the output channels.
+    Attention is ``batch x heads`` separate grids, not one, and has none here.
+    """
+    if unit.systolic_dims is None:
+        return None
+    rows, cols = unit.systolic_dims
+    if isinstance(op.attrs, MatmulAttrs):
+        flow = stationarity if stationarity is not None else unit.dataflow
+        return grid_for(flow, op.attrs, rows, cols, k_partitions=k_partitions)
+    if isinstance(op.attrs, ConvAttrs):
+        conv = op.attrs
+        k = (conv.in_channels // conv.groups) * conv.kernel_h * conv.kernel_w
+        m = conv.batch * conv.out_height * conv.out_width
+        attrs = MatmulAttrs(m=m, n=conv.out_channels, k=k)
+        return grid_for(Dataflow.WEIGHT_STATIONARY, attrs, rows, cols)
+    return None
+
+
+def operation_deal(
+    op: Operation,
+    unit: ComputeUnit,
+    *,
+    stationarity: Dataflow | None = None,
+    k_partitions: int = 1,
+) -> Deal | None:
+    """How *op*'s tiles are dealt to *unit*'s arrays (D68), or None with no grid."""
+    grid = operation_grid(op, unit, stationarity=stationarity, k_partitions=k_partitions)
+    return deal_for(grid, unit) if grid is not None else None
+
+
+def _occupancy(
+    op: Operation,
+    unit: ComputeUnit,
+    *,
+    stationarity: Dataflow | None = None,
+    k_partitions: int = 1,
+) -> float | None:
+    dealt = operation_deal(op, unit, stationarity=stationarity, k_partitions=k_partitions)
+    return dealt.occupancy if dealt is not None else None
+
+
+def operation_cores(
+    op: Operation,
+    unit: ComputeUnit,
+    *,
+    stationarity: Dataflow | None = None,
+    k_partitions: int = 1,
+) -> int:
+    """Arrays *op* ever gives a tile to — the deal's, where there is one (D68).
+
+    ``min(count, tiles)`` for everything the round-robin deal covers; fewer
+    when a unit that sums K locally keeps each output column on one array and
+    there are fewer columns than arrays.
+    """
+    dealt = operation_deal(op, unit, stationarity=stationarity, k_partitions=k_partitions)
+    if dealt is not None:
+        return dealt.used_cores
+    return min(
+        unit.count,
+        operation_tiles(op, unit, stationarity=stationarity, k_partitions=k_partitions),
+    )

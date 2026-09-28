@@ -18,9 +18,12 @@ from bwz.analysis.stationarity import (
     ReductionCost,
     TileGrid,
     accumulation_depth,
+    deal,
+    deal_for,
     grid_for,
     reduction_cost,
     refusal_reason,
+    sums_locally,
 )
 from bwz.graph.ops import MatmulAttrs
 from bwz.report import ReductionPlacement
@@ -557,3 +560,93 @@ def test_the_adds_are_never_charged_to_a_matrix_engine() -> None:
                 f"{chip_id}/{dtype.value} would charge the reduction to a matrix engine"
             )
     assert seen, "the assertion above must actually have been reached"
+
+
+# ------------------------------------------------------------------ the deal (D68)
+
+
+def _metis_grid(m: int, n: int, k: int) -> TileGrid:
+    return grid_for(Dataflow.WEIGHT_STATIONARY, MatmulAttrs(m=m, n=n, k=k), 512, 512)
+
+
+def _units_of(grid: TileGrid, ranges: tuple[tuple[int, int], ...]) -> dict[int, set[int]]:
+    """Which grid columns each unit is dealt, read off the wave ranges."""
+    held: dict[int, set[int]] = {}
+    for start, end in ranges:
+        for unit, tile in enumerate(range(start, end)):
+            held.setdefault(unit, set()).add(tile % grid.cols)
+    return held
+
+
+def test_a_unit_that_sums_locally_keeps_each_column_on_one_core() -> None:
+    """Metis, N=512, K=8192: one output column, 16 k-slices — all on ONE core.
+
+    Hand-computed: grid K x N = 16 x 1. The periphery that sums K belongs to one
+    AI core, so the column cannot be split: used cores = min(4, 1) = 1, waves =
+    16 rows x ceil(1/1) = 16, occupancy = 16 / (16 x 4) = 0.25. Round-robin
+    (the pre-D68 deal) put 4 k-slices on each of 4 cores in 4 waves — 100%
+    occupancy for partials that had nowhere to meet.
+    """
+    grid = _metis_grid(512, 512, 8192)
+    assert sums_locally(grid, D_IMC)
+    dealt = deal_for(grid, D_IMC)
+    assert (dealt.used_cores, dealt.waves) == (1, 16)
+    assert dealt.occupancy == pytest.approx(0.25)
+    assert _units_of(grid, dealt.ranges) == {0: {0}}
+
+
+def test_two_columns_on_four_cores_use_two_and_idle_two() -> None:
+    """N=1024, K=4096: 2 columns x 8 k-slices -> 2 cores, 8 waves, 16/(8x4) = 0.5."""
+    grid = _metis_grid(512, 1024, 4096)
+    dealt = deal_for(grid, D_IMC)
+    assert (dealt.used_cores, dealt.waves) == (2, 8)
+    assert dealt.occupancy == pytest.approx(0.5)
+    assert _units_of(grid, dealt.ranges) == {0: {0}, 1: {1}}
+
+
+def test_a_wave_never_straddles_a_grid_row_under_the_local_deal() -> None:
+    """N=2560 (5 columns), K=1024 (2 rows) on 4 cores: rows split 4 + 1.
+
+    Hand-computed: waves = 2 rows x ceil(5/4) = 4, ranges (0,4) (4,5) (5,9)
+    (9,10); occupancy 10 / (4 x 4) = 0.625. Every unit sees the same column in
+    both rows, which is the claim LOCAL placement makes.
+    """
+    grid = _metis_grid(512, 2560, 1024)
+    dealt = deal_for(grid, D_IMC)
+    assert dealt.ranges == ((0, 4), (4, 5), (5, 9), (9, 10))
+    assert dealt.occupancy == pytest.approx(0.625)
+    assert _units_of(grid, dealt.ranges) == {0: {0, 4}, 1: {1}, 2: {2}, 3: {3}}
+    for start, end in dealt.ranges:
+        assert start // grid.cols == (end - 1) // grid.cols
+
+
+def test_when_columns_divide_the_cores_both_deals_agree() -> None:
+    """N=K=2048: 4 columns on 4 cores — the case round-robin got right by luck."""
+    grid = _metis_grid(512, 2048, 2048)
+    assert deal_for(grid, D_IMC).ranges == deal(grid, 4, keep_k_on_unit=False).ranges
+
+
+def test_a_unit_whose_partials_leave_anyway_keeps_round_robin() -> None:
+    """A100 ws: no local accumulator, so K is spread for occupancy as before (D62).
+
+    512x512x4096 on 16x16: 256 x 32 = 8192 tiles over 432 cores = 19 waves.
+    """
+    grid = grid_for(Dataflow.WEIGHT_STATIONARY, MatmulAttrs(m=512, n=512, k=4096), 16, 16)
+    assert not sums_locally(grid, TENSOR_CORE)
+    dealt = deal_for(grid, TENSOR_CORE)
+    assert (dealt.used_cores, dealt.waves) == (432, 19)
+    assert dealt.occupancy == pytest.approx(8192 / (19 * 432))
+
+
+def test_k_on_the_grid_columns_cannot_meet_in_one_periphery() -> None:
+    """``is`` puts K on the COLUMN axis: a wave spreads a row's k-slices over units."""
+    grid = grid_for(Dataflow.INPUT_STATIONARY, MatmulAttrs(m=512, n=512, k=4096), 512, 512)
+    assert not sums_locally(grid, D_IMC)
+
+
+def test_the_round_robin_boundary_is_the_pre_d68_formula() -> None:
+    """Coalescing a round-robin run at fractional waves must not move a tile tag."""
+    grid = grid_for(Dataflow.OUTPUT_STATIONARY, MatmulAttrs(m=1000, n=2000, k=3000), 16, 16)
+    dealt = deal(grid, 432, keep_k_on_unit=False)
+    for position in (0.0, 0.4, 1.0, 2.5, 7.25, float(dealt.waves)):
+        assert dealt.boundary(position) == min(grid.tiles, int(position * 432))

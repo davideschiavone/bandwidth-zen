@@ -280,3 +280,20 @@ def test_a_k_on_grid_walk_counts_the_additions_it_owes(tmp_path: Path, flow: Dat
     assert "partial-sum additions" in output
     assert f"{7 * 64 * 64:,}" in output
     assert "every tier-1 count matches the report" in output
+
+
+def test_metis_column_per_core_walk_matches_its_report(tmp_path: Path) -> None:
+    """D68, executed: 64x512x1024 INT8 on Metis — one column, two k-slices, one core.
+
+    Small M keeps the pure-Python 512x512 instruction tiles affordable; what is
+    under test is the deal, which only needs K on two rows and N on one column.
+    """
+    path = _write(tmp_path, chip_id="metis_aipu", shape=(64, 512, 1024), dtype="int8")
+    output = _run(path, extra_args=["--debug"])
+    assert "every tier-1 count matches the report" in output
+    cores = {
+        line.split()[1]
+        for line in output.splitlines()
+        if line.startswith("core ") and "tile" in line
+    }
+    assert cores == {"0"}, "both k-slices of the one column ran on core 0"

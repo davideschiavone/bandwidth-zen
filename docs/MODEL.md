@@ -432,6 +432,31 @@ it is the same `min(count, tiles)` the emitted program calls `USED_CORES`.
 | M=1, N=K=10000 on A100, `os` | 625 / 432 | **0.723** — 2 waves, the second 45% full |
 | the same under `ws` | 390625 / 432 | 0.999 — but 390 625 partial sums to reduce |
 
+**Which tiles share a wave is itself a decision (D68).** The default deal is round-robin —
+consecutive tiles to consecutive arrays, `units` at a time, across grid-row boundaries — and the
+formula above is its occupancy. A unit that sums K in its own periphery (`LOCAL` below) cannot use
+it: the k-slices of one output column must all run on the *same* array or their partials have
+nowhere to meet. So for such a unit a wave never straddles a grid row, and array `u` keeps column
+`round · used + u` for every k-slice:
+
+```
+used       = min(units, grid_cols)
+waves      = grid_rows · ceil(grid_cols / used)
+occupancy  = tiles / (waves · units)
+```
+
+| case (Metis, 4 cores) | grid K × N | round-robin | column-per-unit (D68) |
+|---|---|---|---|
+| N = K = 2048 | 4 × 4 | 4 waves, 1.00 | 4 waves, **1.00** — the same; 4 columns divide 4 cores |
+| N = 1024, K = 4096 | 8 × 2 | 4 waves, 1.00 | 8 waves, **0.50** — 2 cores |
+| N = 512, K = 8192 | 16 × 1 | 4 waves, 1.00 | 16 waves, **0.25** — 1 core |
+| N = 2560, K = 1024 | 2 × 5 | 3 waves, 0.83 | 4 waves, **0.625** — rows split 4 + 1 |
+
+The round-robin figures in the last three rows were the model's before D68, and they were wrong in
+the direction that flatters: full occupancy bought by splitting a column over cores whose partials
+were then "summed locally" in four different peripheries. `analysis/stationarity.py` decides the
+deal (`deal_for`), and the utilisation, the trace and the emitted program all read it.
+
 Negligible on a large GEMM by construction and dominant on a small one, which is why the aggregate
 peak alone cannot compare two chips on anything small. The last two rows are the one place where a
 *more* accurate decomposition reports a *lower* number: `ws` claimed parallelism that only existed
@@ -449,7 +474,7 @@ of the dataflow's name. `ReductionPlacement` is that choice:
 | placement | when | vector adds | DRAM bytes | dispatches | how it combines |
 |---|---|---|---|---|---|
 | `NONE` | K is not cut (`os`, `rs`) | 0 | 0 | 0 | — |
-| `LOCAL` | K on the grid, and `K ≤ local_accumulation_inputs` | 0 | 0 | 0 | — |
+| `LOCAL` | K on the grid's **row** axis, `K ≤ local_accumulation_inputs`, and a column's k-slices dealt to one unit (D68) | 0 | 0 | 0 | — |
 | `ON_CHIP` | K on the grid, `M·N·acc_bytes` fits on chip | `(p−1)·M·N` | 0 | 0 | **`max(matrix, vector)`** |
 | `DRAM` | split-K, **or** an accumulator too big to hold | `(p−1)·M·N` | `2·p·M·N·acc_bytes` | 1 | `matrix + vector` |
 
@@ -457,7 +482,9 @@ of the dataflow's name. `ReductionPlacement` is that choice:
   declares `local_accumulation_inputs: 16384` — ISSCC 2024 11.3 Fig. 11.3.1, *"local accumulation up
   to 16k input channels"*, and the paper states the mechanism: an integer arithmetic unit sums a
   large MVM's partial products *"without storing intermediate results back to memory"*. The
-  accumulation happens in one AI core's periphery and never reaches L1. Every documented Metis
+  accumulation happens in one AI core's periphery and never reaches L1 — which is why the deal
+  above keeps a column on one core, and why `is`, whose K is the grid's column axis, never
+  qualifies: a wave spreads a row's k-slices across units. Every documented Metis
   figure is at K = 8192, half that depth, so it costs nothing; K = 32768 flips to `ON_CHIP` and the
   DPU pays. A unit whose **native** dataflow already carries K on the grid but declares no depth
   keeps the model's older, unbounded claim — that is what `chip_a` and `chip_b` rest on, and the

@@ -54,7 +54,7 @@ from enum import StrEnum
 from typing import TYPE_CHECKING
 
 from bwz.analysis.roofline import MATRIX_OP_TYPES, MachineModel
-from bwz.analysis.stationarity import Operand, TileGrid, grid_for
+from bwz.analysis.stationarity import Operand, TileGrid, deal_for, grid_for
 from bwz.graph.ops import ComputeGraph, GraphPhase, MatmulAttrs, Operation
 from bwz.report import OpResult, PhaseResult, ReductionPlacement
 from bwz.spec.deployment import AStrategy, BDataflow
@@ -553,8 +553,12 @@ def _tile_trace(
     # chewing through four tiles in series when it does all four together — a
     # picture that contradicted the utilisation the same report quotes (D30).
     units = max(machine.unit.count, 1)
-    waves = math.ceil(tiles / units) if tiles else 1
-    in_flight = min(tiles, units)
+    # How the tiles are dealt to the units is decided once, in stationarity.py
+    # (D68): a unit that sums K locally keeps each output column on one array,
+    # which can leave arrays idle that the round-robin count would have filled.
+    dealt = deal_for(grid, machine.unit) if grid is not None else None
+    waves = dealt.waves if dealt is not None else (math.ceil(tiles / units) if tiles else 1)
+    in_flight = dealt.used_cores if dealt is not None else min(tiles, units)
     steps = min(waves, max(1, max_steps))
     per_step = waves / steps
 
@@ -579,10 +583,9 @@ def _tile_trace(
     # doesn't divide evenly into units, the last wave leaves some array slots
     # idle, and an idle slot is not a tile any span should claim (D46).
     tile_ranges: list[tuple[int, int]] | None = None
-    if grid is not None:
+    if dealt is not None:
         tile_ranges = [
-            (math.floor(i * per_step * units), min(tiles, math.floor((i + 1) * per_step * units)))
-            for i in range(steps)
+            (dealt.boundary(i * per_step), dealt.boundary((i + 1) * per_step)) for i in range(steps)
         ]
     # D33, generalised by D53: under stage/whole, A is not a stream — one grid
     # ROW's tiles all read the same slice of A, staged once. Concentrate A's
