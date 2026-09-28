@@ -209,7 +209,18 @@ def emit_matmul(
     # matching line text, would be a second place that has to know what the
     # emitter wrote; tagging here is one place.
     lines: list[Line] = [("#!/usr/bin/env python3", None)]
-    lines += _plain(_docstring(chip, machine, grid, dataflow, command, version, working_set))
+    lines += _plain(
+        _docstring(
+            chip,
+            machine,
+            grid,
+            dataflow,
+            command,
+            version,
+            working_set,
+            dtypes=(a_dtype, b_dtype, c_dtype),
+        )
+    )
     lines += _plain(["from __future__ import annotations", ""])
     lines += _plain(_harness_imports())
     lines += _plain(["", ""])
@@ -273,6 +284,8 @@ def _docstring(
     command: str,
     version: str,
     working_set: float,
+    *,
+    dtypes: tuple[DType, DType, DType],
 ) -> list[str]:
     """The file's own header: what it is, what it is not, and what it models."""
     title = _STATIONARITY_TITLE[grid.stationarity]
@@ -281,6 +294,8 @@ def _docstring(
         "",
         f"    $ {command}",
         f"    bwz {version}",
+        "",
+        *_shapes_picture(grid.m, grid.n, grid.k, dtypes),
         "",
         "Not an illustration. This walks the same tile grid, stages A on the same events",
         "and hands tiles to cores the same way the cost model charged; it counts what it",
@@ -297,7 +312,7 @@ def _docstring(
         "",
         f"Working set: {format_bytes(working_set)} of operands and result.",
         "",
-        "Read it top to bottom: the constants, the prediction, then the loop nest. The",
+        "Read it top to bottom: the constants, the prediction, then walk(). The",
         "runtime it needs — counted DRAM, the shared staging buffer, the lockstep wave",
         "loop — is at the BOTTOM, out of the way of the part you came for.",
         "",
@@ -337,6 +352,49 @@ def _docstring(
 
 
 # ------------------------------------------------------------------------- constants
+
+
+def _shapes_picture(m: int, n: int, k: int, dtypes: tuple[DType, DType, DType]) -> list[str]:
+    """Which operand is which shape: ``A[M, K] @ B[K, N] -> C[M, N]``, drawn.
+
+    B sits above C and A to its left, the textbook layout, so the shared edges
+    line up: A's width and B's height are both K, C takes its rows from A and its
+    columns from B, and K — the contraction — is the one dimension C does not
+    have. The boxes are not to scale; the labels carry this run's sizes.
+    """
+    a_dtype, b_dtype, c_dtype = (dtype.value for dtype in dtypes)
+    a_width, bc_width = 16, 12
+    m_label, n_label, k_label = f"M = {m:,}", f"N = {n:,}", f"K = {k:,}"
+    pad = len(m_label) + 1
+    b_at = pad + a_width + 3
+    blank_a, blank_bc = "│" + " " * a_width + "│", "│" + " " * bc_width + "│"
+    return [
+        "The shapes:  A[M, K]  @  B[K, N]  ->  C[M, N]",
+        "",
+        " " * b_at + n_label.center(bc_width + 2),
+        " " * b_at + "┌" + "─" * bc_width + "┐",
+        " " * b_at + blank_bc,
+        k_label.rjust(b_at - 1) + " │" + f"B · {b_dtype}".center(bc_width) + "│",
+        " " * b_at + blank_bc,
+        " " * b_at + "└" + "─" * bc_width + "┘",
+        " " * pad + k_label.center(a_width + 2) + " " + n_label.center(bc_width + 2),
+        " " * pad + "┌" + "─" * a_width + "┐ ┌" + "─" * bc_width + "┐",
+        " " * pad + blank_a + " " + blank_bc,
+        m_label.ljust(pad)
+        + "│"
+        + f"A · {a_dtype}".center(a_width)
+        + "│ │"
+        + f"C · {c_dtype}".center(bc_width)
+        + "│ "
+        + m_label,
+        " " * pad + blank_a + " " + blank_bc,
+        " " * pad + "└" + "─" * a_width + "┘ └" + "─" * bc_width + "┘",
+        "",
+        "  M   rows of A and rows of C          -M  (a batch folds in here)",
+        "  N   columns of B and columns of C    -N",
+        "  K   columns of A = rows of B         -K  (the contraction: summed away, so",
+        "                                            C has no K at all)",
+    ]
 
 
 def _constant(statement: str, *comments: str) -> list[str]:

@@ -265,6 +265,17 @@ def test_walk_draws_its_own_tile_grid() -> None:
             assert phrase in doc, (flow, phrase)
 
 
+def test_the_header_draws_which_operand_is_which_shape() -> None:
+    """Right after the command: A[M, K] @ B[K, N] -> C[M, N], with this run's sizes."""
+    program, *_ = _emit("a100_80gb", shape=(64, 1000, 128), dtype="int8")
+    header = program.source.split('"""', 2)[1]
+    picture = header.split("The shapes:", 1)[1].split("Not an illustration.", 1)[0]
+    assert header.index("$ bwz") < header.index("The shapes:")
+    for label in ("M = 64", "N = 1,000", "K = 128", "A · int8", "B · int8", "C · int8"):
+        assert label in picture, label
+    assert "C has no K" in picture
+
+
 def test_a_big_grid_is_drawn_with_its_middle_elided() -> None:
     """Past 8 rows or columns the picture keeps both edges and elides the middle."""
     program, *_ = _emit("a100_80gb", shape=(512, 1000, 256))
