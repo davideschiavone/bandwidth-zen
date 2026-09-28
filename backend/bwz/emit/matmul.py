@@ -1381,7 +1381,7 @@ def _weight_body(grid: TileGrid, dataflow: DataflowPlan, unit: ComputeUnit) -> l
     out += _plain(
         [
             "",
-            "    # == LEVEL 4: the sweep — M streams past, every step leaves a PARTIAL",
+            "    # == LEVEL 4: the sweep — M streams past; each step writes a DIFFERENT block of C",
             _commented("    for mt in range(M_TILES):", "M streams past the resident tile"),
             "        m0, m1 = mt * ROWS, min(mt * ROWS + ROWS, M)",
             _commented("        a = sub(band, m0, m1, 0, k1 - k0)", "already on chip"),
@@ -1394,7 +1394,7 @@ def _weight_body(grid: TileGrid, dataflow: DataflowPlan, unit: ComputeUnit) -> l
             "        # == LEVEL 5: one instruction",
         ]
     )
-    return out + _partial_step()
+    return out + _partial_step(grid)
 
 
 def _input_body(grid: TileGrid, dataflow: DataflowPlan) -> list[Line]:
@@ -1413,7 +1413,7 @@ def _input_body(grid: TileGrid, dataflow: DataflowPlan) -> list[Line]:
             "    # -- what stays put: A's tile, cut from the staged band",
             _commented("    a = sub(band, 0, m1 - m0, k0, k1)", "stays put"),
             "",
-            "    # == LEVEL 4: the sweep — N streams past, every step leaves a PARTIAL",
+            "    # == LEVEL 4: the sweep — N streams past; each step writes a DIFFERENT block of C",
             _commented("    for nt in range(N_TILES):", "N streams past the resident tile"),
             "        n0, n1 = nt * COLS, min(nt * COLS + COLS, N)",
         ]
@@ -1430,16 +1430,52 @@ def _input_body(grid: TileGrid, dataflow: DataflowPlan) -> list[Line]:
             "        # == LEVEL 5: one instruction",
         ]
     )
-    return out + _partial_step()
+    return out + _partial_step(grid)
 
 
-def _partial_step() -> list[Line]:
-    """The instruction and the partial it hands on, shared by ``ws`` and ``is``."""
+def _partial_step(grid: TileGrid) -> list[Line]:
+    """The instruction and the partial it hands on, shared by ``ws`` and ``is``.
+
+    The comment above ``partials.accumulate`` is the one place the program says
+    who else writes the block this step produces: nothing in the loop shows it,
+    because the other writers are other tiles, on other cores.
+    """
+    k_on_rows = grid.row_dim is Dim.K
+    slices = grid.rows if k_on_rows else grid.cols
+    swept_var = _TILE_INDEX[grid.swept_dim]
+    fixed_var = _TILE_INDEX[grid.col_dim if k_on_rows else grid.row_dim]
+    if slices <= 1:
+        note = [
+            "-- where the product goes: K fits in ONE instruction tile here, so this",
+            "   tile is the only writer of every block it touches. Nothing is added;",
+            "   `partials` just holds C until partials.drain() writes it out.",
+        ]
+    else:
+        note = [
+            "-- where the product goes. It is C[m0:m1, n0:n1] over K = k0:k1 ONLY:",
+            f"   1 of the {slices} k-slices that block needs. The other {slices - 1} come from",
+            f"   the tiles with the same {fixed_var} and a different kt, running on OTHER",
+            "   cores, maybe in this same wave. All of them land in ONE shared copy of",
+            "   C held on chip (`partials`, one lock per block):",
+            "",
+            "     the FIRST tile to arrive   → copies its product in (C starts at zero,",
+            "                                  so this is not counted as an addition)",
+            f"     each of the other {slices - 1}".ljust(32)
+            + "→ adds its product on top (counted: the",
+            "                                  report charges these to the vector unit)",
+            "",
+            "   Which tile arrives first is thread timing and changes nothing. Steps of",
+            f"   THIS loop never add to each other — each {swept_var} is a different block of C.",
+            "   The finished C leaves the chip once, in partials.drain(), after the last",
+            "   wave.",
+        ]
     return [
         ("        mma(product, a, b, counters, SLOTS_PER_MMA)", "exec"),
+        ("", None),
+        *_plain([f"        # {line}".rstrip() if line else "        #" for line in note]),
         (
             _commented(
-                "        partials.accumulate(m0, n0, product)", "a PARTIAL over K; nothing stored"
+                "        partials.accumulate(m0, n0, product)", "this tile's share; see above"
             ),
             # "reduce", not "exec": this line IS the reduction the report charges
             # to the vector unit and the trace draws on the vector lane (D62), so
