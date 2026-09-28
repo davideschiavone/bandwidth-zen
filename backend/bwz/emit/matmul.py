@@ -1267,6 +1267,25 @@ def _stage_a(grid: TileGrid, dataflow: DataflowPlan, indent: str, *, keep: bool)
         "   how many tiles one key serves: the whole row for stage/whole, so A crosses",
         "   DRAM once; 1 for stream, so every tile re-fetches (D31/D33).",
     ]
+    if keep:
+        # Inside core(): every core runs this line, which reads as if each one
+        # loaded its own band. Say plainly that it is a lookup, not a load.
+        head += [
+            "",
+            "   pad behaves like a CACHE (a scratchpad shared by every core). Every core",
+            "   runs this line, and every core whose tile is in the same grid row asks for",
+            "   the same key. Only the FIRST to arrive misses: its fetch reads the band",
+            "   from DRAM, and that is one staging event. After that the cache is hot, so",
+            "   for every other core this call just reads the cache — no DRAM traffic,",
+            "   nothing counted.",
+        ]
+        if dataflow.a_strategy is AStrategy.WHOLE:
+            head += [
+                "   Here, under whole, the prologue before the waves already filled every",
+                "   key, so no core misses at all: every call below is a cache read.",
+            ]
+        else:
+            head += ["   (Under stream every tile has its own key, so every call misses.)"]
     return [
         *_plain([f"{indent}# {line}" for line in head]),
         (f"{indent}{'band = ' if keep else ''}pad.band(", "load_a"),
