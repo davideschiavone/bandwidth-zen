@@ -181,7 +181,7 @@ def test_split_k_emits_the_second_kernel() -> None:
 def test_a_strategies_differ_only_in_the_residency_constant() -> None:
     """``stream`` is ``stage`` with the residency set to one tile (D31/D33).
 
-    Both call the same ``stage_a``; what changes is how many tiles one event
+    Both run the same ``pad.band`` statement; what changes is how many tiles one event
     serves, and therefore how many events there are and how many bytes cross.
     """
     staged, *_ = _emit("a100_80gb")
@@ -198,8 +198,29 @@ def test_whole_ramps_the_staging_in_before_wave_zero() -> None:
     whole, *_ = _emit("a100_80gb", a_strategy="whole")
     assert whole.predicted["a_dram_bytes"] == staged.predicted["a_dram_bytes"]
     assert whole.predicted["staging_events"] == staged.predicted["staging_events"]
-    assert "for tile in range(TILES):\n        stage_a(tile, dram, pad)" in whole.source
-    assert "stage_a(tile, dram, pad)\n" in staged.source
+    assert "for tile in range(TILES):\n        # -- 1. where" in whole.source
+    assert "\n        pad.band(\n" in whole.source
+    assert "for tile in range(TILES):" not in staged.source
+    # One staging statement, run early; run_tile's own is unchanged and hits the cache.
+    assert whole.source.count("band = pad.band(") == staged.source.count("band = pad.band(") == 1
+
+
+def test_run_tile_is_readable_without_helpers() -> None:
+    """Every ``run_tile`` is self-contained and walks the same four numbered sections.
+
+    Index decoding and A's staging used to live in ``tile_row``/``tile_col``/
+    ``partition_of``/``stage_a``, so comparing two stationarities meant chasing
+    four helpers whose bodies differed per program. Inline, a plain ``diff`` of
+    two emitted files lands every difference inside ``run_tile``, section by
+    section.
+    """
+    for flow in (Dataflow.OUTPUT_STATIONARY, Dataflow.WEIGHT_STATIONARY, Dataflow.INPUT_STATIONARY):
+        program, *_ = _emit("a100_80gb", stationarity=flow)
+        for helper in ("def tile_row", "def tile_col", "def partition_of", "def stage_a"):
+            assert helper not in program.source
+        body = program.source.split("def run_tile(", 1)[1].split("\ndef ", 1)[0]
+        headers = [line.strip()[:7] for line in body.splitlines() if "# -- " in line]
+        assert headers == ["# -- 1.", "# -- 2.", "# -- 3.", "# -- 4."], flow
 
 
 # ----------------------------------------------------------------------- constants
