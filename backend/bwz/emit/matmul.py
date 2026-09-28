@@ -1215,7 +1215,9 @@ def _position(grid: TileGrid, indent: str) -> list[Line]:
             # TODO(D67-open): "part"/"piece" is split-K's name for a cut of K; rename
             # with the rest of that vocabulary (see _k_tile_bounds).
             _commented(f"{indent}part = tile // (GRID_ROWS * GRID_COLS)", "split-K piece"),
-            _commented(f"{indent}{row} = tile % (GRID_ROWS * GRID_COLS) // GRID_COLS", rows_label),
+            _commented(
+                f"{indent}{row} = (tile % (GRID_ROWS * GRID_COLS)) // GRID_COLS", rows_label
+            ),
         ]
     else:
         lines += [_commented(f"{indent}{row} = tile // GRID_COLS", rows_label)]
