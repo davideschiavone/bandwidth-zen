@@ -595,6 +595,13 @@ that row is a slice *of* (D53) — so *how often* that slice is re-staged is a b
 tile is fetched exactly once whatever the choice (D30), so the only thing left to choose is *when*
 the write lands relative to compute.
 
+**Scope.** Both knobs, like stationarity (§6.1), describe **one invocation**. The single exception is
+`b_dataflow=persistent` with `iterations > 1`: that is a statement about the *next* invocations
+finding B still written, and the only B term that crosses a call boundary. Within one call,
+`write-ahead`, `on-demand` and `persistent` move identical bytes and report identical latency; they
+differ only in where the write sits in the pipeline trace. Stationarity's "B is resident" is the
+within-call idea — a tile holds its block for one sweep — and must not be read as persistence.
+
 ```
 A_traffic = |A| · TILES_PER_GROUP / residency_tiles
 

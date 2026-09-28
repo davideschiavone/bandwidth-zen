@@ -211,6 +211,24 @@ which dimensions form the tile grid and which one each tile sweeps. **A's strate
 often A crosses DRAM within that grid, and **B's dataflow** decides when B's write lands relative to
 compute. The defaults reproduce every number in §2.1–2.4 exactly.
 
+**Scope: one call, or across calls.** Every knob below describes **one matmul call** except one
+value of one flag. "B stays" means two different things depending on which you are reading:
+
+| knob | acts over | changes | what it means |
+|---|---|---|---|
+| `--stationarity`, `--split-k` | one call | bytes **and** time | which operand is held while a tile sweeps — `ws` reads a B block once and reuses it for every row of M, *inside this call* |
+| `--a-strategy`, `--a-residency-tiles` | one call | **bytes** of A (so time, when DRAM-bound) | how often A is re-staged within this call — `stream` re-fetches per tile |
+| `--a-prefetch-depth` | one call | schedule only | how far ahead A's loads run; no byte moves |
+| `--b-dataflow write-ahead` / `on-demand` | one call | schedule only | *when* each B tile's write lands; every tile is written exactly once either way (D30), so the report's latency does not move — only the `--timeline` does (D40) |
+| `--b-dataflow persistent` + `--iterations N` | **across N calls** | B's bytes, amortised | B is written into the array once and still there for the next call: the report, still one call's numbers, charges `1/N` of that write |
+
+So for a **single call**, `--b-dataflow` never changes a reported number, and `persistent` without
+`--iterations` is identical to the default. Stationarity is not persistence: a `ws` tile holding B
+for its sweep says nothing about whether B survives to the next call. Nor does the zero B traffic a
+lone matmul usually shows — that is the capacity rule of `docs/MODEL.md` §6.2 treating a B that fits
+on chip as already there, and it applies whatever `--b-dataflow` says. On a chip with no weight
+banks (`weight_sets=1`, every GPU profile) `--b-dataflow` is inert entirely: nothing holds B.
+
 #### 2.5.1 Stationarity — `--stationarity`, `--split-k`
 
 **Which operand stays resident decides the whole decomposition** (D53): which dimensions form the

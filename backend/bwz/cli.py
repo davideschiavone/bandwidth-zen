@@ -671,9 +671,11 @@ def run(
     b_dataflow: BDataflow = typer.Option(
         BDataflow.WRITE_AHEAD,
         "--b-dataflow",
-        help="When B's array write lands: write-ahead (a wave early, hidden behind "
-        "compute), on-demand (at compute, exposed) or persistent (once, never "
-        "displaced — needs tiles <= units * weight_sets).",
+        help="When B's array write lands, within one call: write-ahead (a wave early, "
+        "hidden behind compute) or on-demand (at compute, exposed) — same bytes and "
+        "latency, only the timeline differs. persistent (written once, kept for later "
+        "calls; needs tiles <= units * weight_sets) only matters with --iterations > 1. "
+        "Inert on arrays with no weight banks (weight_sets=1).",
         rich_help_panel=PANEL_DATAFLOW_INERT,
     ),
     a_residency_tiles: int | None = typer.Option(
@@ -694,9 +696,9 @@ def run(
     iterations: int = typer.Option(
         1,
         "--iterations",
-        help="Invocations this report represents. Only b_dataflow=persistent reads "
-        "it, amortising B's write over a resident weight set a repeat invocation "
-        "would not have to rewrite.",
+        help="Invocations this report represents — the one knob that spans calls. "
+        "Only b_dataflow=persistent reads it, amortising B's write over a resident "
+        "weight set a repeat invocation would not have to rewrite.",
         rich_help_panel=PANEL_DATAFLOW_INERT,
     ),
     show_ops: int = typer.Option(
@@ -980,9 +982,11 @@ def matmul(
     b_dataflow: BDataflow = typer.Option(
         BDataflow.WRITE_AHEAD,
         "--b-dataflow",
-        help="When B's array write lands: write-ahead (a wave early, hidden behind "
-        "compute), on-demand (at compute, exposed) or persistent (once, never "
-        "displaced — needs tiles <= units * weight_sets).",
+        help="When B's array write lands, within one call: write-ahead (a wave early, "
+        "hidden behind compute) or on-demand (at compute, exposed) — same bytes and "
+        "latency, only the timeline differs. persistent (written once, kept for later "
+        "calls; needs tiles <= units * weight_sets) only matters with --iterations > 1. "
+        "Inert on arrays with no weight banks (weight_sets=1).",
         rich_help_panel=PANEL_DATAFLOW,
     ),
     a_residency_tiles: int | None = typer.Option(
@@ -1003,9 +1007,9 @@ def matmul(
     iterations: int = typer.Option(
         1,
         "--iterations",
-        help="Invocations this report represents. Only b_dataflow=persistent reads "
-        "it, amortising B's write over a resident weight set a repeat invocation "
-        "would not have to rewrite.",
+        help="Invocations this report represents — the one knob that spans calls. "
+        "Only b_dataflow=persistent reads it, amortising B's write over a resident "
+        "weight set a repeat invocation would not have to rewrite.",
         rich_help_panel=PANEL_DATAFLOW,
     ),
     ideal: bool = typer.Option(

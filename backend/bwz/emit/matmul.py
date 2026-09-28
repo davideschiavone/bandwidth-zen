@@ -334,7 +334,11 @@ def _docstring(
         "  a_strategy     real — changes how often A is staged, and A's measured bytes",
         "  residency      real — the staging buffer serves that many tiles before refill",
         "  b_dataflow     written down only — a placement in *time*, moving no byte",
-        "                 within one pass (D30/D33), and this program measures bytes",
+        "                 within one pass (D30/D33), and this program measures bytes.",
+        "                 Only persistent + --iterations reaches past this one call",
+        "  stationarity   is WITHIN this call: a ws tile holds its B block for one",
+        "   vs persist    sweep. Whether B survives to the NEXT call is b_dataflow's",
+        "                 persistent, a different question",
         "  double buffer  written down only — 'latency is max(load, compute)' is a claim",
         "                 about time, and a prefetch queue here would change no count",
         "  sub-cycles     written down only — a rate, not a structure",
@@ -750,11 +754,20 @@ def _b_dataflow_note(dataflow: DataflowPlan, weight_sets: int) -> tuple[str, ...
             flag + ", and moot here: this array stores",
             "no weights, so there is no write to place (D30)",
         )
+    scope = (
+        "Scope: ONE call — every B tile is written once",
+        "whatever this says; only the timeline differs (D30/D40)",
+    )
     if dataflow.b_dataflow is BDataflow.ON_DEMAND:
-        return (f"{flag}:", "the write is exposed at compute (D33) — timing only")
+        return (f"{flag}:", "the write is exposed at compute (D33).", *scope)
     if dataflow.b_dataflow is BDataflow.PERSISTENT:
-        return (f"{flag}:", "written once into the array, never displaced (D33)")
-    return (f"{flag}:", "the write lands a wave early, behind compute (D33)")
+        return (
+            f"{flag}:",
+            "written once, kept for LATER calls (D33). Pays only",
+            "across calls (--iterations); within one call it is",
+            "the same as write-ahead: every B tile written once",
+        )
+    return (f"{flag}:", "the write lands a wave early, behind compute (D33).", *scope)
 
 
 _ACC_MANTISSA_BITS: dict[DType, int] = {
