@@ -1204,24 +1204,32 @@ def _position(grid: TileGrid, indent: str) -> list[Line]:
     ``part``; a K-on-grid one has none to decode (D53).
     """
     row, col = _TILE_INDEX[grid.row_dim], _TILE_INDEX[grid.col_dim]
-    rows_label = f"grid row    -> {grid.row_dim.value}"
-    cols_label = f"grid column -> {grid.col_dim.value}"
+    rc_label = f"row -> {grid.row_dim.value}, column -> {grid.col_dim.value}"
     lines = [
         f"{indent}# == LEVEL 3: the tile grid — where this tile sits in the"
         f" {grid.row_dim.value} x {grid.col_dim.value} grid"
     ]
     if grid.swept_dim is Dim.K:
+        # divmod(a, b) is (a // b, a % b): "which one, and what is left over".
+        # Split-K repeats the whole grid once per piece of K and numbers the
+        # tiles straight through the copies, so decoding is two such steps.
+        copies = (
+            f"SPLIT_K = {grid.k_partitions} copies, tiles numbered straight through them"
+            if grid.k_partitions > 1
+            else "SPLIT_K = 1 here: one copy, so part is always 0 and cell == tile"
+        )
         lines += [
+            f"{indent}# The grid is repeated once per split-K piece — {copies}.",
             # TODO(D67-open): "part"/"piece" is split-K's name for a cut of K; rename
             # with the rest of that vocabulary (see _k_tile_bounds).
-            _commented(f"{indent}part = tile // (GRID_ROWS * GRID_COLS)", "split-K piece"),
             _commented(
-                f"{indent}{row} = (tile % (GRID_ROWS * GRID_COLS)) // GRID_COLS", rows_label
+                f"{indent}part, cell = divmod(tile, GRID_ROWS * GRID_COLS)",
+                "which copy, and where in it",
             ),
+            _commented(f"{indent}{row}, {col} = divmod(cell, GRID_COLS)", rc_label),
         ]
     else:
-        lines += [_commented(f"{indent}{row} = tile // GRID_COLS", rows_label)]
-    lines += [_commented(f"{indent}{col} = tile % GRID_COLS", cols_label)]
+        lines += [_commented(f"{indent}{row}, {col} = divmod(tile, GRID_COLS)", rc_label)]
     for dim in (grid.row_dim, grid.col_dim):
         name, index, extent = dim.value.lower(), _TILE_INDEX[dim], _TILE_EXTENT[dim]
         lines.append(

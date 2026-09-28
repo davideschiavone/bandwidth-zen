@@ -650,9 +650,8 @@ and the code below it carries the same `# == LEVEL n` markers:
                 continue
             ...
             # == LEVEL 3: the tile grid — where this tile sits in the M x N grid
-            part = tile // (GRID_ROWS * GRID_COLS)          # split-K piece
-            mt = tile % (GRID_ROWS * GRID_COLS) // GRID_COLS  # grid row    -> M
-            nt = tile % GRID_COLS                           # grid column -> N
+            part, cell = divmod(tile, GRID_ROWS * GRID_COLS)  # which copy, and where in it
+            mt, nt = divmod(cell, GRID_COLS)                # row -> M, column -> N
             ...
             # -- what stays put: C, in this core's accumulator
             acc = zeros(m1 - m0, n1 - n0, ACC_DTYPE)                # stays put
@@ -677,8 +676,7 @@ decomposition is:
 
 ```python
             # == LEVEL 3: the tile grid — where this tile sits in the K x N grid
-            kt = tile // GRID_COLS                          # grid row    -> K
-            nt = tile % GRID_COLS                           # grid column -> N
+            kt, nt = divmod(tile, GRID_COLS)                # row -> K, column -> N
             ...
             # -- what stays put: B's tile (in name only here: see the docstring)
             b = dram.read_b(k0, k1, n0, n1)                         # stays put
