@@ -916,8 +916,19 @@ def _tip(span: Span) -> str:
     if span.lane in (Lane.CORE, Lane.VECTOR):
         engine = "array" if span.lane is Lane.CORE else "vector unit"
         if span.stage is Stage.REDUCE:
+            # Two different reductions share this stage (D62): split-K's second
+            # kernel, which runs after the GEMM, and partials from OTHER units
+            # summed alongside it on chip. Naming the second as the first told a
+            # Metis reader its DPU adds were a CUTLASS kernel.
+            second_kernel = span.grid is not None and span.grid.materialises_partials
+            kind = (
+                f"REDUCE — split-K's second kernel (CUTLASS), on the {engine} (D27/D53)"
+                if second_kernel
+                else f"REDUCE — partials from other units, summed on the {engine} alongside"
+                " the matrix work (on chip, D62)"
+            )
             return (
-                f"REDUCE — CUTLASS's second kernel, on the {engine} (D27/D53)\n"
+                f"{kind}\n"
                 f"{span.label}\n{when}\n"
                 f"{format_quantity(span.flops, 'OP')} @ "
                 f"{format_quantity(span.rate_flops_per_s, 'OP/s')}\n"
@@ -950,9 +961,10 @@ _ANIMATION_STAGE = {
 }
 """Kernel dispatch (Stage.DISPATCH) is fixed overhead, not a DRAM/SRAM/compute
 transaction, so it has nothing to animate and is left out of the map.
-``Stage.REDUCE`` is split-K's second kernel (D53) — a real DRAM round trip and
-real vector arithmetic, so it plays back like any other event; the listing's own
-``reduce`` tag lights the block it comes from."""
+``Stage.REDUCE`` is real vector arithmetic — split-K's second kernel after the
+GEMM (D53), or partials from other units summed alongside it (D62) — so it plays
+back like any other event; the listing's own ``reduce`` tag lights the line it
+comes from."""
 
 
 def _flow_spans(trace: PipelineTrace) -> list[dict[str, object]]:

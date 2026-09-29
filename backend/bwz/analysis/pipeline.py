@@ -104,9 +104,12 @@ class Stage(StrEnum):
     HOLD = "Hold"
     EXEC = "Ex"
     REDUCE = "Red"
-    """Split-K's second kernel: the partial results read back and summed (D53).
-    Its own stage because it is its own *kernel* — it starts after the GEMM has
-    finished, on a different engine, moving bytes that are neither operand."""
+    """Partial sums added on the VECTOR unit, never the array (D27). Two cases
+    (D62): split-K's second kernel, which starts after the GEMM has finished and
+    moves bytes that are neither operand (D53); and partials from other units
+    summed on chip alongside the matrix work — A100's CUDA cores under ``ws``,
+    Metis's DPU past its 16k-input accumulator. K summed in a unit's OWN
+    periphery (``LOCAL``) is not this stage: it costs nothing and has no span."""
     STORE = "St"
     """Writing the result back. A separate stage because it happens *after* the
     arithmetic and shares the DRAM port with the next tile's load (D22)."""
