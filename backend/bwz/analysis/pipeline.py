@@ -54,7 +54,13 @@ from enum import StrEnum
 from typing import TYPE_CHECKING
 
 from bwz.analysis.roofline import MATRIX_OP_TYPES, MachineModel
-from bwz.analysis.stationarity import Operand, TileGrid, deal_for, grid_for
+from bwz.analysis.stationarity import (
+    Operand,
+    TileGrid,
+    deal_for,
+    grid_for,
+    partials_per_output,
+)
 from bwz.graph.ops import ComputeGraph, GraphPhase, MatmulAttrs, Operation
 from bwz.report import OpResult, PhaseResult, ReductionPlacement
 from bwz.spec.deployment import AStrategy, BDataflow
@@ -357,6 +363,7 @@ def _reduction_spans(
     grid: TileGrid | None,
     *,
     after: list[Span],
+    partials: int,
 ) -> list[Span]:
     """The reduction, drawn where its placement puts it (D53/D62).
 
@@ -376,7 +383,9 @@ def _reduction_spans(
     if grid is None:
         return []
     if result.reduction_placement is ReductionPlacement.ON_CHIP:
-        return _overlapped_reduction_spans(result, phase, op_type, grid, alongside=after)
+        return _overlapped_reduction_spans(
+            result, phase, op_type, grid, alongside=after, partials=partials
+        )
     if result.dram_reduction_bytes <= 0:
         return []
     start = max((span.end_s for span in after), default=0.0)
@@ -422,6 +431,7 @@ def _overlapped_reduction_spans(
     grid: TileGrid,
     *,
     alongside: list[Span],
+    partials: int,
 ) -> list[Span]:
     """The vector unit's share of a reduction that stays on chip (D62).
 
@@ -455,7 +465,9 @@ def _overlapped_reduction_spans(
     # way could not be read against it. Equal shares keep the lane summing to
     # `t_reduce_s` exactly, which is D19's rule for every lane here.
     share = result.t_reduce_s / len(executes)
-    adds = (grid.k_slices - 1) * float(grid.m) * float(grid.n) / len(executes)
+    # One partial per k-slice leaves an MMA unit; one per K-group leaves a unit
+    # that sums its own group in its periphery (D69).
+    adds = (partials - 1) * float(grid.m) * float(grid.n) / len(executes)
     return [
         Span(
             Lane.VECTOR,
@@ -559,7 +571,11 @@ def _tile_trace(
     # How the tiles are dealt to the units is decided once, in stationarity.py
     # (D68): a unit that sums K locally keeps each output column on one array,
     # which can leave arrays idle that the round-robin count would have filled.
-    dealt = deal_for(grid, machine.unit) if grid is not None else None
+    dealt = (
+        deal_for(grid, machine.unit, vector_adder=machine.has_vector_unit)
+        if grid is not None
+        else None
+    )
     waves = dealt.waves if dealt is not None else (math.ceil(tiles / units) if tiles else 1)
     in_flight = dealt.used_cores if dealt is not None else min(tiles, units)
     steps = min(waves, max(1, max_steps))
@@ -753,7 +769,16 @@ def _tile_trace(
             ramp,
             *(replace(s, start_s=s.start_s + ramp_s, end_s=s.end_s + ramp_s) for s in spans),
         ]
-    spans.extend(_reduction_spans(result, phase.phase, op.op_type.value, grid, after=spans))
+    partials = (
+        partials_per_output(grid, machine.unit, vector_adder=machine.has_vector_unit)
+        if grid is not None
+        else 1
+    )
+    spans.extend(
+        _reduction_spans(
+            result, phase.phase, op.op_type.value, grid, after=spans, partials=partials
+        )
+    )
     return PipelineTrace(
         spans=tuple(spans),
         total_s=max((s.end_s for s in spans), default=0.0),

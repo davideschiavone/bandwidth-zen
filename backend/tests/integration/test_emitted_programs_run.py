@@ -283,12 +283,32 @@ def test_a_k_on_grid_walk_counts_the_additions_it_owes(tmp_path: Path, flow: Dat
 
 
 def test_metis_column_per_core_walk_matches_its_report(tmp_path: Path) -> None:
-    """D68, executed: 64x512x1024 INT8 on Metis — one column, two k-slices, one core.
+    """D68, executed: 16x2048x1024 INT8 — 4 columns on 4 cores, 2 k-slices each.
 
-    Small M keeps the pure-Python 512x512 instruction tiles affordable; what is
-    under test is the deal, which only needs K on two rows and N on one column.
+    Every core keeps ONE column for both of its k-slices, and nothing crosses
+    cores. Small M keeps the pure-Python 512x512 instruction tiles affordable.
     """
-    path = _write(tmp_path, chip_id="metis_aipu", shape=(64, 512, 1024), dtype="int8")
+    path = _write(tmp_path, chip_id="metis_aipu", shape=(16, 2048, 1024), dtype="int8")
+    output = _run(path, extra_args=["--debug"])
+    assert "every tier-1 count matches the report" in output
+    columns: dict[str, set[str]] = {}
+    core = ""
+    for line in output.splitlines():
+        if line.startswith("core ") and "tile" in line:
+            core = line.split()[1]
+        elif "resident in weight set" in line:
+            columns.setdefault(core, set()).add(line.split("B[")[1].split(",")[1].split("]")[0])
+    assert all(len(held) == 1 for held in columns.values()), columns
+    assert len(columns) == 4
+
+
+def test_metis_shared_column_walk_matches_its_report(tmp_path: Path) -> None:
+    """D69, executed: 16x512x1024 — one column shared by two cores, one slice each.
+
+    The group partials are added after the last wave and counted as cross-core
+    additions; the program asserts that count against the report's.
+    """
+    path = _write(tmp_path, chip_id="metis_aipu", shape=(16, 512, 1024), dtype="int8")
     output = _run(path, extra_args=["--debug"])
     assert "every tier-1 count matches the report" in output
     cores = {
@@ -296,4 +316,7 @@ def test_metis_column_per_core_walk_matches_its_report(tmp_path: Path) -> None:
         for line in output.splitlines()
         if line.startswith("core ") and "tile" in line
     }
-    assert cores == {"0"}, "both k-slices of the one column ran on core 0"
+    assert cores == {"0", "1"}
+    assert any(
+        line.startswith("cross-core additions") and "8,192" in line for line in output.splitlines()
+    )

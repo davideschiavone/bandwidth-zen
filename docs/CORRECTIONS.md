@@ -3360,3 +3360,54 @@ alternative when N is narrow — more occupancy, paid for in cross-core traffic 
 different decomposition, not modelled; the drawer names it where cores sit idle. Choosing between
 the two would need the DPU's throughput, which the paper does not publish.
 
+## D69 — K-groups: idle cores share a narrow column's K, and only the groups' partials leave (2026-09-29)
+
+### What was wrong
+
+D68 kept a column's k-slices on one core so that the periphery could sum them, and paid for it in
+occupancy: Metis at N = 512, K = 8192 ran on one core of four. That is the right answer for a chip
+with nothing to add partials off the array, and the wrong one for a chip that has the DPU. And past
+Metis's 16k-input accumulator the model went back to a round-robin spread, sending one partial per
+k-slice to the DPU — 63 · M · N adds at K = 32768 where the periphery could have summed all but one
+group's worth.
+
+### The fix
+
+`k_groups(grid, unit, vector_adder=...)` in `analysis/stationarity.py`: the number of units sharing
+one column's K. The larger of a depth reason (`ceil(k_slices / slices per accumulator)`) and an
+occupancy reason (`floor(units / cols)` when N is narrow **and** the chip has a vector unit), capped
+at `k_slices`. Each unit keeps one column and one group (`kt mod g`) and sums it locally; only the
+`g` group partials per output leave, so `partials_per_output` is `g` and the reduction is
+`(g − 1) · M · N` on the vector unit, `ON_CHIP`/`DRAM` by the usual capacity test. `deal()` walks
+blocks of `g` grid rows, so every wave is still one contiguous tile range. `vector_adder` is a
+required argument everywhere the deal is decided — the utilisation, the reduction, the trace, the
+timeline, the emitter, the report — so no path can take the occupancy and skip the price.
+
+The emitted program shows it: `K_GROUPS`, `CHUNKS`, and a LEVEL 2 of `block, chunk =
+divmod(wave, CHUNKS)` / `group, nt = divmod(item, GRID_COLS)` / `kt = block * K_GROUPS + group`.
+`Partials` holds one accumulator per group and `drain()` adds them, counting those adds as
+`cross_core_adds` — a new tier-1 check against the report's `(g − 1) · M · N`.
+
+Convolutions whose k-slices are grouped are charged the same reduction (`roofline._reduction_for`);
+before this only matmuls were, so a grouped convolution would have taken the occupancy for free.
+
+### What moved
+
+Metis `512 × 512 × 8192`: 25% → 99.99%, `t_compute` 81.9 → 20.5 µs, plus 1.92 µs of hidden DPU adds.
+`512 × 1024 × 4096`: 50% → 99.98%. K = 32768: 63 → 1 group-partial per output. MobileNetV3 on
+Metis back to 1.370 ms (its convolutions' DPU adds are charged, and hidden). chip_a unchanged from
+D68 (no vector unit). Every A100 figure unchanged.
+
+Also fixed on the way: `reduction_cost` returned `NO_REDUCTION` for a `LOCAL` grid once the count of
+partials *leaving* the unit became 1, which hid the `local — free` row; and every on-chip REDUCE span
+in the timeline was labelled as split-K's second kernel.
+
+### What it does not do
+
+The group partials' L1/L2 traffic and the synchronisation between cores are not charged (no on-chip
+bandwidth term, D5b); the DPU rate is the profile's estimate. The paper does not describe splitting
+one matmul's K across AI cores — only that cores can jointly tackle a workload — so this is the
+model's mapping, and the drawer says so. A convolution spread across MMA units (A100) is still
+charged no reduction: a gap older than D69, recorded here rather than closed, since closing it moves
+every GPU CNN figure.
+

@@ -83,7 +83,7 @@ def test_no_declared_geometry_means_no_tail_effect_claim() -> None:
     op = Operation(
         id="mm", op_type=OpType.MATMUL, attrs=MatmulAttrs(m=1, n=4096, k=4096), outputs=()
     )
-    assert operation_utilisation(op, cuda_core) == 1.0
+    assert operation_utilisation(op, cuda_core, vector_adder=True) == 1.0
 
 
 def test_chip_a_decode_projection_utilisation() -> None:
@@ -100,8 +100,12 @@ def test_chip_a_decode_projection_utilisation() -> None:
         id="q", op_type=OpType.MATMUL, attrs=MatmulAttrs(m=1, n=2048, k=2560), outputs=()
     )
     expected = (1 / 512) * (2560 / (padded(2560, 512) + 1))
-    assert operation_utilisation(op, unit, DType.INT8) == pytest.approx(expected, rel=1e-12)
-    assert operation_utilisation(op, unit, DType.INT8) == pytest.approx(1 / 512, rel=1e-3)
+    assert operation_utilisation(op, unit, DType.INT8, vector_adder=False) == pytest.approx(
+        expected, rel=1e-12
+    )
+    assert operation_utilisation(op, unit, DType.INT8, vector_adder=False) == pytest.approx(
+        1 / 512, rel=1e-3
+    )
 
 
 def test_a_bit_serial_crossbar_has_no_m_serial_pipeline() -> None:
@@ -124,8 +128,10 @@ def test_a_bit_serial_crossbar_has_no_m_serial_pipeline() -> None:
     op = Operation(
         id="mm", op_type=OpType.MATMUL, attrs=MatmulAttrs(m=8192, n=8192, k=8192), outputs=()
     )
-    assert operation_utilisation(op, unit, DType.INT8) == pytest.approx(8192 / 8193, rel=1e-12)
-    assert operation_utilisation(op, unit) == pytest.approx(1.0, rel=1e-12)
+    assert operation_utilisation(op, unit, DType.INT8, vector_adder=True) == pytest.approx(
+        8192 / 8193, rel=1e-12
+    )
+    assert operation_utilisation(op, unit, vector_adder=True) == pytest.approx(1.0, rel=1e-12)
 
     # The same chip at batch 1: the crossbar wastes area, not pipeline — the
     # M=1 GEMM still runs at ~1/513 of peak (the 1/512 area loss times the
@@ -134,7 +140,9 @@ def test_a_bit_serial_crossbar_has_no_m_serial_pipeline() -> None:
         id="q", op_type=OpType.MATMUL, attrs=MatmulAttrs(m=1, n=2048, k=2560), outputs=()
     )
     expected = 1 / 512 * 2560 / (padded(2560, 512) + 1) * 2048 / padded(2048, 512)
-    assert operation_utilisation(decode, unit, DType.INT8) == pytest.approx(expected, rel=1e-12)
+    assert operation_utilisation(decode, unit, DType.INT8, vector_adder=False) == pytest.approx(
+        expected, rel=1e-12
+    )
 
 
 def test_double_buffering_needs_room_for_two_tiles() -> None:
@@ -262,29 +270,49 @@ def test_attention_tiles_count_every_head() -> None:
     assert operation_tiles(op, unit) == per_head * 32
 
 
-def test_metis_charges_the_cores_a_single_column_leaves_idle() -> None:
-    """D68: one output column's k-slices share one core, so N=512 uses 1 of 4.
+def test_a_single_column_idles_the_cores_when_nothing_can_add_its_partials() -> None:
+    """D68, on a chip with no vector unit: one column's k-slices share one core.
 
-    512x512x8192 INT8 on Metis. Every padding term is whole except K's
-    sub-cycle fill, and the deal keeps the 16 k-slices on one core:
+    512x512x8192 INT8 on Metis's array, but asked as a chip with nothing
+    non-systolic to add partials (``vector_adder=False``, like chip_a): the
+    column cannot be shared, so it runs on one of four cores.
 
-        shape  = (512/512) x (512/512) x 8192/(8192 + 1)
+        shape     = (512/512) x (512/512) x 8192/(8192 + 1)
         occupancy = 16 tiles / (16 waves x 4 cores) = 0.25
-        chip   = 0.25 x 8192/8193 = 0.249970
-
-    Before D68 the round-robin deal spread the column over all four cores and
-    reported 0.99988 — the four partials of each output landing in four
-    different peripheries, summed by nobody.
     """
     from bwz.analysis.tiling import operation_cores
 
     unit = load_chip("metis_aipu").compute_units[0]
-    op = Operation(
+    op = _matmul(512, 512, 8192)
+    assert operation_utilisation(op, unit, DType.INT8, vector_adder=False) == pytest.approx(
+        0.25 * 8192 / 8193
+    )
+    assert operation_cores(op, unit, vector_adder=False) == 1
+
+
+def test_metis_shares_a_narrow_column_between_its_cores() -> None:
+    """D69: with the DPU to add the group partials, idle cores share the column's K.
+
+    Same 512x512x8192: K_GROUPS = floor(4 cores / 1 column) = 4, each core sums
+    4 of the 16 k-slices in its own periphery, 4 waves of 4 — occupancy 1.0:
+
+        utilisation = 1.0 x 8192/8193 = 0.999878
+    """
+    from bwz.analysis.tiling import operation_cores
+
+    unit = load_chip("metis_aipu").compute_units[0]
+    op = _matmul(512, 512, 8192)
+    assert operation_utilisation(op, unit, DType.INT8, vector_adder=True) == pytest.approx(
+        8192 / 8193
+    )
+    assert operation_cores(op, unit, vector_adder=True) == 4
+
+
+def _matmul(m: int, n: int, k: int) -> Operation:
+    return Operation(
         id="m",
         op_type=OpType.MATMUL,
         inputs=(),
         outputs=(),
-        attrs=MatmulAttrs(m=512, n=512, k=8192),
+        attrs=MatmulAttrs(m=m, n=n, k=k),
     )
-    assert operation_utilisation(op, unit, DType.INT8) == pytest.approx(0.25 * 8192 / 8193)
-    assert operation_cores(op, unit) == 1

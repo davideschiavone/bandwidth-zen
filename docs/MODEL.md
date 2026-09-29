@@ -457,6 +457,38 @@ the direction that flatters: full occupancy bought by splitting a column over co
 were then "summed locally" in four different peripheries. `analysis/stationarity.py` decides the
 deal (`deal_for`), and the utilisation, the trace and the emitted program all read it.
 
+**K-groups: sharing a column's K without losing the local sum (D69).** The column-per-unit column
+above is right only for a chip with nothing to add partials off the array (`chip_a`). A chip with a
+vector unit (Metis's DPU) does better with idle arrays: `g` arrays share each column, each keeps one
+**group** of its k-slices — every `g`-th, `kt mod g = group` — and sums it in its own periphery for
+free, as in D68. Only the `g` group partials per output leave their arrays, so the vector unit adds
+`(g − 1)·M·N`, not the `(p − 1)·M·N` a round-robin spread of `p` slices would send. Two reasons set
+`g`, and the larger wins:
+
+```
+g_depth     = ceil(k_slices / floor(depth / tile_rows))    [Metis: 32 slices per accumulator]
+g_occupancy = floor(units / grid_cols)   if grid_cols < units and the chip has a vector unit, else 1
+g           = min(k_slices, max(g_depth, g_occupancy))
+waves       = ceil(grid_rows / g) blocks · ceil(g · grid_cols / used)
+```
+
+Each wave is a block of `g` grid rows, so waves stay contiguous tile ranges and array `u` keeps the
+same (group, column) item in every block.
+
+| case (Metis, 4 cores) | g | occupancy | DPU adds (hidden under the matrix work) |
+|---|---|---|---|
+| N = K = 2048 | 1 | 1.00 | 0 — `LOCAL` |
+| N = 1024, K = 4096 | 2 (occupancy) | 1.00 | `1 · M · N` |
+| N = 512, K = 8192 | 4 (occupancy) | 1.00 | `3 · M · N` — 786,432 at M = 512, 1.92 µs vs 20.5 µs |
+| N = 2048, K = 32768 | 2 (depth) | 1.00 | `1 · M · N`, where round-robin charged `63 · M · N` |
+
+The placement for `g > 1` is `ON_CHIP` (or `DRAM` past capacity) with `p = g`; the group partials'
+L1/L2 traffic is not charged (no on-chip bandwidth term, D5b), and the DPU's rate is the profile's
+estimate. Splitting one matmul's K across AI cores is the model's choice: the paper states only that
+the cores can jointly tackle a workload. Convolutions whose k-slices are grouped are charged the same
+way; a convolution spread across MMA units without grouping is not charged a reduction at all, a
+gap that predates D69.
+
 Negligible on a large GEMM by construction and dominant on a small one, which is why the aggregate
 peak alone cannot compare two chips on anything small. The last two rows are the one place where a
 *more* accurate decomposition reports a *lower* number: `ws` claimed parallelism that only existed
@@ -474,8 +506,8 @@ of the dataflow's name. `ReductionPlacement` is that choice:
 | placement | when | vector adds | DRAM bytes | dispatches | how it combines |
 |---|---|---|---|---|---|
 | `NONE` | K is not cut (`os`, `rs`) | 0 | 0 | 0 | — |
-| `LOCAL` | K on the grid's **row** axis, `K ≤ local_accumulation_inputs`, and a column's k-slices dealt to one unit (D68) | 0 | 0 | 0 | — |
-| `ON_CHIP` | K on the grid, `M·N·acc_bytes` fits on chip | `(p−1)·M·N` | 0 | 0 | **`max(matrix, vector)`** |
+| `LOCAL` | K on the grid's **row** axis, `K ≤ local_accumulation_inputs`, a column's k-slices dealt to one unit (D68), and one K-group (D69) | 0 | 0 | 0 | — |
+| `ON_CHIP` | K on the grid, `M·N·acc_bytes` fits on chip — `p` partials per output: one per k-slice, or one per K-group (D69) | `(p−1)·M·N` | 0 | 0 | **`max(matrix, vector)`** |
 | `DRAM` | split-K, **or** an accumulator too big to hold | `(p−1)·M·N` | `2·p·M·N·acc_bytes` | 1 | `matrix + vector` |
 
 - **`LOCAL`** is a *declared* capability, not an assumption about the dataflow. Metis's `d_imc`

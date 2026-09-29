@@ -266,20 +266,36 @@ def test_walk_draws_its_own_tile_grid() -> None:
 
 
 def test_metis_walks_each_column_on_one_core() -> None:
-    """D68: the emitted walk deals column-per-core where the unit sums K locally.
+    """D68: where N fills the cores, each column's k-slices stay on one core.
 
-    512x512x1024 INT8: one column, two k-slices -> 1 core, 2 waves. The program
-    must say so in its constants and its LEVEL 2, and predict what the report
-    charged: 2 x 4 - 2 = 6 idle core-waves.
+    16x2048x1024 INT8: 4 columns on 4 cores, 2 k-slices each -> K_GROUPS = 1,
+    so the column-per-core walk with COLUMN_GROUPS = 1 and 2 waves.
     """
-    program, *_ = _emit("metis_aipu", (512, 512, 1024), "int8")
+    program, *_ = _emit("metis_aipu", (16, 2048, 1024), "int8")
     constants = constants_of(program.source)
-    assert (constants["USED_CORES"], constants["COLUMN_GROUPS"], constants["WAVES"]) == (1, 1, 2)
+    assert (constants["USED_CORES"], constants["COLUMN_GROUPS"], constants["WAVES"]) == (4, 1, 2)
     assert "kt, column_group = divmod(wave, COLUMN_GROUPS)" in program.source
     assert "nt = column_group * USED_CORES + core_id" in program.source
     assert "weight_set = kt % WEIGHT_SETS" in program.source
-    assert program.predicted["idle_core_waves"] == 6
-    assert "SAME core's, in its other waves" in program.source
+    assert "K_GROUPS =" not in program.source
+    assert program.predicted["cross_core_adds"] == 0
+
+
+def test_metis_shares_a_narrow_column_and_counts_the_cross_core_adds() -> None:
+    """D69: 16x512x1024 — one column, two k-slices, two cores sharing it.
+
+    K_GROUPS = min(2 slices, 4 cores // 1 column) = 2, each core one slice;
+    the 2 group partials per output meet off-core: (2-1) x 16 x 512 = 8,192
+    cross-core additions, which the program asserts against the report.
+    """
+    program, *_ = _emit("metis_aipu", (16, 512, 1024), "int8")
+    constants = constants_of(program.source)
+    assert (constants["K_GROUPS"], constants["USED_CORES"], constants["WAVES"]) == (2, 2, 1)
+    assert "group, nt = divmod(item, GRID_COLS)" in program.source
+    assert "partials.accumulate(m0, n0, product, group)" in program.source
+    assert "groups=K_GROUPS)" in program.source
+    assert program.predicted["cross_core_adds"] == 8192
+    assert '"cross-core additions"' in program.source
 
 
 def test_a100_keeps_the_round_robin_deal() -> None:
@@ -733,7 +749,7 @@ def test_the_emitted_file_quotes_the_placement_its_report_charged() -> None:
     (D57/D58/D61), so the note is built from the ``OpResult``'s own placement.
     """
     on_chip, *_ = _emit("a100_80gb", stationarity=Dataflow.WEIGHT_STATIONARY)
-    local, *_ = _emit("metis_aipu", shape=(64, 64, 1024), dtype="int8")
+    local, *_ = _emit("metis_aipu", shape=(64, 2048, 1024), dtype="int8")
 
     assert "OVERLAPS them with" in on_chip.source
     assert "max(matrix, vector)" in on_chip.source

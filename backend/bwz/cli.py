@@ -32,6 +32,7 @@ from bwz.analysis.stationarity import (
     TileGrid,
     accumulation_depth,
     grid_for,
+    partials_per_output,
     residency_phrase,
 )
 from bwz.emit import check as emit_check
@@ -283,7 +284,10 @@ def _reduction_row(
     of the two engines binds.
     """
     slices = grid.k_slices
-    adds = (slices - 1) * grid.m * grid.n
+    # Partials that LEAVE the unit that made them: one per k-slice on an MMA
+    # unit, one per K-group where a unit sums its own group locally (D69).
+    partials = partials_per_output(grid, machine.unit, vector_adder=machine.has_vector_unit)
+    adds = (partials - 1) * grid.m * grid.n
     engine = machine.vector_unit.name
     rate = format_quantity(machine.effective_vector_flops_per_s, "OP/s")
     depth = accumulation_depth(machine.unit)
@@ -307,8 +311,14 @@ def _reduction_row(
             else f"hidden under {format_time(op.t_arith_s)} of matrix work "
             f"({op.t_reduce_s / op.t_arith_s:.0%} of it), so it costs capacity, not latency"
         )
+        grouped = (
+            f"{slices:,} k-slices in {partials} groups, each summed in its own "
+            f"{machine.unit.name}'s periphery; the group partials meet here (D69): "
+            if partials < slices
+            else ""
+        )
         return f"on chip — {format_time(op.t_reduce_s)}", (
-            f"{adds:,.0f} adds on {engine} at {rate}, overlapped with the matrix work "
+            f"{grouped}{adds:,.0f} adds on {engine} at {rate}, overlapped with the matrix work "
             f"(compute is the max of the two, not the sum): {under}"
         )
 

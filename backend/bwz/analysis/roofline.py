@@ -25,14 +25,20 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from bwz.analysis.stationarity import NO_REDUCTION, ReductionCost, grid_for, reduction_cost
-from bwz.analysis.tiling import operation_utilisation
+from bwz.analysis.stationarity import (
+    NO_REDUCTION,
+    ReductionCost,
+    accumulates_locally,
+    grid_for,
+    reduction_cost,
+)
+from bwz.analysis.tiling import operation_grid, operation_utilisation
 from bwz.calibration import (
     DEFAULT_ACHIEVED_FLOPS_FRACTION,
     DEFAULT_DRAM_BANDWIDTH_EFFICIENCY,
     DEFAULT_KERNEL_LAUNCH_OVERHEAD_S,
 )
-from bwz.graph.ops import MatmulAttrs, Operation, OpType
+from bwz.graph.ops import ConvAttrs, MatmulAttrs, Operation, OpType
 from bwz.operators.base import OpCost
 from bwz.report import Bound, OpResult, ReductionPlacement
 from bwz.spec.dtypes import DType
@@ -250,6 +256,7 @@ def op_roofline(
         machine.dtype,
         stationarity=machine.stationarity,
         k_partitions=machine.k_partitions,
+        vector_adder=machine.has_vector_unit,
     )
     rate = machine.rate_for(op.op_type)
     t_matrix = cost.flops / (rate * utilisation) if cost.flops > 0 and utilisation > 0 else 0.0
@@ -328,17 +335,33 @@ def _reduction_for(op: Operation, cost: OpCost, machine: MachineModel) -> Reduct
     report writes C at, and the same width the capacity test in
     :func:`~analysis.stationarity.reduction_placement` measures against.
     """
-    if not isinstance(op.attrs, MatmulAttrs) or machine.unit.systolic_dims is None:
+    if machine.unit.systolic_dims is None:
         return NO_REDUCTION
-    rows, cols = machine.unit.systolic_dims
-    grid = grid_for(machine.stationarity, op.attrs, rows, cols, k_partitions=machine.k_partitions)
-    elements = op.attrs.m * op.attrs.n
+    if isinstance(op.attrs, ConvAttrs):
+        # A convolution's im2col grid is K x N, like ws. Its partials are charged
+        # only where a unit groups them (D69): the occupancy the groups buy has a
+        # price, and taking one without the other would be a free lunch. Where
+        # a conv's k-slices are spread without grouping — every MMA unit — no
+        # reduction is charged, as before D69: a gap recorded there, not closed.
+        conv_grid = operation_grid(op, machine.unit)
+        if conv_grid is None or not accumulates_locally(conv_grid, machine.unit):
+            return NO_REDUCTION
+        grid = conv_grid
+    elif isinstance(op.attrs, MatmulAttrs):
+        rows, cols = machine.unit.systolic_dims
+        grid = grid_for(
+            machine.stationarity, op.attrs, rows, cols, k_partitions=machine.k_partitions
+        )
+    else:
+        return NO_REDUCTION
+    elements = grid.m * grid.n
     accumulator_bytes = cost.output_bytes / elements if elements else 0.0
     return reduction_cost(
         grid,
         accumulator_bytes,
         unit=machine.unit,
         on_chip_capacity_bytes=machine.chip.on_chip_capacity_bytes,
+        vector_adder=machine.has_vector_unit,
     )
 
 

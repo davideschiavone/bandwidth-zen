@@ -1230,6 +1230,7 @@ def _units_used(ops: Sequence[Operation], machine: MachineModel) -> int:
                 machine.unit,
                 stationarity=machine.stationarity,
                 k_partitions=machine.k_partitions,
+                vector_adder=machine.has_vector_unit,
             )
             for op in ops
             if op.op_type in MATRIX_OP_TYPES

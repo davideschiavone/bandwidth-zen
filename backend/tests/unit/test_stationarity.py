@@ -21,6 +21,7 @@ from bwz.analysis.stationarity import (
     deal,
     deal_for,
     grid_for,
+    k_groups,
     reduction_cost,
     refusal_reason,
     sums_locally,
@@ -43,10 +44,23 @@ A100_ON_CHIP_BYTES = 2.0736e7 + 4.0e7
 
 
 def _cost(
-    grid: TileGrid, unit: ComputeUnit, *, capacity: float = A100_ON_CHIP_BYTES
+    grid: TileGrid,
+    unit: ComputeUnit,
+    *,
+    capacity: float = A100_ON_CHIP_BYTES,
+    vector_adder: bool = True,
 ) -> ReductionCost:
-    """``reduction_cost`` at a 4-byte accumulator, the fp32 case."""
-    return reduction_cost(grid, accumulator_bytes=4.0, unit=unit, on_chip_capacity_bytes=capacity)
+    """``reduction_cost`` at a 4-byte accumulator, the fp32 case.
+
+    *vector_adder* defaults to True: A100 has its CUDA cores and Metis its DPU.
+    """
+    return reduction_cost(
+        grid,
+        accumulator_bytes=4.0,
+        unit=unit,
+        on_chip_capacity_bytes=capacity,
+        vector_adder=vector_adder,
+    )
 
 
 def test_each_stationarity_grids_the_dimensions_it_should() -> None:
@@ -108,7 +122,11 @@ def test_reduction_is_partitions_minus_one_adds_over_the_whole_output() -> None:
     """
     split = grid_for(Dataflow.OUTPUT_STATIONARY, ATTRS, ROWS, COLS, k_partitions=4)
     cost = reduction_cost(
-        split, accumulator_bytes=4.0, unit=TENSOR_CORE, on_chip_capacity_bytes=1e9
+        split,
+        accumulator_bytes=4.0,
+        unit=TENSOR_CORE,
+        on_chip_capacity_bytes=1e9,
+        vector_adder=True,
     )
 
     elements = 1000 * 2000
@@ -172,24 +190,27 @@ def test_k_on_the_grid_is_reduced_where_the_hardware_can_reduce_it() -> None:
 
 
 def test_metis_pays_the_dpu_only_past_the_accumulator_it_declares() -> None:
-    """The 16k boundary, from the paper, on both sides (D62).
+    """The 16k boundary, from the paper, on both sides (D62, D69).
 
     ``K = 16384`` is 32 of the array's own 512-input k-slices and exactly the
-    depth Fig. 11.3.1 states, so it is ``LOCAL``. One input more and the
-    accumulation cannot finish in the periphery: the partials reach L2 and the
-    DPU adds ``(64 - 1) x M x N`` of them, with K=32768 giving 64 k-slices.
+    depth Fig. 11.3.1 states, so one core sums all of it: ``LOCAL``. At
+    ``K = 32768`` (64 slices) one accumulator cannot hold the column, so it is
+    split into ``ceil(64 / 32) = 2`` groups, each summed in its own core's
+    periphery; only the 2 group partials leave, and the DPU adds
+    ``(2 - 1) x M x N`` of them — not the 63 x M x N a round-robin spread of 64
+    slices would send (D69).
 
-    Every documented Metis figure is at K=8192, half the declared depth, which
-    is why none of them moves.
+    Asked without a vector unit so that only the DEPTH reason for grouping is in
+    play: N=512 on four cores would otherwise add the occupancy reason.
     """
     inside = grid_for(Dataflow.WEIGHT_STATIONARY, MatmulAttrs(m=64, n=512, k=16384), 512, 512)
     outside = grid_for(Dataflow.WEIGHT_STATIONARY, MatmulAttrs(m=64, n=512, k=32768), 512, 512)
 
-    assert _cost(inside, D_IMC).placement is ReductionPlacement.LOCAL
-    past = _cost(outside, D_IMC)
+    assert _cost(inside, D_IMC, vector_adder=False).placement is ReductionPlacement.LOCAL
+    past = _cost(outside, D_IMC, vector_adder=False)
     assert past.placement is ReductionPlacement.ON_CHIP
-    assert past.partitions == 64
-    assert past.partial_sums == pytest.approx(63 * 64 * 512)
+    assert past.partitions == 2
+    assert past.partial_sums == pytest.approx(1 * 64 * 512)
 
 
 def test_a_unit_that_runs_a_k_on_grid_dataflow_natively_accumulates_it() -> None:
@@ -579,7 +600,11 @@ def _units_of(grid: TileGrid, ranges: tuple[tuple[int, int], ...]) -> dict[int, 
 
 
 def test_a_unit_that_sums_locally_keeps_each_column_on_one_core() -> None:
-    """Metis, N=512, K=8192: one output column, 16 k-slices — all on ONE core.
+    """N=512, K=8192 with nothing to add partials: 16 k-slices all on ONE core.
+
+    Metis's array asked as a chip WITHOUT a vector unit (like chip_a): the
+    column cannot be shared, because its partials would have nowhere to be
+    added (D69). With the DPU, see the grouped tests below.
 
     Hand-computed: grid K x N = 16 x 1. The periphery that sums K belongs to one
     AI core, so the column cannot be split: used cores = min(4, 1) = 1, waves =
@@ -588,8 +613,8 @@ def test_a_unit_that_sums_locally_keeps_each_column_on_one_core() -> None:
     occupancy for partials that had nowhere to meet.
     """
     grid = _metis_grid(512, 512, 8192)
-    assert sums_locally(grid, D_IMC)
-    dealt = deal_for(grid, D_IMC)
+    assert sums_locally(grid, D_IMC, vector_adder=False)
+    dealt = deal_for(grid, D_IMC, vector_adder=False)
     assert (dealt.used_cores, dealt.waves) == (1, 16)
     assert dealt.occupancy == pytest.approx(0.25)
     assert _units_of(grid, dealt.ranges) == {0: {0}}
@@ -598,7 +623,7 @@ def test_a_unit_that_sums_locally_keeps_each_column_on_one_core() -> None:
 def test_two_columns_on_four_cores_use_two_and_idle_two() -> None:
     """N=1024, K=4096: 2 columns x 8 k-slices -> 2 cores, 8 waves, 16/(8x4) = 0.5."""
     grid = _metis_grid(512, 1024, 4096)
-    dealt = deal_for(grid, D_IMC)
+    dealt = deal_for(grid, D_IMC, vector_adder=False)
     assert (dealt.used_cores, dealt.waves) == (2, 8)
     assert dealt.occupancy == pytest.approx(0.5)
     assert _units_of(grid, dealt.ranges) == {0: {0}, 1: {1}}
@@ -612,7 +637,7 @@ def test_a_wave_never_straddles_a_grid_row_under_the_local_deal() -> None:
     both rows, which is the claim LOCAL placement makes.
     """
     grid = _metis_grid(512, 2560, 1024)
-    dealt = deal_for(grid, D_IMC)
+    dealt = deal_for(grid, D_IMC, vector_adder=True)
     assert dealt.ranges == ((0, 4), (4, 5), (5, 9), (9, 10))
     assert dealt.occupancy == pytest.approx(0.625)
     assert _units_of(grid, dealt.ranges) == {0: {0, 4}, 1: {1}, 2: {2}, 3: {3}}
@@ -623,7 +648,9 @@ def test_a_wave_never_straddles_a_grid_row_under_the_local_deal() -> None:
 def test_when_columns_divide_the_cores_both_deals_agree() -> None:
     """N=K=2048: 4 columns on 4 cores — the case round-robin got right by luck."""
     grid = _metis_grid(512, 2048, 2048)
-    assert deal_for(grid, D_IMC).ranges == deal(grid, 4, keep_k_on_unit=False).ranges
+    assert deal_for(grid, D_IMC, vector_adder=True).ranges == (
+        deal(grid, 4, keep_k_on_unit=False).ranges
+    )
 
 
 def test_a_unit_whose_partials_leave_anyway_keeps_round_robin() -> None:
@@ -632,8 +659,8 @@ def test_a_unit_whose_partials_leave_anyway_keeps_round_robin() -> None:
     512x512x4096 on 16x16: 256 x 32 = 8192 tiles over 432 cores = 19 waves.
     """
     grid = grid_for(Dataflow.WEIGHT_STATIONARY, MatmulAttrs(m=512, n=512, k=4096), 16, 16)
-    assert not sums_locally(grid, TENSOR_CORE)
-    dealt = deal_for(grid, TENSOR_CORE)
+    assert not sums_locally(grid, TENSOR_CORE, vector_adder=True)
+    dealt = deal_for(grid, TENSOR_CORE, vector_adder=True)
     assert (dealt.used_cores, dealt.waves) == (432, 19)
     assert dealt.occupancy == pytest.approx(8192 / (19 * 432))
 
@@ -641,7 +668,7 @@ def test_a_unit_whose_partials_leave_anyway_keeps_round_robin() -> None:
 def test_k_on_the_grid_columns_cannot_meet_in_one_periphery() -> None:
     """``is`` puts K on the COLUMN axis: a wave spreads a row's k-slices over units."""
     grid = grid_for(Dataflow.INPUT_STATIONARY, MatmulAttrs(m=512, n=512, k=4096), 512, 512)
-    assert not sums_locally(grid, D_IMC)
+    assert not sums_locally(grid, D_IMC, vector_adder=True)
 
 
 def test_the_round_robin_boundary_is_the_pre_d68_formula() -> None:
@@ -650,3 +677,54 @@ def test_the_round_robin_boundary_is_the_pre_d68_formula() -> None:
     dealt = deal(grid, 432, keep_k_on_unit=False)
     for position in (0.0, 0.4, 1.0, 2.5, 7.25, float(dealt.waves)):
         assert dealt.boundary(position) == min(grid.tiles, int(position * 432))
+
+
+# ------------------------------------------------------------ K-groups (D69)
+
+
+@pytest.mark.parametrize(
+    ("shape", "expected"),
+    [
+        ((512, 2048, 2048), 1),  # 4 columns fill 4 cores: nothing to gain
+        ((512, 1024, 4096), 2),  # 2 columns: 2 cores per column
+        ((512, 512, 8192), 4),  # 1 column: 4 cores per column
+        ((512, 2048, 32768), 2),  # depth: 64 slices / 32 per accumulator
+    ],
+)
+def test_k_groups_is_the_larger_of_the_depth_and_occupancy_reasons(
+    shape: tuple[int, int, int], expected: int
+) -> None:
+    """The table in :func:`k_groups`'s docstring, hand-computed on Metis."""
+    assert k_groups(_metis_grid(*shape), D_IMC, vector_adder=True) == expected
+
+
+def test_a_narrow_column_is_shared_and_each_core_sums_its_own_group() -> None:
+    """Metis 512x512x8192, with the DPU: 4 cores share the one column (D69).
+
+    Hand-computed: K_GROUPS = 4, blocks of 4 grid rows = 4 tiles, one wave each:
+    4 waves, occupancy 16 / (4 x 4) = 1.0. Core u gets row-offset u in every
+    block, so it sums k-slices u, u+4, u+8, u+12 locally, and only the 4 group
+    partials per output leave: 3 x 512 x 512 = 786,432 DPU adds, ON_CHIP.
+    """
+    grid = _metis_grid(512, 512, 8192)
+    dealt = deal_for(grid, D_IMC, vector_adder=True)
+    assert (dealt.k_groups, dealt.used_cores, dealt.waves) == (4, 4, 4)
+    assert dealt.occupancy == pytest.approx(1.0)
+    slices_of: dict[int, list[int]] = {}
+    for start, end in dealt.ranges:
+        for unit, tile in enumerate(range(start, end)):
+            slices_of.setdefault(unit, []).append(tile // grid.cols)
+    assert slices_of == {u: [u, u + 4, u + 8, u + 12] for u in range(4)}
+
+    cost = _cost(grid, D_IMC)
+    assert cost.placement is ReductionPlacement.ON_CHIP
+    assert cost.partitions == 4
+    assert cost.partial_sums == pytest.approx(3 * 512 * 512)
+
+
+def test_without_a_vector_unit_nothing_is_shared() -> None:
+    """chip_a's array has no non-systolic unit: its adds would land on the array."""
+    npu_core = load_chip("chip_a").compute_units[0]
+    grid = _metis_grid(512, 512, 8192)
+    assert k_groups(grid, npu_core, vector_adder=False) == 1
+    assert _cost(grid, npu_core, vector_adder=False).placement is ReductionPlacement.LOCAL

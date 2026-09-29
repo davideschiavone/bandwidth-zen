@@ -180,10 +180,15 @@ These are known-good behaviours. If a change breaks one, the change is wrong.
   back to the matrix unit when nothing non-systolic supports the dtype, and charging elementwise
   adds at 437 TOP/s would report `ws` as nearly free — the opposite of the truth. That case is
   refused with `feasible: false`, never costed (D62).
-- **A column's k-slices share one core, or they do not sum locally** (D68). Metis at N=512,
-  K=8192 runs on ONE of its four cores — 16 waves, 25% occupancy — because its periphery
-  accumulator belongs to one AI core. If a change spreads that column over four cores and still
-  reports `reduction: local — free`, it is wrong. N=K=2048 fills all four: 4 columns, 4 cores.
+- **K sums where the hardware can sum it, and the rest is paid for** (D68/D69). A periphery
+  accumulator belongs to ONE core, so a column's k-slices can only be free if they share a core.
+  Metis at N=K=2048: 4 columns fill 4 cores, `reduction: local — free`. Metis at N=512, K=8192:
+  4 cores share the one column as 4 K-groups — each sums its group locally, and only
+  3 x 512 x 512 = 786,432 group partials go to the DPU (1.92 µs, hidden under 20.5 µs), so the
+  placement is `on chip`, never `local`. chip_a has no vector unit, so the same shape runs on ONE
+  core at 25% — sharing the column there would charge adds to the array itself. A change that
+  reports `local — free` for a column split over cores, or `(p − 1)` DPU adds where only `g`
+  groups leave, is wrong.
 - A chip asked for a dataflow it does not declare returns `feasible: false` naming the field and the
   capability — **refused, not clamped**, unlike the A/B strategy knobs. A clamp there would answer a
   different question than the one asked.

@@ -210,6 +210,7 @@ def operation_utilisation(
     *,
     stationarity: Dataflow | None = None,
     k_partitions: int = 1,
+    vector_adder: bool,
 ) -> float:
     """Shape-induced utilisation for *op* on *unit*.
 
@@ -254,7 +255,13 @@ def operation_utilisation(
             units=unit.count,
             fill_cycles=fill,
             tiles=operation_tiles(op, unit, stationarity=stationarity, k_partitions=k_partitions),
-            occupancy=_occupancy(op, unit, stationarity=stationarity, k_partitions=k_partitions),
+            occupancy=_occupancy(
+                op,
+                unit,
+                stationarity=stationarity,
+                k_partitions=k_partitions,
+                vector_adder=vector_adder,
+            ),
         )
 
     if isinstance(op.attrs, ConvAttrs):
@@ -272,7 +279,7 @@ def operation_utilisation(
             units=unit.count,
             fill_cycles=fill,
             tiles=operation_tiles(op, unit),
-            occupancy=_occupancy(op, unit),
+            occupancy=_occupancy(op, unit, vector_adder=vector_adder),
         )
 
     if isinstance(op.attrs, AttentionAttrs):
@@ -355,10 +362,11 @@ def operation_deal(
     *,
     stationarity: Dataflow | None = None,
     k_partitions: int = 1,
+    vector_adder: bool,
 ) -> Deal | None:
     """How *op*'s tiles are dealt to *unit*'s arrays (D68), or None with no grid."""
     grid = operation_grid(op, unit, stationarity=stationarity, k_partitions=k_partitions)
-    return deal_for(grid, unit) if grid is not None else None
+    return deal_for(grid, unit, vector_adder=vector_adder) if grid is not None else None
 
 
 def _occupancy(
@@ -367,8 +375,11 @@ def _occupancy(
     *,
     stationarity: Dataflow | None = None,
     k_partitions: int = 1,
+    vector_adder: bool,
 ) -> float | None:
-    dealt = operation_deal(op, unit, stationarity=stationarity, k_partitions=k_partitions)
+    dealt = operation_deal(
+        op, unit, stationarity=stationarity, k_partitions=k_partitions, vector_adder=vector_adder
+    )
     return dealt.occupancy if dealt is not None else None
 
 
@@ -378,6 +389,7 @@ def operation_cores(
     *,
     stationarity: Dataflow | None = None,
     k_partitions: int = 1,
+    vector_adder: bool,
 ) -> int:
     """Arrays *op* ever gives a tile to — the deal's, where there is one (D68).
 
@@ -385,7 +397,9 @@ def operation_cores(
     when a unit that sums K locally keeps each output column on one array and
     there are fewer columns than arrays.
     """
-    dealt = operation_deal(op, unit, stationarity=stationarity, k_partitions=k_partitions)
+    dealt = operation_deal(
+        op, unit, stationarity=stationarity, k_partitions=k_partitions, vector_adder=vector_adder
+    )
     if dealt is not None:
         return dealt.used_cores
     return min(

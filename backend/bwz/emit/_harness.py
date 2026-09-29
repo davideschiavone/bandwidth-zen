@@ -321,6 +321,11 @@ class Counters:
     shared accumulator under a K-on-grid walk, in the second kernel under
     split-K. A first touch is a copy into a zeroed accumulator and is not one of
     them, which is exactly why the count is ``p-1`` and not ``p``."""
+    cross_core_adds: int = 0
+    """The share of :attr:`partial_sum_adds` that summed partials made on
+    DIFFERENT cores — ``(g-1)*M*N`` when a column's K is split into ``g``
+    groups, each summed in its own core's periphery (D69). The rest were
+    summed where they were made."""
     a_compulsory_bytes: float = 0.0
     """A bytes on their **first** touch only."""
     b_compulsory_bytes: float = 0.0
@@ -361,6 +366,10 @@ class Counters:
     def count_partial_sum_adds(self, adds: int) -> None:
         with self.lock:
             self.partial_sum_adds += adds
+
+    def count_cross_core_adds(self, adds: int) -> None:
+        with self.lock:
+            self.cross_core_adds += adds
 
     def count_staging_event(self) -> None:
         with self.lock:
@@ -539,37 +548,52 @@ class Partials:
     """
 
     def __init__(
-        self, m: int, n: int, tile_rows: int, tile_cols: int, dtype: str, counters: Counters
+        self,
+        m: int,
+        n: int,
+        tile_rows: int,
+        tile_cols: int,
+        dtype: str,
+        counters: Counters,
+        groups: int = 1,
     ) -> None:
-        self.acc = zeros(m, n, dtype)
+        # One accumulator per K-group (D69): a group is the k-slices one core
+        # sums in its own periphery. With groups=1 every slice meets in one.
+        self.accs = [zeros(m, n, dtype) for _ in range(max(1, groups))]
+        self.acc = self.accs[0]
         self.tile_rows = tile_rows
         self.tile_cols = tile_cols
         self.counters = counters
         self._block_cols = max(1, math.ceil(n / tile_cols))
         blocks = max(1, math.ceil(m / tile_rows)) * self._block_cols
-        self._locks = [threading.Lock() for _ in range(blocks)]
-        self._touched = [False] * blocks
+        self._blocks = blocks
+        self._locks = [threading.Lock() for _ in range(blocks * len(self.accs))]
+        self._touched = [False] * (blocks * len(self.accs))
 
-    def accumulate(self, r0: int, c0: int, block: Tile) -> None:
-        """Add one tile's partial into the output block that owns it.
+    def accumulate(self, r0: int, c0: int, block: Tile, group: int = 0) -> None:
+        """Add one tile's partial into the output block that owns it, in *group*.
 
         The **first** partial to reach a block lands in a zeroed accumulator, so
         it is a copy rather than an addition and is not counted: over ``p``
-        k-slices that leaves ``p-1`` additions per element, which is what the
-        model charges (D62).
+        k-slices in one group that leaves ``p-1`` additions per element, which
+        is what the model charges (D62). With several groups each has its own
+        first touch; :meth:`drain` adds the groups together (D69).
         """
         rows, cols = shape_of(block)
-        index = (r0 // self.tile_rows) * self._block_cols + (c0 // self.tile_cols)
+        index = group * self._blocks + (
+            (r0 // self.tile_rows) * self._block_cols + (c0 // self.tile_cols)
+        )
+        acc = self.accs[group]
         with self._locks[index]:
             if self._touched[index]:
                 self.counters.count_partial_sum_adds(rows * cols)
             else:
                 self._touched[index] = True
             if NUMPY is not None:
-                self.acc[r0 : r0 + rows, c0 : c0 + cols] += block
+                acc[r0 : r0 + rows, c0 : c0 + cols] += block
                 return
             for i in range(rows):
-                acc_row = self.acc[r0 + i]
+                acc_row = acc[r0 + i]
                 block_row = block[i]
                 for j in range(cols):
                     acc_row[c0 + j] += block_row[j]
@@ -579,7 +603,14 @@ class Partials:
 
         The bytes are C's own compulsory write — the accumulator itself never
         crossed DRAM, which is the claim ``materialises_partials`` makes.
+
+        With several K-groups their partials are added together first — the one
+        step whose additions cross cores, counted as such (D69).
         """
+        for other in self.accs[1:]:
+            add_into(self.acc, other)
+            self.counters.count_partial_sum_adds(m * n)
+            self.counters.count_cross_core_adds(m * n)
         for r0 in range(0, m, self.tile_rows):
             for c0 in range(0, n, self.tile_cols):
                 r1, c1 = min(r0 + self.tile_rows, m), min(c0 + self.tile_cols, n)

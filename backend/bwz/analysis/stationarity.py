@@ -326,41 +326,98 @@ def accumulation_depth(unit: ComputeUnit) -> float:
     return UNBOUNDED_ACCUMULATION if unit.dataflow in K_ON_GRID else 0.0
 
 
-def sums_locally(grid: TileGrid, unit: ComputeUnit) -> bool:
-    """Whether *unit* sums this grid's k-slices in its own periphery (D62, D68).
+def sums_locally(grid: TileGrid, unit: ComputeUnit, *, vector_adder: bool) -> bool:
+    """Whether *unit* sums ALL of this grid's k-slices in one periphery (D62, D68, D69).
 
-    Three conditions, all physical:
-
-    * K is actually cut on the grid — more than one k-slice, and not by split-K,
-      whose two kernels put the partials in DRAM whatever the unit can do;
-    * K is the grid's **row** axis (``ws``), so one output column's k-slices are
-      one column of the grid, which :func:`deal` can hand to a single unit. Under
-      ``is`` K is the column axis: a row's k-slices sit side by side and a wave
-      spreads them across units, so they cannot meet in one periphery;
-    * ``K`` fits :func:`accumulation_depth` — Metis's published 16384.
-
-    When this holds, :func:`deal` *enforces* the locality it claims. Before D68
-    it was assumed: the round-robin deal only kept a column on one unit when the
-    column count happened to divide the unit count, so Metis at N=512, K=8192
-    reported "summed in the periphery" for 16 k-slices spread over 4 cores.
+    ``LOCAL`` placement's condition: K is really cut (more than one k-slice),
+    :func:`accumulates_locally` holds, and :func:`k_groups` is 1 — every
+    k-slice of a column on one unit, so no partial ever leaves it. When ``k_groups``
+    is more than 1 the unit still sums its OWN group locally, but the groups'
+    partials have to meet somewhere else, and that is not free.
     """
     if not grid.needs_reduction or grid.k_slices <= 1:
         return False
-    return can_sum_locally(grid, unit)
+    return accumulates_locally(grid, unit) and k_groups(grid, unit, vector_adder=vector_adder) == 1
 
 
-def can_sum_locally(grid: TileGrid, unit: ComputeUnit) -> bool:
-    """Whether *unit* could sum this grid's K locally, however many slices K has.
+def accumulates_locally(grid: TileGrid, unit: ComputeUnit) -> bool:
+    """Whether *unit* has a periphery accumulator this grid's k-slices can use.
 
-    :func:`sums_locally` without its "is there anything to sum" test. The deal
-    follows this one, so a unit that accumulates K in its periphery always runs
-    the column-per-unit deal — identical to round-robin when K is a single slice
-    (one grid row cannot be straddled), and the same walk in every emitted
-    program for that unit whatever K is.
+    Physical, and independent of how many slices K has:
+
+    * K is the grid's **row** axis (``ws``), so one output column's k-slices are
+      one column of the grid, which :func:`deal` can keep on one unit. Under
+      ``is`` K is the column axis and a wave spreads a row's k-slices across
+      units;
+    * not split-K, whose two kernels put the partials in DRAM whatever the unit
+      can do;
+    * the unit accumulates at least one k-slice (:func:`accumulation_depth` of
+      at least ``tile_rows`` inputs). Metis's is 16384 — 32 slices of 512.
+
+    The deal follows this one (D68), so such a unit always runs the grouped,
+    column-keeping deal — identical to round-robin when K is a single slice.
     """
     if grid.materialises_partials or grid.row_dim is not Dim.K:
         return False
-    return grid.k <= accumulation_depth(unit)
+    return accumulation_depth(unit) >= grid.tile_rows
+
+
+def k_groups(grid: TileGrid, unit: ComputeUnit, *, vector_adder: bool) -> int:
+    """How many units share one output column's K, each summing its own group (D69).
+
+    ``g`` — and so the number of partials per output element that leave the unit
+    that made them. Two reasons to take more than one, and the larger wins:
+
+    * **depth.** A unit sums at most ``floor(depth / tile_rows)`` k-slices before
+      its accumulator is full; Metis's 16384 inputs are 32 slices of 512. A
+      column deeper than that needs ``ceil(k_slices / 32)`` groups whatever
+      else is true.
+    * **occupancy.** When N gives fewer columns than there are units, the idle
+      units can take a share of each column's K: ``floor(units / cols)`` of them
+      per column. Each still sums its own share locally; only ``g`` partials per
+      output cross units, where a round-robin spread of the same slices would
+      send one per k-slice. Only with a *vector_adder* — a non-systolic unit on
+      the chip to add those partials (Metis's DPU). Without one the adds would
+      land on the array itself, which is never costed (D62), so the idle units
+      stay idle.
+
+    Capped at ``k_slices`` (a group cannot be empty) and at least 1. Worked on
+    Metis (4 cores, 512x512 arrays):
+
+    ===========================  =====  ======  ====================
+    shape (M x N x K)             cols  slices   g
+    ===========================  =====  ======  ====================
+    512 x 2048 x 2048              4      4      1 (N fills the cores)
+    512 x 1024 x 4096             2      8      2 (occupancy)
+    512 x  512 x 8192             1     16      4 (occupancy)
+    512 x 2048 x 32768            4     64      2 (depth: 64 / 32)
+    ===========================  =====  ======  ====================
+
+    1 for a unit that does not :func:`accumulates_locally` — its partials leave
+    one per k-slice, which :func:`partials_per_output` says.
+    """
+    if not accumulates_locally(grid, unit):
+        return 1
+    slices = grid.k_slices
+    depth = accumulation_depth(unit)
+    per_group = slices if depth == UNBOUNDED_ACCUMULATION else max(1, int(depth // grid.tile_rows))
+    for_depth = math.ceil(slices / per_group)
+    spare = vector_adder and grid.cols < unit.count
+    for_occupancy = unit.count // grid.cols if spare else 1
+    return max(1, min(slices, max(for_depth, for_occupancy)))
+
+
+def partials_per_output(grid: TileGrid, unit: ComputeUnit, *, vector_adder: bool) -> int:
+    """Partial values of each output element that leave the unit that made them.
+
+    The ``p`` every reduction cost is ``(p - 1) * M * N`` additions of (D62): one
+    per k-slice for a unit with no local accumulator (A100 under ``ws``), one per
+    split-K piece, and one per :func:`k_groups` group for a unit that sums its own
+    group in its periphery (D69).
+    """
+    if accumulates_locally(grid, unit):
+        return k_groups(grid, unit, vector_adder=vector_adder)
+    return grid.k_slices
 
 
 @dataclass(frozen=True, slots=True)
@@ -401,7 +458,11 @@ class Deal:
     ranges: tuple[tuple[int, int], ...]
     keeps_k_on_unit: bool
     rounds: int = 1
-    """Waves per grid row under column-per-unit: ``ceil(cols / used_cores)``."""
+    """Waves per block of ``k_groups`` grid rows under the column-keeping deal:
+    ``ceil(k_groups * cols / used_cores)``. With one group per column it is the
+    number of column groups one k-slice is split into (D68)."""
+    k_groups: int = 1
+    """Units sharing one column's K, each summing its own group (D69)."""
 
     @property
     def waves(self) -> int:
@@ -435,27 +496,56 @@ class Deal:
         return min(end, start + math.floor((position - whole) * width))
 
 
-def deal(grid: TileGrid, units: int, *, keep_k_on_unit: bool) -> Deal:
-    """Deal *grid*'s tiles to *units* units — see :class:`Deal` for the two deals."""
+def deal(grid: TileGrid, units: int, *, keep_k_on_unit: bool, groups: int = 1) -> Deal:
+    """Deal *grid*'s tiles to *units* units — see :class:`Deal` for the deals.
+
+    The column-keeping deal walks the grid in blocks of *groups* rows. A block's
+    ``groups * cols`` tiles are work items numbered row-major, split into waves
+    of ``used`` consecutive items, and item ``v`` always lands on unit
+    ``v % used``. Item ``v`` of every block is the same (group, column) pair —
+    ``divmod(v, cols)`` — so a unit keeps its column, and its group is the
+    k-slices ``kt`` with ``kt % groups == v // cols``: summed in its own
+    periphery, one partial per group left over (D69). Every wave is one
+    contiguous tile range, which the trace and the figures rely on.
+    """
     units = max(1, units)
     tiles = grid.tiles
     if not keep_k_on_unit:
         used = max(1, min(units, tiles))
         ranges = tuple((start, min(start + used, tiles)) for start in range(0, tiles, used))
         return Deal(tiles, units, used, ranges, keeps_k_on_unit=False)
-    used = max(1, min(units, grid.cols))
-    rounds = math.ceil(grid.cols / used)
-    ranges = tuple(
-        (row * grid.cols + first, row * grid.cols + min(first + used, grid.cols))
-        for row in range(grid.rows * grid.k_partitions)
-        for first in range(0, grid.cols, used)
+    groups = max(1, groups)
+    items = groups * grid.cols
+    used = max(1, min(units, items))
+    rows = grid.rows * grid.k_partitions
+    blocks: list[tuple[int, int]] = []
+    for first_row in range(0, rows, groups):
+        start = first_row * grid.cols
+        count = min(groups, rows - first_row) * grid.cols
+        blocks.extend(
+            (start + offset, start + min(offset + used, count)) for offset in range(0, count, used)
+        )
+    return Deal(
+        tiles,
+        units,
+        used,
+        tuple(blocks),
+        keeps_k_on_unit=True,
+        rounds=math.ceil(items / used),
+        k_groups=groups,
     )
-    return Deal(tiles, units, used, ranges, keeps_k_on_unit=True, rounds=rounds)
 
 
-def deal_for(grid: TileGrid, unit: ComputeUnit) -> Deal:
-    """The deal *unit* runs *grid* with: column-per-unit wherever it can sum K locally."""
-    return deal(grid, unit.count, keep_k_on_unit=can_sum_locally(grid, unit))
+def deal_for(grid: TileGrid, unit: ComputeUnit, *, vector_adder: bool) -> Deal:
+    """The deal *unit* runs *grid* with: column-keeping wherever it accumulates K locally.
+
+    *vector_adder* is whether the chip has a non-systolic unit to add partials
+    that leave a unit — :attr:`MachineModel.has_vector_unit`. It decides whether
+    idle units may share a narrow column's K (:func:`k_groups`).
+    """
+    local = accumulates_locally(grid, unit)
+    groups = k_groups(grid, unit, vector_adder=vector_adder)
+    return deal(grid, unit.count, keep_k_on_unit=local, groups=groups)
 
 
 @dataclass(frozen=True, slots=True)
@@ -511,6 +601,7 @@ def reduction_placement(
     *,
     unit: ComputeUnit,
     on_chip_capacity_bytes: float,
+    vector_adder: bool,
 ) -> ReductionPlacement:
     """Where this grid's partial sums meet, on this unit (D62).
 
@@ -546,7 +637,7 @@ def reduction_placement(
         return ReductionPlacement.NONE
     if grid.materialises_partials:
         return ReductionPlacement.DRAM
-    if sums_locally(grid, unit):
+    if sums_locally(grid, unit, vector_adder=vector_adder):
         return ReductionPlacement.LOCAL
     live_bytes = grid.accumulator_elements * accumulator_bytes
     if live_bytes <= on_chip_capacity_bytes:
@@ -560,6 +651,7 @@ def reduction_cost(
     *,
     unit: ComputeUnit,
     on_chip_capacity_bytes: float,
+    vector_adder: bool,
 ) -> ReductionCost:
     """Cost of summing the ``p`` partial results *grid* leaves per output element.
 
@@ -576,14 +668,22 @@ def reduction_cost(
     output-stationary is the cheap default (D53).
     """
     placement = reduction_placement(
-        grid, accumulator_bytes, unit=unit, on_chip_capacity_bytes=on_chip_capacity_bytes
+        grid,
+        accumulator_bytes,
+        unit=unit,
+        on_chip_capacity_bytes=on_chip_capacity_bytes,
+        vector_adder=vector_adder,
     )
-    partitions = grid.k_slices
-    if placement is ReductionPlacement.NONE or partitions <= 1:
+    if placement is ReductionPlacement.NONE:
+        return NO_REDUCTION
+    if placement is ReductionPlacement.LOCAL:
+        # Every k-slice is summed where it was made: nothing leaves, nothing is
+        # charged, but the placement is still reported — "free" is a finding.
+        return ReductionCost(placement, grid.k_slices, 0.0, 0.0, 0)
+    partitions = partials_per_output(grid, unit, vector_adder=vector_adder)
+    if partitions <= 1:
         return NO_REDUCTION
     elements = float(grid.m) * float(grid.n)
-    if placement is ReductionPlacement.LOCAL:
-        return ReductionCost(placement, partitions, 0.0, 0.0, 0)
     if placement is ReductionPlacement.ON_CHIP:
         # No bytes: the v1 machine has no on-chip bandwidth term (D5a/D5b), so
         # the honest position is that this reduction costs vector time and

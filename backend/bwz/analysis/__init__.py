@@ -8,6 +8,8 @@ parallelisable and snapshot tests meaningful.
 
 from __future__ import annotations
 
+import math
+
 import bwz
 from bwz.analysis.bottleneck import flip_margin, rank_operations, suggestions
 from bwz.analysis.dataflow import DataflowPlan, plan_dataflow
@@ -21,6 +23,8 @@ from bwz.analysis.stationarity import (
     TileGrid,
     accumulation_depth,
     deal_for,
+    k_groups,
+    partials_per_output,
     refusal_reason,
     residency_phrase,
 )
@@ -586,7 +590,8 @@ def _stationarity_assumptions(
             f"array geometry, so there is no tile grid to decompose against and no reduction to "
             f"charge (D53)."
         ]
-    adds = (grid.k_slices - 1) * grid.m * grid.n
+    partials = partials_per_output(grid, machine.unit, vector_adder=machine.has_vector_unit)
+    adds = (partials - 1) * grid.m * grid.n
     chosen = (
         f"asked for with stationarity={dataflow.stationarity.value!r}"
         if dataflow.requested_stationarity is not None
@@ -671,14 +676,14 @@ def _placement_assumptions(grid: TileGrid, machine: MachineModel, op: OpResult |
             f"depth and charges nothing. That is the claim it has always made for a K-on-grid "
             f"grid, and it is unfalsifiable as it stands: declaring a depth would bound it."
         )
-        dealt = deal_for(grid, machine.unit)
+        dealt = deal_for(grid, machine.unit, vector_adder=machine.has_vector_unit)
         units = machine.unit.count
         idle = (
             f" Here N gives only {grid.cols:,} output column(s) for {units:,} units, so "
             f"{units - dealt.used_cores:,} of them never receive a tile: wave occupancy "
-            f"{dealt.occupancy:.1%}, charged in the utilisation. Spreading the k-slices over "
-            f"every unit would fill them, but then the partials would have to leave the unit "
-            f"and be summed elsewhere — a different decomposition, not modelled here."
+            f"{dealt.occupancy:.1%}, charged in the utilisation. Sharing each column's K between "
+            f"units would fill them (D69), but their partials would then have to be added off "
+            f"the array, and {machine.chip.name} declares no non-systolic unit to add them."
             if dealt.used_cores < units
             else ""
         )
@@ -688,6 +693,31 @@ def _placement_assumptions(grid: TileGrid, machine: MachineModel, op: OpResult |
             f"output column to land on the SAME unit, and the deal enforces it (D68): a wave "
             f"never straddles a grid row, so unit u keeps column round * "
             f"{dealt.used_cores:,} + u for every k-slice.{idle}",
+        ]
+
+    groups = k_groups(grid, machine.unit, vector_adder=machine.has_vector_unit)
+    if op.reduction_placement is ReductionPlacement.ON_CHIP and groups > 1:
+        dealt = deal_for(grid, machine.unit, vector_adder=machine.has_vector_unit)
+        per_group = math.ceil(grid.k_slices / groups)
+        why = (
+            f"K={grid.k:,} is deeper than {machine.unit.name}'s {depth:,.0f}-input accumulator"
+            if grid.k > depth
+            else f"N gives only {grid.cols:,} output column(s) for {machine.unit.count:,} units"
+        )
+        return [
+            f"Reduction: ON_CHIP, grouped (D69). {why}, so {groups} units share each output "
+            f"column: each keeps one column and one group of ~{per_group} k-slices, summed in its "
+            f"OWN periphery for free (as D68). Only the {groups} group partials per output leave "
+            f"their units — {(groups - 1) * grid.m * grid.n:,} additions on {engine} at {rate}, "
+            f"{format_time(op.t_reduce_s)} against {format_time(op.t_arith_s)} of matrix work, "
+            f"overlapped (max, not sum). A round-robin spread of the same {grid.k_slices:,} "
+            f"slices would have sent all {grid.k_slices:,} partials off-core instead.",
+            f"The group partials' on-chip traffic (through L1/L2) is NOT charged — v1 has no "
+            f"on-chip bandwidth term (D5a/D5b) — and neither is synchronisation between the "
+            f"units. {engine}'s rate is the profile's own figure: where it is an estimate, so is "
+            f"this reduction's time. Wave occupancy with the groups: {dealt.occupancy:.1%}.",
+            "Splitting one matmul's K across AI cores is this model's choice, not a mapping the "
+            "paper describes: it states only that the cores can jointly tackle one workload.",
         ]
 
     if op.reduction_placement is ReductionPlacement.ON_CHIP:
