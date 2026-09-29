@@ -274,9 +274,10 @@ def test_metis_walks_each_column_on_one_core() -> None:
     """
     program, *_ = _emit("metis_aipu", (512, 512, 1024), "int8")
     constants = constants_of(program.source)
-    assert (constants["USED_CORES"], constants["ROUNDS"], constants["WAVES"]) == (1, 1, 2)
-    assert "kt, round_ = divmod(wave, ROUNDS)" in program.source
-    assert "nt = round_ * USED_CORES + core_id" in program.source
+    assert (constants["USED_CORES"], constants["COLUMN_GROUPS"], constants["WAVES"]) == (1, 1, 2)
+    assert "kt, column_group = divmod(wave, COLUMN_GROUPS)" in program.source
+    assert "nt = column_group * USED_CORES + core_id" in program.source
+    assert "weight_set = kt % WEIGHT_SETS" in program.source
     assert program.predicted["idle_core_waves"] == 6
     assert "SAME core's, in its other waves" in program.source
 
@@ -285,7 +286,7 @@ def test_a100_keeps_the_round_robin_deal() -> None:
     """No local accumulator on a tensor core, so nothing about its walk changes."""
     program, *_ = _emit("a100_80gb", stationarity=Dataflow.WEIGHT_STATIONARY)
     assert "tile = wave * USED_CORES + core_id" in program.source
-    assert "ROUNDS" not in program.source
+    assert "COLUMN_GROUPS" not in program.source
 
 
 def test_the_header_draws_which_operand_is_which_shape() -> None:
@@ -656,7 +657,7 @@ def test_debug_is_off_unless_asked_for() -> None:
     ("chip_id", "dtype", "expected"),
     [
         ("a100_80gb", "fp16", "K is swept INSIDE"),
-        ("metis_aipu", "int8", "resident, M streams past it"),
+        ("metis_aipu", "int8", "resident in weight set {weight_set}, M streams past it"),
     ],
 )
 def test_debug_narrates_the_decomposition_it_is_of(chip_id: str, dtype: str, expected: str) -> None:

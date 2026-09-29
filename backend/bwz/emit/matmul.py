@@ -566,7 +566,7 @@ def _constants(
 
 
 def _deal_constants(grid: TileGrid, unit: ComputeUnit, predicted: dict[str, float]) -> list[str]:
-    """USED_CORES and WAVES, and — for a unit that sums K locally — ROUNDS (D68)."""
+    """USED_CORES and WAVES, and — for a unit that sums K locally — COLUMN_GROUPS (D68)."""
     used, waves = int(predicted["used_cores"]), int(predicted["waves"])
     if not deal_for(grid, unit).keeps_k_on_unit:
         return [
@@ -587,10 +587,14 @@ def _deal_constants(grid: TileGrid, unit: ComputeUnit, predicted: dict[str, floa
             "periphery, so a column's k-slices must share a",
             "core (D68). One OS thread each — structure, not speed.",
         ),
-        *_constant(f"ROUNDS = {rounds}", "ceil(GRID_COLS / USED_CORES): waves per k-slice"),
+        *_constant(
+            f"COLUMN_GROUPS = {rounds}",
+            "ceil(GRID_COLS / USED_CORES): groups of output",
+            "columns, one core each — waves per k-slice",
+        ),
         *_constant(
             f"WAVES = {waves}",
-            "GRID_ROWS * ROUNDS: a wave never straddles a",
+            "GRID_ROWS * COLUMN_GROUPS: a wave never straddles a",
             "grid row, so each core keeps its column",
         ),
     ]
@@ -1132,7 +1136,7 @@ def _deal_comment(grid: TileGrid, unit: ComputeUnit) -> list[str]:
         f"    # Column-per-core deal (D68). {unit.name} sums K in its OWN periphery, so every",
         "    # k-slice of an output column must run on the SAME core — a partial from",
         "    # another core would have nowhere to meet it. So a wave never straddles a",
-        "    # grid row: core c keeps column nt = round_ * USED_CORES + c, and successive",
+        "    # grid row: core c keeps column nt = column_group * USED_CORES + c, and",
         "    # waves walk that column's k-slices (kt) through the core's weight sets.",
     ]
 
@@ -1148,13 +1152,20 @@ def _deal_lines(grid: TileGrid, unit: ComputeUnit) -> list[str]:
         ]
     return [
         _commented(
-            "            kt, round_ = divmod(wave, ROUNDS)", "this wave's k-slice, and column group"
+            "            kt, column_group = divmod(wave, COLUMN_GROUPS)",
+            "this wave's k-slice, and column group",
         ),
         _commented(
-            "            nt = round_ * USED_CORES + core_id",
+            "            nt = column_group * USED_CORES + core_id",
             "LEVEL 2: this core's column, the SAME for every kt",
         ),
         _commented("            tile = kt * GRID_COLS + nt", "the grid's own tile number"),
+        _commented(
+            "            weight_set = kt % WEIGHT_SETS",
+            "which IMC weight set holds B[kt, nt] — conceptually:",
+        ),
+        "            #   the model tracks no set and charges no write time yet (D30), and the",
+        "            #   paper does not say how Axelera's compiler assigns them",
         "            if nt >= GRID_COLS:",
     ]
 
@@ -1230,8 +1241,8 @@ def _levels_deal_lines(
         ]
     rounds = math.ceil(grid.cols / used)
     return [
-        f"      LEVEL 1  waves        {waves:,} = {grid.rows:,} k-slices x {rounds:,} round(s)"
-        f" of {used:,} columns",
+        f"      LEVEL 1  waves        {waves:,} = {grid.rows:,} k-slices x {rounds:,}"
+        f" column group(s) of {used:,} columns",
         f"      LEVEL 2  cores        {used:,} of {available:,} in use; core c keeps ONE output"
         " column for",
         "                            every k-slice, so K sums in its own periphery (D68)",
@@ -1465,10 +1476,11 @@ def _weight_body(grid: TileGrid, dataflow: DataflowPlan, unit: ComputeUnit) -> l
     "Weight-stationary" is a claim about hardware and is a misnomer on an MMA
     unit, which holds nothing (D30/D62); the comment says which one this is.
     """
+    where = " in weight set {weight_set}" if deal_for(grid, unit).keeps_k_on_unit else ""
     out: list[Line] = _plain(
         [
             "    if DEBUG:",
-            '        log(f"  B[{k0}:{k1}, {n0}:{n1}] resident, M streams past it")',
+            f'        log(f"  B[{{k0}}:{{k1}}, {{n0}}:{{n1}}] resident{where}, M streams past it")',
             "",
         ]
     )
