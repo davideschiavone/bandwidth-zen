@@ -1,5 +1,7 @@
 # Matmul, rearranged
 
+**Website: [https://davideschiavone.github.io/bandwidth-zen/matmul/notebook.html](https://davideschiavone.github.io/bandwidth-zen/matmul/notebook.html)** · [deck](https://davideschiavone.github.io/bandwidth-zen/matmul/deck.html) · [all notebooks](https://davideschiavone.github.io/bandwidth-zen/)
+
 One matrix multiplication, `A[M,K] @ B[K,N] -> C[M,N]`, shown as **rearrangements of the textbook
 three-loop code**: loop orders, inner / outer / row-wise / column-wise products, output-, weight- and
 input-stationary dataflows, tiling, hardware step sizes, multi-core grid and sweep, waves,
@@ -12,7 +14,7 @@ every animation ends with a check that `C == A @ B`.
 |---|---|
 | [`deck.html`](deck.html) | 39-slide presentation with step-by-step animations |
 | [`notebook.html`](notebook.html) | Interactive notebook: 19 chapters, knobs for sizes, tiles, loop orders, cores, flows, split-K and weight sets, plus a printed trace of every step |
-| [`index.html`](index.html) | Landing page linking both |
+| [`../index.html`](../index.html) | Landing page linking both topics |
 | `extras/matmul_rearranged.ipynb` | Earlier static Jupyter draft (not interactive, kept for reference) |
 
 ## How to open
@@ -24,17 +26,16 @@ Each `.html` file is self-contained. Download or clone the repository, then doub
 > Clicking an `.html` file on github.com shows its **source code**, not the page. To view it,
 > download it (the "Download raw file" button) and open it locally, or use the online link below.
 
-**Option 2: online.** The folder is published with GitHub Pages at
-**https://davideschiavone.github.io/bandwidth-zen/** (landing page), with
-[`deck.html`](https://davideschiavone.github.io/bandwidth-zen/deck.html) and
-[`notebook.html`](https://davideschiavone.github.io/bandwidth-zen/notebook.html) next to it.
-The workflow `.github/workflows/pages.yml` redeploys it whenever this folder changes on `main`.
+**Option 2: online.** Published with GitHub Pages: **[https://davideschiavone.github.io/bandwidth-zen/](https://davideschiavone.github.io/bandwidth-zen/)** (landing page), with
+[`matmul/deck.html`](https://davideschiavone.github.io/bandwidth-zen/matmul/deck.html) and
+[`matmul/notebook.html`](https://davideschiavone.github.io/bandwidth-zen/matmul/notebook.html).
+The workflow `.github/workflows/pages.yml` redeploys `notebook/` whenever it changes on `main`.
 
 **Option 3: a local web server** (optional; only needed if your browser restricts local files):
 
 ```bash
-cd matmul-notebook
-python3 -m http.server 8000     # then open http://localhost:8000
+cd notebook
+python3 -m http.server 8000     # then open http://localhost:8000/matmul/
 ```
 
 ### Requirements
@@ -94,8 +95,8 @@ The two pages are generated from `src/` (the engines, the notebook logic and the
 
 ```bash
 python3 src/build.py      # Python 3.8+, standard library only; rewrites deck.html and notebook.html
-npm install               # once: installs jsdom for the page checks
-npm test                  # ~130k simulator configurations + drives every slide and chapter
+cd .. && npm install      # once, in notebook/: installs jsdom for the page checks
+npm test                  # in notebook/: ~130k simulator configurations + every slide and chapter, both topics
 ```
 
 `npm test` checks, for every configuration of size, tiles, loop order, cores, flow, K-groups,
@@ -108,9 +109,8 @@ src/
   engine.js     running example, loop orders, early deck widgets
   engine2.js    general simulator: any size, tiling, loop order, cores, flows, waves, K-groups
   engine3.js    split-K through memory, weight sets
-  engine.css    shared styles and colour tokens (A blue, B orange, C green, partial pale green)
   lab.js        notebook chapters and knobs
   deck_slides.html   slide content
-  build.py      assembles deck.html and notebook.html
+  build.py      assembles deck.html and notebook.html (page chrome and engine.css: ../common/)
 tests/check.js
 ```

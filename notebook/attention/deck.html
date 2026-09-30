@@ -1,0 +1,1723 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>body{margin:0;font:14px system-ui,sans-serif;-webkit-text-size-adjust:100%}img{max-width:100%}[hidden]{display:none!important}:root{padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}</style>
+<title>Attention Blocked Deck</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap"><style>/* Layout concept: every picture is the textbook matmul layout — B on top, A on the left, C where row i meets column j. */
+:root {
+  --bg: #f4f6f9;
+  --surface: #ffffff;
+  --surface-2: #eaeef4;
+  --fg: #18202b;
+  --muted: #5b6676;
+  --line: #d3dae4;
+  --a: #2360c8;          /* A — blue   */
+  --b: #d9730a;          /* B — orange */
+  --c: #148552;          /* C — green  */
+  --cp: #c9ecd8;         /* C partial — pale green */
+  --sp: #a8329a;         /* additions across cores (space) — magenta */
+  --mem: #6a4bc4;        /* trips through memory — violet */
+  --on-strong: #ffffff;
+  --font-display: "Bricolage Grotesque", "Avenir Next", "Segoe UI", system-ui, sans-serif;
+  --font-body: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  --cell: 2.1rem;
+  --radius: 6px;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #11151b; --surface: #191f28; --surface-2: #222a35; --fg: #e8edf4; --muted: #9aa6b7; --line: #323c4a;
+    --a: #6a9eff; --b: #ffa347; --c: #3cc986; --cp: #1f4a35; --sp: #e27ad6; --mem: #a993ff; --on-strong: #0b0f14;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #11151b; --surface: #191f28; --surface-2: #222a35; --fg: #e8edf4; --muted: #9aa6b7; --line: #323c4a;
+  --a: #6a9eff; --b: #ffa347; --c: #3cc986; --cp: #1f4a35; --sp: #e27ad6; --mem: #a993ff; --on-strong: #0b0f14;
+  color-scheme: dark;
+}
+body { background: var(--bg); color: var(--fg); font-family: var(--font-body); }
+
+.ta { color: var(--a); font-weight: 600; }
+.tb { color: var(--b); font-weight: 600; }
+.tc { color: var(--c); font-weight: 600; }
+.tsp { color: var(--sp); font-weight: 600; }
+code, .mono { font-family: var(--font-mono); font-size: 0.92em; }
+
+/* ---------- matrices ---------- */
+.triple { display: grid; grid-template-columns: auto auto; grid-template-areas: "x b" "a c"; gap: 0.6rem 0.8rem; align-items: end; justify-items: start; }
+.triple > .m-A { grid-area: a; align-self: start; justify-self: end; }
+.triple > .m-B { grid-area: b; }
+.triple > .m-C { grid-area: c; align-self: start; }
+.triple > .tx { grid-area: x; align-self: end; justify-self: end; color: var(--muted); font-family: var(--font-mono); font-size: 0.78rem; text-align: right; line-height: 1.3; }
+.mat { display: flex; flex-direction: column; gap: 0.25rem; }
+.mat-title { font-family: var(--font-mono); font-size: 0.78rem; color: var(--muted); display: flex; gap: 0.35rem; align-items: baseline; }
+.mat-title b { font-family: var(--font-display); font-size: 1.05rem; font-weight: 700; }
+.m-A .mat-title b { color: var(--a); } .m-B .mat-title b { color: var(--b); } .m-C .mat-title b { color: var(--c); }
+.mat-grid { display: grid; gap: 3px; position: relative; }
+.mh { font-family: var(--font-mono); font-size: 0.68rem; color: var(--muted); display: grid; place-items: center; min-width: 1rem; border-radius: 3px; }
+.mh.on { background: var(--fg); color: var(--bg); }
+.mh.corner { font-size: 0.62rem; opacity: 0.8; }
+.cell { width: var(--cell); height: var(--cell); display: grid; place-items: center; border-radius: 4px; font-family: var(--font-mono); font-weight: 600; font-size: 0.92rem; font-variant-numeric: tabular-nums; border: 1.5px solid transparent; transition: background-color .18s, color .18s, box-shadow .18s, border-color .18s; position: relative; }
+.cell.bl { margin-left: 5px; } .cell.bt { margin-top: 5px; }
+.mh.bl { margin-left: 5px; } .mh.bt { margin-top: 5px; }
+/* A */
+.k-A { background: color-mix(in oklab, var(--a) 11%, var(--surface)); color: var(--fg); }
+.k-A.sweep { background: color-mix(in oklab, var(--a) 30%, var(--surface)); }
+.k-A.read { background: var(--a); color: var(--on-strong); }
+/* B */
+.k-B { background: color-mix(in oklab, var(--b) 12%, var(--surface)); color: var(--fg); }
+.k-B.sweep { background: color-mix(in oklab, var(--b) 32%, var(--surface)); }
+.k-B.read { background: var(--b); color: var(--on-strong); }
+/* C */
+.k-C { background: var(--surface); border: 1.5px dashed var(--line); color: var(--muted); }
+.k-C.sweep { border-color: color-mix(in oklab, var(--c) 60%, var(--line)); border-style: solid; }
+.k-C.part { background: var(--cp); color: var(--fg); border: 1.5px solid color-mix(in oklab, var(--c) 45%, transparent); }
+.k-C.fin { background: var(--c); color: var(--on-strong); border: 1.5px solid var(--c); }
+.k-C.write { box-shadow: 0 0 0 2.5px var(--fg); }
+.k-C.spadd { box-shadow: 0 0 0 3px var(--sp); }
+.cell.stay { z-index: 1; }
+.k-A.stay { box-shadow: 0 0 0 3px var(--a), 0 0 12px 3px color-mix(in oklab, var(--a) 55%, transparent); }
+.k-B.stay { box-shadow: 0 0 0 3px var(--b), 0 0 12px 3px color-mix(in oklab, var(--b) 55%, transparent); }
+.k-C.stay { box-shadow: 0 0 0 3px var(--c), 0 0 12px 3px color-mix(in oklab, var(--c) 55%, transparent); }
+.cell.dim { opacity: 0.35; }
+.badge { pointer-events: none; border: 2px solid var(--fg); border-radius: 6px; position: relative; opacity: 0.85; }
+.badge span { position: absolute; top: -0.62rem; left: 0.2rem; background: var(--fg); color: var(--bg); font-family: var(--font-mono); font-size: 0.6rem; padding: 0 0.28rem; border-radius: 3px; line-height: 1.1rem; white-space: nowrap; }
+.badge.soft { border-style: dashed; opacity: 0.55; }
+.badge.lit { border-color: var(--sp); } .badge.lit span { background: var(--sp); }
+
+/* ---------- code ---------- */
+.code { font-family: var(--font-mono); font-size: 0.84rem; line-height: 1.55; background: var(--surface-2); border-radius: var(--radius); padding: 0.6rem 0.2rem; margin: 0; overflow-x: auto; min-width: 0; }
+.code .ln { padding: 0 0.7rem; white-space: pre; border-left: 3px solid transparent; }
+.code .ln.inner { background: color-mix(in oklab, var(--fg) 5%, transparent); }
+.code .ln.on { background: color-mix(in oklab, var(--c) 22%, transparent); border-left-color: var(--c); }
+.code .kw { color: var(--muted); }
+.code .val { color: var(--bg); background: var(--fg); border-radius: 3px; padding: 0 0.3rem; margin-left: 0.6rem; font-size: 0.75rem; }
+.code .cm { color: var(--muted); font-style: italic; }
+
+/* ---------- widget chrome ---------- */
+.w { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 0.9rem; display: flex; flex-direction: column; gap: 0.7rem; min-width: 0; }
+.w:focus-visible { outline: 3px solid var(--a); outline-offset: 2px; }
+.w-head { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; }
+.w-title { font-family: var(--font-display); font-weight: 700; font-size: 1rem; margin-right: 0.3rem; }
+.chip { font-family: var(--font-mono); font-size: 0.72rem; padding: 0.12rem 0.5rem; border-radius: 99px; background: var(--surface-2); color: var(--fg); white-space: nowrap; }
+.chip.A { box-shadow: inset 0 0 0 2px var(--a); } .chip.B { box-shadow: inset 0 0 0 2px var(--b); } .chip.C { box-shadow: inset 0 0 0 2px var(--c); }
+.w-body { display: flex; flex-wrap: wrap; gap: 1rem 1.4rem; align-items: flex-start; }
+.w-body > * { min-width: 0; }
+.cap { font-size: 0.9rem; min-height: 2.6em; line-height: 1.45; color: var(--fg); }
+.cap code { background: var(--surface-2); padding: 0 0.25rem; border-radius: 3px; }
+.cap .ok { color: var(--c); font-weight: 700; }
+.w-foot { display: flex; flex-wrap: wrap; gap: 0.6rem 1rem; align-items: center; justify-content: space-between; }
+.counters { display: flex; flex-wrap: wrap; gap: 0.35rem 0.9rem; font-family: var(--font-mono); font-size: 0.78rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+.counters b { color: var(--fg); font-weight: 600; }
+.counters .csp b { color: var(--sp); }
+.controls { display: flex; flex-wrap: wrap; gap: 0.3rem; }
+.btn { font: 600 0.78rem var(--font-body); background: var(--surface-2); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 0.3rem 0.6rem; cursor: pointer; }
+.btn:hover { border-color: var(--fg); }
+.btn:focus-visible { outline: 2px solid var(--a); outline-offset: 1px; }
+.btn.pri { background: var(--fg); color: var(--bg); border-color: var(--fg); }
+.btn[aria-pressed="true"] { background: var(--fg); color: var(--bg); border-color: var(--fg); }
+.seg { display: inline-flex; flex-wrap: wrap; gap: 0.25rem; }
+.reg { font-family: var(--font-mono); font-size: 0.82rem; display: flex; align-items: center; gap: 0.5rem; }
+.reg .box { min-width: 3rem; text-align: center; padding: 0.25rem 0.5rem; border-radius: 6px; border: 2px solid var(--c); font-weight: 700; font-size: 1.05rem; }
+.stack { display: flex; flex-direction: column; gap: 0.6rem; min-width: 0; }
+.pgroup { display: grid; grid-template-columns: repeat(auto-fit, minmax(15.5rem, 1fr)); gap: 0.8rem; }
+.pgroup .w { padding: 0.6rem; }
+.compact { --cell: 1.55rem; }
+.compact .cell { font-size: 0.74rem; }
+.compact .code { font-size: 0.7rem; padding: 0.35rem 0; }
+
+/* core panels, timelines */
+.cores { display: grid; grid-template-columns: repeat(auto-fit, minmax(9.5rem, 1fr)); gap: 0.5rem; }
+.core { border: 1px solid var(--line); border-radius: 8px; padding: 0.45rem 0.55rem; display: flex; flex-direction: column; gap: 0.35rem; background: var(--bg); min-width: 0; }
+.core h5 { margin: 0; font: 700 0.8rem var(--font-display); display: flex; justify-content: space-between; gap: 0.4rem; }
+.core .op { font-family: var(--font-mono); font-size: 0.7rem; color: var(--muted); min-height: 1.1rem; }
+.core.idle { background: repeating-linear-gradient(45deg, var(--surface-2) 0 6px, var(--bg) 6px 12px); }
+.core.spent { opacity: 0.5; }
+.mini { display: grid; gap: 2px; --cell: 1.35rem; }
+.mini .cell { font-size: 0.68rem; }
+.tl-wrap { overflow-x: auto; }
+table.tl { border-collapse: collapse; font-family: var(--font-mono); font-size: 0.72rem; }
+table.tl th, table.tl td { border: 1px solid var(--line); padding: 0.25rem 0.45rem; text-align: center; white-space: nowrap; }
+table.tl th { color: var(--muted); font-weight: 500; }
+table.tl td.now { background: color-mix(in oklab, var(--c) 20%, transparent); }
+table.tl td.done { color: var(--muted); }
+table.tl td.idle { background: repeating-linear-gradient(45deg, var(--surface-2) 0 5px, transparent 5px 10px); color: var(--muted); }
+table.tl td.red { color: var(--sp); font-weight: 600; }
+table.tl td.red.now { background: color-mix(in oklab, var(--sp) 18%, transparent); }
+
+/* hardware pictures */
+.hw { display: flex; flex-wrap: wrap; gap: 1rem; align-items: center; }
+.node { width: 2.4rem; height: 2.4rem; border-radius: 50%; display: grid; place-items: center; font: 700 1.1rem var(--font-mono); border: 2px solid var(--fg); background: var(--surface); }
+.pill { font-family: var(--font-mono); font-weight: 600; padding: 0.35rem 0.6rem; border-radius: 6px; font-size: 0.85rem; }
+.pill.A { background: var(--a); color: var(--on-strong); } .pill.B { background: var(--b); color: var(--on-strong); }
+.pill.C { background: var(--c); color: var(--on-strong); } .pill.Cp { background: var(--cp); color: var(--fg); }
+.arrow { color: var(--muted); font-size: 1.2rem; }
+.imc { display: grid; gap: 3px; align-items: center; justify-items: center; }
+.imc .drv { font-family: var(--font-mono); font-size: 0.72rem; }
+.imc .lab { font-family: var(--font-mono); font-size: 0.66rem; color: var(--muted); }
+.unit { border: 2px solid var(--fg); border-radius: 10px; padding: 0.5rem 0.7rem; display: flex; gap: 0.6rem; align-items: center; flex-wrap: wrap; }
+.unit-lab { font: 700 0.75rem var(--font-display); text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+.terms { display: flex; flex-wrap: wrap; gap: 0.3rem; }
+.term { font-family: var(--font-mono); font-size: 0.74rem; padding: 0.2rem 0.4rem; border-radius: 5px; border: 1px dashed var(--line); color: var(--muted); }
+.term.done { border: 1px solid var(--c); color: var(--fg); background: var(--cp); }
+.term.now { border: 2px solid var(--fg); color: var(--fg); }
+.red-row { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; font-family: var(--font-mono); font-size: 0.8rem; }
+.red-node { border: 2px solid var(--sp); color: var(--sp); border-radius: 6px; padding: 0.2rem 0.45rem; font-weight: 600; }
+.red-node.todo { border-style: dashed; opacity: 0.5; }
+table.mini-tab { border-collapse: collapse; font-size: 0.8rem; font-variant-numeric: tabular-nums; }
+table.mini-tab th, table.mini-tab td { border-bottom: 1px solid var(--line); padding: 0.3rem 0.6rem; text-align: right; }
+table.mini-tab th:first-child, table.mini-tab td:first-child { text-align: left; }
+table.mini-tab tr.cur td { background: color-mix(in oklab, var(--fg) 7%, transparent); font-weight: 600; }
+@media (prefers-reduced-motion: reduce) { .cell { transition: none; } }
+@media (max-width: 520px) { :root { --cell: 1.75rem; } .compact { --cell: 1.4rem; } }
+
+/* ---------- multi-core view ---------- */
+.pv { gap: 0.85rem; }
+.pv-top { display: flex; flex-wrap: wrap; gap: 1rem 1.6rem; align-items: flex-start; }
+.pv-top > .stack { flex: 1 1 18rem; }
+.pv-lab { font: 700 0.72rem var(--font-display); text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin-bottom: -0.35rem; }
+.chip.sp { box-shadow: inset 0 0 0 2px var(--sp); color: var(--sp); }
+.legend { display: flex; flex-wrap: wrap; gap: 0.35rem 0.9rem; font-size: 0.74rem; color: var(--muted); }
+.legend span { display: inline-flex; align-items: center; gap: 0.35rem; }
+.lg { width: 0.9rem; height: 0.9rem; border-radius: 3px; display: inline-block; }
+.lg.read { background: linear-gradient(90deg, var(--a) 50%, var(--b) 50%); }
+.lg.stay { background: var(--surface); box-shadow: 0 0 0 2px var(--fg), 0 0 6px 2px color-mix(in oklab, var(--fg) 40%, transparent); }
+.lg.part { background: var(--cp); }
+.lg.fin { background: var(--c); }
+.lg.scat { background: repeating-linear-gradient(45deg, color-mix(in oklab, var(--sp) 30%, var(--surface)) 0 3px, var(--surface) 3px 6px); border: 1.5px dashed var(--sp); }
+.k-C.scat { background: repeating-linear-gradient(45deg, color-mix(in oklab, var(--sp) 22%, var(--surface)) 0 4px, var(--surface) 4px 8px); border: 1.5px dashed var(--sp); color: var(--sp); font-size: 0.72rem; }
+.cell.hov { outline: 2.5px dashed var(--fg); outline-offset: 1px; z-index: 2; }
+.badge.tag { border: 2px solid var(--fg); opacity: 1; }
+.badge.tag span { top: auto; bottom: -0.55rem; left: auto; right: -0.2rem; font-size: 0.58rem; line-height: 0.95rem; z-index: 3; }
+.floor { display: grid; grid-template-columns: repeat(auto-fill, minmax(15.5rem, 1fr)); gap: 0.6rem; padding: 0.6rem; border-radius: 12px; background: var(--surface-2); border: 1px solid var(--line); }
+.corebox { background: var(--surface); border: 2px solid var(--fg); border-radius: 9px; padding: 0.5rem 0.6rem; display: flex; flex-direction: column; gap: 0.4rem; min-width: 0; min-height: 5.5rem; }
+.corebox h5 { margin: 0; font: 700 0.85rem var(--font-display); display: flex; justify-content: space-between; gap: 0.5rem; }
+.corebox .muted, .muted { color: var(--muted); font-weight: 500; font-family: var(--font-mono); font-size: 0.7rem; }
+.corebox .op { font-size: 0.78rem; color: var(--muted); }
+.corebox.idle { border-style: dashed; border-color: var(--line); background: repeating-linear-gradient(45deg, var(--surface-2) 0 7px, var(--surface) 7px 14px); }
+.cb-row { display: flex; align-items: center; gap: 0.35rem; flex-wrap: wrap; }
+.cb-blk { display: flex; flex-direction: column; gap: 0.15rem; }
+.cb-l { font: 500 0.62rem var(--font-mono); color: var(--muted); white-space: nowrap; }
+.corebox .mini { --cell: 1.25rem; }
+.corebox .mini .cell { font-size: 0.64rem; border-radius: 3px; }
+.gantt-wrap { overflow-x: auto; padding-bottom: 0.2rem; }
+.gantt { display: grid; gap: 4px 3px; align-items: stretch; position: relative; min-width: min-content; }
+.g-wave { font: 700 0.72rem var(--font-display); text-transform: uppercase; letter-spacing: 0.06em; text-align: center; padding: 0.2rem; border-bottom: 2px solid var(--fg); }
+.g-wave.sp { color: var(--sp); border-bottom-color: var(--sp); }
+.g-num { font: 500 0.62rem var(--font-mono); color: var(--muted); text-align: center; }
+.g-lab { font: 600 0.72rem var(--font-mono); display: flex; align-items: center; }
+.g-lab.sp { color: var(--sp); }
+.g-band { background: color-mix(in oklab, var(--fg) 4%, transparent); border-radius: 6px; }
+.g-band.alt { background: color-mix(in oklab, var(--fg) 9%, transparent); }
+.bar { position: relative; height: 2.1rem; border-radius: 6px; overflow: hidden; display: flex; align-items: center; justify-content: center; margin: 0 2px; cursor: default; }
+.bar .fill { position: absolute; inset: 0 auto 0 0; width: 0; transition: width .25s; }
+.bar .bt { position: relative; font: 600 0.7rem var(--font-mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding: 0 0.3rem; }
+.bar.f-os { background: color-mix(in oklab, var(--c) 18%, var(--surface)); } .bar.f-os .fill { background: color-mix(in oklab, var(--c) 55%, var(--surface)); }
+.bar.f-ws { background: color-mix(in oklab, var(--b) 18%, var(--surface)); } .bar.f-ws .fill { background: color-mix(in oklab, var(--b) 55%, var(--surface)); }
+.bar.f-is { background: color-mix(in oklab, var(--a) 18%, var(--surface)); } .bar.f-is .fill { background: color-mix(in oklab, var(--a) 50%, var(--surface)); }
+.bar.idle { background: repeating-linear-gradient(45deg, var(--surface-2) 0 6px, var(--surface) 6px 12px); border: 1.5px dashed var(--line); color: var(--muted); }
+.bar.red { background: color-mix(in oklab, var(--sp) 14%, var(--surface)); color: var(--sp); } .bar.red .fill { background: color-mix(in oklab, var(--sp) 40%, var(--surface)); }
+.bar.now { box-shadow: 0 0 0 2px var(--fg); }
+.bar.hovme { box-shadow: 0 0 0 3px var(--fg); }
+.bar.sib { box-shadow: 0 0 0 3px var(--sp); }
+.bar:focus-visible { outline: 3px solid var(--a); }
+.g-cursor { border: 2px solid var(--fg); border-radius: 6px; pointer-events: none; z-index: 2; background: color-mix(in oklab, var(--fg) 6%, transparent); }
+.scrub { display: flex; align-items: center; gap: 0.5rem; font: 500 0.72rem var(--font-mono); color: var(--muted); }
+.scrub input { flex: 1; min-width: 8rem; accent-color: var(--c); }
+.w-foot .right { align-items: stretch; flex: 0 1 auto; }
+.pv-knobs { display: flex; flex-wrap: wrap; gap: 0.5rem 1.2rem; }
+.seg-l { font: 600 0.72rem var(--font-body); text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); align-self: center; margin-right: 0.2rem; }
+.triple.dense { --cell: 1.6rem; }
+.triple.dense .cell { font-size: 0.72rem; }
+.compact .floor { grid-template-columns: repeat(auto-fill, minmax(14rem, 1fr)); }
+
+/* ---------- split-K memory + weight sets ---------- */
+.tm { color: var(--mem); font-weight: 600; }
+.chip.mem { box-shadow: inset 0 0 0 2px var(--mem); color: var(--mem); }
+.counters .cmem b { color: var(--mem); }
+.lg.memw { background: var(--cp); box-shadow: 0 0 0 2px var(--mem); }
+.lg.memr { background: var(--surface); box-shadow: 0 0 0 2px var(--mem); border: 1px dashed var(--mem); }
+.lg.load { background: color-mix(in oklab, var(--b) 18%, var(--surface)); border: 1.5px dashed var(--b); }
+.k-C.memw { box-shadow: 0 0 0 2.5px var(--mem); }
+.k-C.memr { box-shadow: 0 0 0 2.5px var(--mem), 0 0 10px 2px color-mix(in oklab, var(--mem) 45%, transparent); }
+.membox { display: flex; flex-wrap: wrap; gap: 1rem 1.6rem; padding: 0.7rem 0.8rem; border-radius: 12px; border: 2px solid var(--mem); background: color-mix(in oklab, var(--mem) 6%, var(--surface)); }
+.membox .mat-title b { color: var(--mem); }
+.bar.mem { background: color-mix(in oklab, var(--mem) 14%, var(--surface)); color: var(--mem); } .bar.mem .fill { background: color-mix(in oklab, var(--mem) 35%, var(--surface)); }
+.bar.mem2 { background: color-mix(in oklab, var(--mem) 22%, var(--surface)); color: var(--mem); } .bar.mem2 .fill { background: color-mix(in oklab, var(--mem) 50%, var(--surface)); }
+.g-wave.mem { color: var(--mem); border-bottom-color: var(--mem); }
+.g-lab.mem { color: var(--mem); }
+.wscore { display: flex; flex-wrap: wrap; align-items: center; gap: 0.6rem; padding: 0.7rem; border: 2px solid var(--fg); border-radius: 12px; background: var(--surface); }
+.ws-io { display: flex; flex-direction: column; gap: 0.25rem; align-items: flex-start; }
+.ws-slots { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+.slot { border: 2px solid var(--line); border-radius: 9px; padding: 0.35rem 0.45rem; display: flex; flex-direction: column; gap: 0.3rem; min-width: 5.4rem; background: var(--bg); }
+.slot-h { display: flex; justify-content: space-between; gap: 0.4rem; font: 500 0.7rem var(--font-mono); }
+.slot-h b { font-family: var(--font-display); }
+.slot-s { font-size: 0.7rem; color: var(--muted); }
+.slot.on { border-color: var(--b); box-shadow: 0 0 12px 2px color-mix(in oklab, var(--b) 45%, transparent); }
+.slot.on .slot-s { color: var(--b); font-weight: 600; }
+.slot.loading { border: 2px dashed var(--b); background: color-mix(in oklab, var(--b) 7%, var(--bg)); }
+.slot.loading .slot-s { color: var(--b); }
+.slot.empty, .slot.used { opacity: 0.6; }
+.wscore .mini { --cell: 1.5rem; }
+.wscore .mini .cell { font-size: 0.72rem; }
+.cell.ghost { opacity: 0.35; }
+.k-B.stayq { box-shadow: 0 0 0 2px color-mix(in oklab, var(--b) 60%, transparent); }
+.badge.tag.ld { border-style: dashed; border-color: var(--b); }
+.badge.tag.ld span { background: var(--b); }
+.ws-port { font: 0.8rem var(--font-mono); padding: 0.3rem 0.5rem; border-radius: 6px; background: var(--surface-2); }
+.tl-box { display: flex; flex-direction: column; gap: 0.3rem; padding: 0.5rem 0.6rem; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); }
+.tl-box.anim { border: 2px solid var(--fg); }
+.tl-title { font-size: 0.85rem; }
+.bar.wld { background: color-mix(in oklab, var(--b) 12%, var(--surface)); border: 1.5px dashed var(--b); } .bar.wld .fill { background: color-mix(in oklab, var(--b) 35%, var(--surface)); }
+.bar.wcp { background: color-mix(in oklab, var(--c) 16%, var(--surface)); } .bar.wcp .fill { background: color-mix(in oklab, var(--c) 50%, var(--surface)); }
+.bar.wait { background: repeating-linear-gradient(45deg, color-mix(in oklab, var(--sp) 14%, var(--surface)) 0 5px, var(--surface) 5px 10px); color: var(--sp); border: 1.5px dashed color-mix(in oklab, var(--sp) 50%, var(--line)); }
+.bar .fill { pointer-events: none; }
+.g-end { font: 700 0.72rem var(--font-mono); color: var(--c); display: flex; align-items: center; padding-left: 0.3rem; }
+table.rule td.mem { color: var(--mem); font-weight: 600; }
+
+html, body { height: 100%; }
+.deck { height: 100%; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; }
+.top, .bot { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 0.55rem clamp(16px, 3vw, 2rem); border-bottom: 1px solid var(--line); background: var(--surface); }
+.bot { border-bottom: none; border-top: 1px solid var(--line); flex-wrap: wrap; }
+.top .name { font: 700 0.95rem var(--font-display); }
+.top .sec { font: 500 0.8rem var(--font-mono); color: var(--muted); }
+.stage { overflow: auto; }
+.slide { display: none; flex-direction: column; gap: 1rem; max-width: 76rem; margin: 0 auto; padding-inline: clamp(16px, 4vw, 3rem); padding-block: 1.4rem 2.2rem; }
+.slide.on { display: flex; animation: sin .28s ease-out; }
+@keyframes sin { from { opacity: 0; transform: translateX(10px); } to { opacity: 1; transform: none; } }
+.slide h2 { font: 700 clamp(1.5rem, 3.2vw, 2.3rem)/1.1 var(--font-display); margin: 0; letter-spacing: -0.015em; text-wrap: balance; }
+.slide p { margin: 0; line-height: 1.5; font-size: clamp(1rem, 1.6vw, 1.15rem); max-width: 60ch; }
+.slide p.small { font-size: 0.9rem; color: var(--muted); }
+.slide p.big { font-size: clamp(1.15rem, 2vw, 1.4rem); }
+.b { opacity: 0; transform: translateY(8px); transition: opacity .3s, transform .3s; }
+.b.shown { opacity: 1; transform: none; }
+tr.b { transform: none; }
+.split { display: flex; flex-wrap: wrap; gap: 1.5rem 2.5rem; align-items: flex-start; }
+.split > * { min-width: 0; flex: 1 1 20rem; }
+.split > [data-widget] { flex: 0 1 auto; }
+.points { display: flex; flex-direction: column; gap: 0.8rem; }
+.points.wide p { max-width: 62ch; }
+.title-slide { justify-content: center; min-height: 100%; gap: 1.2rem; }
+.title-slide h1 { font: 800 clamp(3rem, 10vw, 6.5rem)/0.95 var(--font-display); letter-spacing: -0.04em; margin: 0; }
+.eyebrow { font: 600 0.85rem var(--font-mono) !important; color: var(--muted); }
+.formula { font: 600 clamp(1.2rem, 3vw, 2rem) var(--font-mono) !important; }
+.lede { font-size: clamp(1.05rem, 2vw, 1.3rem) !important; max-width: 52ch !important; }
+.keys { display: flex; flex-wrap: wrap; gap: 0.5rem 1.2rem; font-size: 0.85rem; color: var(--muted); }
+kbd { font: 600 0.75rem var(--font-mono); border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 0 0.35rem; background: var(--surface); color: var(--fg); }
+.tw { overflow-x: auto; }
+table.rule { border-collapse: collapse; font-size: clamp(0.85rem, 1.4vw, 1rem); }
+table.rule th { text-align: left; font: 600 0.72rem var(--font-body); text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); border-bottom: 2px solid var(--line); padding: 0.5rem 0.8rem; }
+table.rule td { border-bottom: 1px solid var(--line); padding: 0.55rem 0.8rem; vertical-align: top; }
+table.rule code { background: var(--surface-2); padding: 0.05rem 0.3rem; border-radius: 4px; }
+table.cheat { font-size: 0.82rem; }
+table.cheat td, table.cheat th { padding: 0.4rem 0.6rem; }
+.stay-a, .stay-b, .stay-c { font-family: var(--font-mono); font-weight: 600; padding: 0 0.3rem; border-radius: 4px; white-space: nowrap; }
+.stay-a { box-shadow: 0 0 0 2px var(--a); color: var(--a); } .stay-b { box-shadow: 0 0 0 2px var(--b); color: var(--b); } .stay-c { box-shadow: 0 0 0 2px var(--c); color: var(--c); }
+.navb { display: flex; gap: 0.4rem; align-items: center; }
+.count { font: 500 0.8rem var(--font-mono); color: var(--muted); min-width: 4.5rem; text-align: center; }
+.prog { flex: 1 1 12rem; display: flex; gap: 3px; min-width: 0; }
+.prog i { flex: 1; height: 5px; border-radius: 3px; background: var(--line); cursor: pointer; }
+.prog i.done { background: color-mix(in oklab, var(--c) 50%, var(--line)); }
+.prog i.cur { background: var(--c); }
+.hint { font-size: 0.75rem; color: var(--muted); }
+@media (prefers-reduced-motion: reduce) { .slide.on { animation: none; } .b { transition: none; } }
+/* Attention's own matrices and states, on the shared tokens: Q is the blue operand (--a), K and V the
+   orange ones (--b), O the green result (--c); the score matrix S takes violet (--mem) when it is
+   computed or stored and magenta (--sp) while the vector unit softmaxes it. */
+.att-grid { display: grid; grid-template-columns: auto auto auto; grid-template-areas: "x k y" "q s o" "z v w"; gap: 0.6rem 0.8rem; align-items: end; justify-items: start; }
+.att-grid > .g-k { grid-area: k; } .att-grid > .g-v { grid-area: v; align-self: start; }
+.att-grid > .g-q { grid-area: q; align-self: start; justify-self: end; }
+.att-grid > .g-s { grid-area: s; align-self: start; } .att-grid > .g-o { grid-area: o; align-self: start; }
+.att-grid.dense { --cell: 1.6rem; } .att-grid.dense .cell { font-size: 0.66rem; }
+.att .cell { font-size: 0.74rem; }
+.k-Q { background: color-mix(in oklab, var(--a) 11%, var(--surface)); color: var(--fg); }
+.k-Q.read { background: var(--a); color: var(--on-strong); }
+.k-K, .k-V { background: color-mix(in oklab, var(--b) 12%, var(--surface)); color: var(--fg); }
+.k-K.read, .k-V.read { background: var(--b); color: var(--on-strong); }
+.k-O { background: var(--surface); border: 1.5px dashed var(--line); color: var(--muted); }
+.k-O.part { background: var(--cp); color: var(--fg); border: 1.5px solid color-mix(in oklab, var(--c) 45%, transparent); }
+.k-O.fin { background: var(--c); color: var(--on-strong); border: 1.5px solid var(--c); }
+.k-O.write, .k-S.write { box-shadow: 0 0 0 2.5px var(--fg); }
+.k-S { background: var(--surface); border: 1.5px dashed var(--line); color: var(--muted); }
+.k-S.s-mem { background: color-mix(in oklab, var(--mem) 22%, var(--surface)); color: var(--fg); border: 1.5px solid color-mix(in oklab, var(--mem) 55%, transparent); }
+.k-S.read-s { box-shadow: 0 0 0 2.5px var(--mem); }
+.k-S.s-gone { background: repeating-linear-gradient(45deg, var(--surface-2) 0 3px, var(--surface) 3px 6px); border: 1.5px dashed var(--muted); color: transparent; }
+.k-S.s-live { background: color-mix(in oklab, var(--mem) 40%, var(--surface)); color: var(--fg); border: 1.5px solid var(--mem); }
+.k-S.s-soft { background: color-mix(in oklab, var(--sp) 30%, var(--surface)); color: var(--fg); border: 1.5px solid var(--sp); }
+.lg.s-live { background: color-mix(in oklab, var(--mem) 40%, var(--surface)); border: 1.5px solid var(--mem); }
+.lg.s-soft { background: color-mix(in oklab, var(--sp) 30%, var(--surface)); border: 1.5px solid var(--sp); }
+.lg.s-gone { background: repeating-linear-gradient(45deg, var(--surface-2) 0 3px, var(--surface) 3px 6px); border: 1.5px dashed var(--muted); }
+.lg.s-mem { background: color-mix(in oklab, var(--mem) 22%, var(--surface)); border: 1.5px solid var(--mem); }
+.counters .cm b { color: var(--mem); }
+.att-head { font-size: 0.85rem; color: var(--muted); } .att-head b { color: var(--fg); }
+.att-run table.runtab { border-collapse: collapse; font: 0.78rem var(--font-mono); margin-top: 0.4rem; }
+.att-run th { text-align: left; font: 600 0.66rem var(--font-body); text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); padding: 0.15rem 0.5rem; border-bottom: 1px solid var(--line); }
+.att-run td { padding: 0.12rem 0.5rem; border-bottom: 1px solid var(--line); }
+.g-num.ph-qk, .g-num.ph-pv { color: var(--mem); } .g-num.ph-sm { color: var(--sp); } .g-num.ph-norm { color: var(--c); }
+.kl code, .ksec code { font: 500 0.68rem var(--font-mono); text-transform: none; letter-spacing: 0; color: var(--muted); }
+.ts { color: var(--mem); font-weight: 600; } .tv { color: var(--b); font-weight: 600; } .tq { color: var(--a); font-weight: 600; }
+</style>
+</head>
+<body>
+<div class="deck"><header class="top"><span class="name">Attention, blocked</span><span class="sec" id="sec"></span></header><main class="stage"><section class="slide title-slide" data-sec="Start">
+  <p class="eyebrow">One formula · the blocks that make it fast</p>
+  <h1>Attention, blocked</h1>
+  <p class="formula"><span class="tc">O</span> = softmax(<span class="ta">Q</span> <span class="tb">K</span>ᵀ / √d) <span class="tb">V</span></p>
+  <p class="lede">FlashAttention computes exactly this — the same multiplies, the same exps — without ever storing the score matrix. This deck builds it up from the textbook formula, one idea per slide.</p>
+  <div class="keys">
+    <span><kbd>→</kbd> next build or animation step</span><span><kbd>↓</kbd> next row / block</span><span><kbd>←</kbd> back</span>
+    <span><kbd>PgDn</kbd> / <kbd>N</kbd> next slide</span><span><kbd>P</kbd> play</span><span><kbd>E</kbd> finish animation</span>
+  </div>
+</section>
+
+<section class="slide" data-sec="The formula">
+  <h2>Three steps, one head</h2>
+  <div class="points">
+    <p class="b"><b>Scores.</b> Every query row against every key: <code>S = Q Kᵀ / √d</code>. Q is Sq × d, K is Skv × d, so S is Sq × Skv.</p>
+    <p class="b"><b>Probabilities.</b> Each row of S through a softmax: subtract the row's max, exponentiate, divide by the row's sum.</p>
+    <p class="b"><b>Mix.</b> <code>O = P V</code>: each output row is a probability-weighted mix of the value rows. O is Sq × d, like Q.</p>
+    <p class="b small">Both S = QKᵀ and O = PV are matmuls — the ones the matmul deck rearranges. What is new is the softmax between them.</p>
+  </div>
+</section>
+
+<section class="slide" data-sec="Plain attention">
+  <h2>Done the obvious way</h2>
+  <p>One query row per step: its scores go to memory, come back for the softmax, the probabilities go to memory, come back for O. Watch the violet counters.</p>
+  <div data-widget='{"type":"naive"}'></div>
+</section>
+
+<section class="slide" data-sec="Why S is stored">
+  <h2>Softmax needs the whole row</h2>
+  <div class="points">
+    <p class="b">A softmax divides by the <b>sum</b> of its row, after subtracting the row's <b>max</b>. Neither is known until every score of the row exists.</p>
+    <p class="b">So plain attention keeps all of S: <b>Sq × Skv</b> numbers, then as many probabilities. At 4096 tokens that is 16.8 million scores per head — memory traffic, not arithmetic, sets the time.</p>
+    <p class="b big">The fix: do not wait for the row. Keep a <b>running</b> max and a <b>running</b> sum.</p>
+  </div>
+</section>
+
+<section class="slide" data-sec="Online softmax">
+  <h2>Online softmax, one key at a time</h2>
+  <div class="split">
+    <div class="points">
+      <p class="b">Keep, per query row, <b>m</b> (the largest score so far) and <b>l</b> (the sum of exp(score − m) so far), and O unnormalised.</p>
+      <p class="b">A new score s: <code>m′ = max(m, s)</code>. Everything kept so far was weighted with e<sup>−m</sup>, so multiply l and O by <b>e<sup>m−m′</sup></b>, then add the new term.</p>
+      <p class="b">At the end, <code>O = O / l</code> — exactly the softmax. Nothing was stored but m, l and O.</p>
+    </div>
+  </div>
+  <div data-widget='{"type":"flash","S":1,"T":4,"Br":1,"Bc":1,"cores":1,"seed":16,"d":2}'></div>
+</section>
+
+<section class="slide" data-sec="Blocks of keys">
+  <h2>Keys in blocks of Bc</h2>
+  <p>Take keys Bc at a time: one small matmul for the scores, one softmax update, one small matmul into O. The rescale happens once per block after the first — bigger blocks, fewer rescales, a bigger S block on chip. <code>bwz attention --bc</code>.</p>
+  <div data-widget='{"type":"flash","S":1,"T":8,"Br":1,"Bc":2,"cores":1,"seed":28,"knobs":[{"k":"Bc","v":[1,2,4,8]}]}'></div>
+</section>
+
+<section class="slide" data-sec="Blocks of queries">
+  <h2>Queries in blocks of Br: programs</h2>
+  <p>A <b>program</b> owns Br rows of Q and their O, and streams every key block past them. Each block of S is Br × Bc and never leaves the core. <code>bwz attention --br</code>.</p>
+  <div data-widget='{"type":"flash","S":4,"T":4,"Br":2,"Bc":2,"cores":1,"knobs":[{"k":"Br","v":[1,2,4]}]}'></div>
+</section>
+
+<section class="slide" data-sec="Cores and waves">
+  <h2>Programs on cores, in waves</h2>
+  <p>Programs share only K and V, so they run on different cores at once, dealt round-robin: core c takes program <code>wave · cores + c</code>. Every busy core does the same phase on its own rows.</p>
+  <div data-widget='{"type":"flash","S":4,"T":4,"Br":1,"Bc":2,"cores":2,"knobs":[{"k":"cores","v":[1,2,3,4]}]}'></div>
+</section>
+
+<section class="slide" data-sec="Inside a block">
+  <h2>Inside a block: S = Q<sub>i</sub>K<sub>j</sub>ᵀ is a matmul</h2>
+  <p>M = Br, K = d, N = Bc — drawn by the matmul deck's own view. os keeps a block of S and sweeps d inside it; ws and is cut d over the grid and leave pieces to add. <code>bwz attention --stationarity</code>.</p>
+  <div data-widget='{"type":"inner","S":4,"T":4,"d":4,"Br":4,"Bc":4,"tile":2,"qk":"os","knobs":[{"k":"qk","v":["os","ws","is"]}]}'></div>
+</section>
+
+<section class="slide" data-sec="Inner dataflow">
+  <h2>What the inner dataflow costs</h2>
+  <div class="points">
+    <p class="b">On a GPU tensor core there is no accumulator that keeps K's pieces in place: ws and is leave <b>(slices − 1) · M · N</b> partial sums per inner matmul for the vector unit. os leaves none.</p>
+    <p class="b">S = QKᵀ is cut along d; O += PV is cut along Bc. A bigger Bc means fewer rescales but, under ws, more pieces of P·V to add.</p>
+    <p class="b small"><code>bwz attention</code> costs every block size under every dataflow the unit declares and keeps the cheapest — on A100 that is os, on Metis ws, whose periphery adds the pieces for free.</p>
+  </div>
+  <div data-widget='{"type":"flash","S":4,"T":4,"d":4,"Br":2,"Bc":2,"cores":2,"tile":2,"qk":"ws","pv":"ws","knobs":[{"k":"qk","v":["os","ws","is"]},{"k":"tile","v":[1,2]}]}'></div>
+</section>
+
+<section class="slide" data-sec="Heads and batch">
+  <h2>Heads and batch: more programs, nothing shared</h2>
+  <p>Every (batch, head) has its own Q, K and V, so both simply multiply the programs. Unlike a projection, where a batch reuses the weights, nothing is reused here: K and V bytes grow with batch × heads.</p>
+  <div data-widget='{"type":"flash","S":2,"T":4,"Br":2,"Bc":2,"heads":2,"batch":2,"cores":4,"knobs":[{"k":"heads","v":[1,2,4]},{"k":"batch","v":[1,2]}]}'></div>
+</section>
+
+<section class="slide" data-sec="Re-reads">
+  <h2>A head across two waves reads K and V twice</h2>
+  <p>K and V are fetched once per wave and shared by the programs of that head in the wave. 3 heads × 3 programs on 4 cores: heads 1 and 2 straddle a wave boundary, so their K and V cross memory twice — the magenta counter.</p>
+  <div data-widget='{"type":"flash","S":6,"T":4,"Br":2,"Bc":2,"heads":3,"cores":4,"knobs":[{"k":"cores","v":[3,4,9]}]}'></div>
+</section>
+
+<section class="slide" data-sec="Never stored">
+  <h2>The point: S never leaves the core</h2>
+  <div class="tw"><table class="rule">
+    <tr><th></th><th>plain attention</th><th>FlashAttention</th></tr>
+    <tr class="b"><td>multiplies</td><td>2·Sq·Skv·d</td><td>2·Sq·Skv·d</td></tr>
+    <tr class="b"><td>exp()</td><td>Sq·Skv</td><td>Sq·Skv</td></tr>
+    <tr class="b"><td>S and P through memory</td><td class="tm">4·Sq·Skv</td><td>0</td></tr>
+    <tr class="b"><td>extra vector work</td><td>—</td><td>Sq·d per key block after the first</td></tr>
+  </table></div>
+  <p class="b">Same arithmetic, a little more vector work, and the Sq × Skv traffic gone. That is why it is fast.</p>
+</section>
+
+<section class="slide" data-sec="The flags">
+  <h2>Every knob is a <code>bwz attention</code> flag</h2>
+  <div class="tw"><table class="rule cheat">
+    <tr><th>flag</th><th>here</th><th>what it is</th></tr>
+    <tr><td><code>-S</code>, <code>--kv-len</code></td><td>queries, keys</td><td>rows of Q; rows of K and V</td></tr>
+    <tr><td><code>--head-dim</code></td><td>d</td><td>one head's width — the contraction of QKᵀ</td></tr>
+    <tr><td><code>--heads</code>, <code>--batch</code></td><td>heads, batch</td><td>independent programs, nothing shared</td></tr>
+    <tr><td><code>--br</code></td><td>Br</td><td>query rows per program</td></tr>
+    <tr><td><code>--bc</code></td><td>Bc</td><td>keys per block; one rescale per block after the first</td></tr>
+    <tr><td><code>--stationarity</code></td><td>flow</td><td>the inner matmuls' dataflow</td></tr>
+  </table></div>
+  <p class="small">Leave Br, Bc and the flow out and <code>bwz attention</code> chooses them by costing every combination; <code>--emit</code> writes the plan as a program that walks it, <code>--timeline</code> and <code>--animate</code> draw it.</p>
+</section>
+
+<section class="slide title-slide" data-sec="End">
+  <h1>Same arithmetic, no S</h1>
+  <p class="lede">Open the notebook to turn every knob yourself, or run <code>bwz attention --emit</code> to get the same walk as a program on real chip numbers.</p>
+</section>
+</main><footer class="bot"><div class="navb"><button class="btn" id="bprev" type="button" aria-label="Back (←)">◀ Back</button><span class="count" id="cnt"></span><button class="btn pri" id="bnext" type="button" aria-label="Next build or step (→)">Next ▶</button><button class="btn" id="bskip" type="button" aria-label="Next slide (PgDn)">Next slide ⇥</button></div><div class="prog" id="prog"></div><span class="hint">→ step · ↓ inner loop · PgDn slide · P play</span></footer></div><script>/* General matmul simulator: any M, N, K (up to 8), any tiling, any loop order, any number of cores.
+   Used by the lab page and by the multi-core slides of the deck. Every view replays from scratch,
+   so the counters are always the real ones. */
+(function (global) {
+  'use strict';
+  const rng = (n) => Array.from({ length: n }, (_, i) => i);
+  const zeros = (r, c) => rng(r).map(() => rng(c).map(() => 0));
+  const EXA = [[1, 2, 0, 3], [0, 1, 2, 1], [3, 0, 1, 2], [2, 1, 3, 0]];
+  const EXB = [[2, 0, 1, 3], [1, 3, 0, 2], [0, 1, 2, 1], [3, 2, 1, 0]];
+  const STAY = { k: 'C', i: 'B', j: 'A' };
+  const SHORT = { C: 'os', B: 'ws', A: 'is' };
+  const STATN = { C: 'output-stationary', B: 'weight-stationary', A: 'input-stationary' };
+  const FORM = { ijk: 'inner product', jik: 'inner product', ikj: 'row-wise (Gustavson)', jki: 'column-wise', kij: 'outer product', kji: 'outer product' };
+  const BV = { i: 'mt', j: 'nt', k: 'kt' };
+  const DIM = { i: 'M', j: 'N', k: 'K' };
+  const IDX = { A: ['i', 'k'], B: ['k', 'j'], C: ['i', 'j'] };
+  const ORDERS = ['ijk', 'jik', 'ikj', 'kij', 'jki', 'kji'];
+  const key = (i, j) => i + ',' + j;
+
+  function lcg(seed) { let s = (seed * 2654435761) >>> 0 || 1; return () => ((s = (Math.imul(s, 1664525) + 1013904223) >>> 0) / 4294967296); }
+  function problem(M, N, K, seed) {
+    let A, B;
+    if (!seed && M === 4 && N === 4 && K === 4) { A = EXA.map((r) => r.slice()); B = EXB.map((r) => r.slice()); }
+    else {
+      const r = lcg(seed || 7);
+      A = rng(M).map(() => rng(K).map(() => Math.floor(r() * 4)));
+      B = rng(K).map(() => rng(N).map(() => Math.floor(r() * 4)));
+    }
+    const REF = rng(M).map((i) => rng(N).map((j) => rng(K).reduce((s, k) => s + A[i][k] * B[k][j], 0)));
+    return { M, N, K, A, B, REF, seed: seed || 0 };
+  }
+  const divisors = (n) => rng(n).map((x) => x + 1).filter((d) => n % d === 0);
+  function newAcc(P) { return { C: zeros(P.M, P.N), T: zeros(P.M, P.N), mul: 0, add: 0, part: 0, maxPart: 0 }; }
+  function apply(P, s, i, j, k) {
+    const a = P.A[i][k], b = P.B[k][j], p = a * b, old = s.C[i][j], first = s.T[i][j] === 0;
+    if (!first) s.add++;
+    s.C[i][j] = old + p; s.T[i][j]++; s.mul++;
+    if (first && P.K > 1) s.part++;
+    if (s.T[i][j] === P.K && P.K > 1) s.part--;
+    if (s.part > s.maxPart) s.maxPart = s.part;
+    return { i, j, k, a, b, p, old, nw: old + p, terms: s.T[i][j], first };
+  }
+  function eqRef(P, C) { return C.every((r, i) => r.every((x, j) => x === P.REF[i][j])); }
+
+  // ---------------- DOM helpers ----------------
+  function el(tag, cls, html) { const e = document.createElement(tag); if (cls) e.className = cls; if (html != null) e.innerHTML = html; return e; }
+  function btn(label, title, fn, pri) { const b = el('button', 'btn' + (pri ? ' pri' : ''), label); b.type = 'button'; b.title = title; b.setAttribute('aria-label', title); b.addEventListener('click', fn); return b; }
+  function addCls(map, k0, c) { map[k0] = map[k0] ? map[k0] + ' ' + c : c; }
+  function counters(items) { return items.map((x) => '<span class="' + (x.cls || '') + '">' + x.label + ' <b>' + x.value + '</b></span>').join(''); }
+
+  function Mat(kind, rows, cols, opt) {
+    opt = opt || {};
+    this.rows = rows; this.cols = cols; this.rb = opt.rb || rows; this.cb = opt.cb || cols;
+    this.root = el('div', 'mat m-' + kind + (opt.cls ? ' ' + opt.cls : ''));
+    const rv = opt.rv || IDX[kind][0], cv = opt.cv || IDX[kind][1];
+    this.root.appendChild(el('div', 'mat-title', '<b>' + (opt.title || kind) + '</b><span>' + (opt.dims || rows + '×' + cols) + '</span>'));
+    const g = el('div', 'mat-grid'); g.style.gridTemplateColumns = 'auto repeat(' + cols + ', auto)'; this.grid = g;
+    const put = (e, r, c) => { e.style.gridRow = String(r); e.style.gridColumn = String(c); g.appendChild(e); return e; };
+    put(el('div', 'mh corner', rv + '\\' + cv), 1, 1);
+    this.colH = []; this.rowH = []; this.cells = [];
+    const bl = (c) => (this.cb < this.cols && c % this.cb === 0 && c > 0 ? ' bl' : '');
+    const bt = (r) => (this.rb < this.rows && r % this.rb === 0 && r > 0 ? ' bt' : '');
+    for (let c = 0; c < cols; c++) { const h = el('div', 'mh' + bl(c), String(c)); this.colH.push(h); put(h, 1, c + 2); }
+    for (let r = 0; r < rows; r++) {
+      const h = el('div', 'mh' + bt(r), String(r)); this.rowH.push(h); put(h, r + 2, 1);
+      const row = [];
+      for (let c = 0; c < cols; c++) {
+        const x = el('div', 'cell'); x.dataset.base = 'cell k-' + kind + bl(c) + bt(r); x.className = x.dataset.base;
+        if (opt.vals) x.textContent = opt.vals[r][c];
+        row.push(x); put(x, r + 2, c + 2);
+      }
+      this.cells.push(row);
+    }
+    this.badges = []; this.root.appendChild(g);
+  }
+  Mat.prototype.paint = function (cls, text) {
+    for (let r = 0; r < this.rows; r++) for (let c = 0; c < this.cols; c++) {
+      const x = this.cells[r][c], ex = cls[key(r, c)] || '', want = x.dataset.base + (ex ? ' ' + ex : '');
+      if (x.className !== want) x.className = want;
+      if (text) { const t = text(r, c); if (x.textContent !== t) x.textContent = t; }
+    }
+  };
+  Mat.prototype.heads = function (rs, cs) {
+    this.rowH.forEach((h, r) => h.classList.toggle('on', !!rs && rs.indexOf(r) >= 0));
+    this.colH.forEach((h, c) => h.classList.toggle('on', !!cs && cs.indexOf(c) >= 0));
+  };
+  Mat.prototype.badge = function (r0, c0, rs, cs, text, cls) {
+    const b = el('div', 'badge' + (cls ? ' ' + cls : ''), text ? '<span>' + text + '</span>' : '');
+    b.style.gridRow = (2 + r0) + ' / span ' + rs; b.style.gridColumn = (2 + c0) + ' / span ' + cs;
+    this.grid.appendChild(b); this.badges.push(b); return b;
+  };
+  Mat.prototype.clearBadges = function () { this.badges.forEach((b) => b.remove()); this.badges = []; };
+
+  function Triple(P, t, note) {
+    this.root = el('div', 'triple');
+    const big = Math.max(P.M, P.N, P.K);
+    if (big > 6) this.root.classList.add('dense');
+    this.A = new Mat('A', P.M, P.K, { vals: P.A, rb: t.tm, cb: t.tk, dims: P.M + '×' + P.K + ' (M×K)' });
+    this.B = new Mat('B', P.K, P.N, { vals: P.B, rb: t.tk, cb: t.tn, dims: P.K + '×' + P.N + ' (K×N)' });
+    this.C = new Mat('C', P.M, P.N, { rb: t.tm, cb: t.tn, dims: P.M + '×' + P.N + ' (M×N)' });
+    this.root.append(el('div', 'tx', note || 'C = A @ B'), this.B.root, this.A.root, this.C.root);
+  }
+
+  // ---------------- stepping mixin ----------------
+  const Step = {
+    step() { if (this.t < this.n) { this.go(this.t + 1); return true; } return false; },
+    back() { if (this.t > 0) { this.go(this.t - 1); return true; } return false; },
+    finish() { this.stop(); if (this.t < this.n) { this.go(this.n); return true; } return false; },
+    reset() { this.stop(); this.go(0); },
+    atEnd() { return this.t >= this.n; },
+    atStart() { return this.t <= 0; },
+    play() {
+      if (this.timer) { this.stop(); return; }
+      if (this.t >= this.n) this.go(0);
+      this.timer = setInterval(() => { if (!this.step()) this.stop(); }, this.speed());
+      this.syncPlay();
+    },
+    stop() { if (this.timer) { clearInterval(this.timer); this.timer = null; } this.syncPlay(); },
+    syncPlay() { if (this.playBtn) { this.playBtn.textContent = this.timer ? 'Pause' : 'Play'; this.playBtn.setAttribute('aria-pressed', this.timer ? 'true' : 'false'); } },
+    speed() { const s = this.cfg.speed || 1; return Math.max(40, Math.round(this.baseSpeed / s)); },
+    go(t) { this.t = Math.max(0, Math.min(this.n, t)); this.render(); if (this.scrub) { this.scrub.max = this.n; this.scrub.value = this.t; } if (this.cfg.onStep) this.cfg.onStep(this); },
+    controls(innerLabel) {
+      const c = el('div', 'controls');
+      c.append(btn('Reset', 'Reset (R)', () => this.reset()), btn('◀', 'Step back (←)', () => { this.stop(); this.back(); }), btn('Step ▶', 'One step (→)', () => { this.stop(); this.step(); }, true));
+      if (innerLabel) c.append(btn(innerLabel, 'Bigger jump (↓)', () => { this.stop(); this.inner(); }));
+      this.playBtn = btn('Play', 'Play / pause (P)', () => this.play());
+      c.append(this.playBtn, btn('Finish', 'Jump to the end (E)', () => this.finish()));
+      return c;
+    },
+    scrubber() {
+      const w = el('label', 'scrub'); w.innerHTML = '<span>time</span>';
+      const r = el('input'); r.type = 'range'; r.min = 0; r.max = this.n; r.value = 0; r.id = 'scrub-' + Math.random().toString(36).slice(2, 8);
+      r.addEventListener('input', () => { this.stop(); this.go(+r.value); });
+      w.appendChild(r); this.scrub = r; return w;
+    },
+    keydown(e) {
+      const k = e.key;
+      if (k === 'ArrowRight') { this.stop(); return this.step(); }
+      if (k === 'ArrowLeft') { this.stop(); return this.back(); }
+      if (k === 'ArrowDown') { this.stop(); return this.inner(); }
+      if (k === 'p' || k === 'P') { this.play(); return true; }
+      if (k === 'e' || k === 'E') return this.finish();
+      if (k === 'r' || k === 'R') { this.reset(); return true; }
+      return false;
+    },
+    keys() { this.root.tabIndex = 0; this.root.addEventListener('keydown', (e) => { if (e.target !== this.root) return; if (this.keydown(e)) e.preventDefault(); }); },
+    destroy() { this.stop(); }
+  };
+  function mix(P) { Object.keys(Step).forEach((k) => { if (!P[k]) P[k] = Step[k]; }); }
+
+  // =====================================================================
+  // Single core
+  // cfg: P, tiled, tm, tn, tk, border ('ijk' letters for mt nt kt), inner, gran ('op'|'inner'|'block')
+  // =====================================================================
+  function singlePlan(P, cfg) {
+    const T = cfg.tiled ? { i: cfg.tm, j: cfg.tn, k: cfg.tk } : { i: P.M, j: P.N, k: P.K };
+    const nb = { i: P.M / T.i, j: P.N / T.j, k: P.K / T.k };
+    const bo = cfg.tiled ? cfg.border : 'ijk', io = cfg.inner;
+    const ops = []; let blk = 0, bgrp = 0, igrp = 0;
+    for (let a0 = 0; a0 < nb[bo[0]]; a0++) for (let a1 = 0; a1 < nb[bo[1]]; a1++) {
+      for (let a2 = 0; a2 < nb[bo[2]]; a2++) {
+        const bid = {}; bid[bo[0]] = a0; bid[bo[1]] = a1; bid[bo[2]] = a2;
+        for (let s0 = 0; s0 < T[io[0]]; s0++) for (let s1 = 0; s1 < T[io[1]]; s1++) {
+          for (let s2 = 0; s2 < T[io[2]]; s2++) {
+            const sid = {}; sid[io[0]] = s0; sid[io[1]] = s1; sid[io[2]] = s2;
+            ops.push({ i: bid.i * T.i + sid.i, j: bid.j * T.j + sid.j, k: bid.k * T.k + sid.k, bid, sid, blk, bgrp, igrp });
+          }
+          igrp++;
+        }
+        blk++;
+      }
+      bgrp++;
+    }
+    const field = cfg.gran === 'block' ? 'blk' : cfg.gran === 'inner' ? 'igrp' : null;
+    const ends = [];
+    ops.forEach((o, x) => { if (!field || x === ops.length - 1 || ops[x + 1][field] !== o[field]) ends.push(x + 1); });
+    return { T, nb, bo, io, ops, ends };
+  }
+
+  function singleCode(P, cfg, pl) {
+    const L = [];
+    const ind = (d) => '  '.repeat(d);
+    if (cfg.tiled) {
+      pl.bo.split('').forEach((v, d) => L.push({ v: 'b' + v, html: ind(d) + '<span class="kw">for</span> ' + BV[v] + ' <span class="kw">in</span> range(' + pl.nb[v] + '):' + (d === 0 ? '<span class="cm">   # block loops</span>' : '') }));
+      pl.io.split('').forEach((v, d) => L.push({ v: 's' + v, html: ind(d + 3) + '<span class="kw">for</span> ' + v + ' <span class="kw">in</span> block(' + BV[v] + '):' + (d === 0 ? '<span class="cm">   # inside one block product</span>' : '') }));
+      L.push({ v: 'body', html: ind(6) + '<span class="tc">C</span>[i][j] += <span class="ta">A</span>[i][k] * <span class="tb">B</span>[k][j]' });
+    } else {
+      pl.io.split('').forEach((v, d) => L.push({ v: 's' + v, html: ind(d) + '<span class="kw">for</span> ' + v + ' <span class="kw">in</span> range(' + DIM[v] + '):' }));
+      L.push({ v: 'body', html: ind(3) + '<span class="tc">C</span>[i][j] += <span class="ta">A</span>[i][k] * <span class="tb">B</span>[k][j]' });
+    }
+    return L;
+  }
+
+  function SingleView(root, cfg) {
+    this.cfg = cfg; this.root = root; this.P = cfg.P; root.classList.add('w');
+    this.pl = singlePlan(this.P, cfg); this.n = this.pl.ends.length; this.t = 0;
+    this.baseSpeed = cfg.gran === 'block' ? 700 : cfg.gran === 'inner' ? 500 : 260;
+    const bodyEl = el('div', 'w-body'); root.appendChild(bodyEl);
+    const left = el('div', 'stack'); bodyEl.appendChild(left);
+    this.codeEl = el('pre', 'code'); left.appendChild(this.codeEl);
+    this.lines = singleCode(this.P, cfg, this.pl);
+    this.lineEls = this.lines.map((l) => { const d = el('div', 'ln', l.html); this.codeEl.appendChild(d); return d; });
+    this.valEls = this.lines.map((l, n) => { if (l.v === 'body') return null; const s = el('span', 'val'); this.lineEls[n].appendChild(s); return s; });
+    const t = cfg.tiled ? cfg : { tm: this.P.M, tn: this.P.N, tk: this.P.K };
+    this.tri = new Triple(this.P, t); bodyEl.appendChild(this.tri.root);
+    this.cap = el('div', 'cap'); root.appendChild(this.cap);
+    const foot = el('div', 'w-foot'); root.appendChild(foot);
+    this.cnt = el('div', 'counters'); foot.appendChild(this.cnt);
+    const right = el('div', 'stack right'); right.append(this.controls(cfg.gran === 'block' ? null : 'Bigger jump ⏭'), this.scrubber()); foot.appendChild(right);
+    this.keys(); this.go(0);
+  }
+  SingleView.prototype.inner = function () {
+    if (this.t >= this.n) return false;
+    const ops = this.pl.ops, done = this.t ? this.pl.ends[this.t - 1] : 0;
+    const f = this.cfg.gran === 'op' ? 'igrp' : 'bgrp';
+    const g = ops[done][f]; let x = done; while (x < ops.length && ops[x][f] === g) x++;
+    let s = this.t; while (s < this.n && this.pl.ends[s] < x) s++;
+    this.go(Math.min(this.n, s + 1)); return true;
+  };
+  SingleView.prototype.state = function () {
+    const s = newAcc(this.P), done = this.t ? this.pl.ends[this.t - 1] : 0, from = this.t > 1 ? this.pl.ends[this.t - 2] : 0, last = [];
+    for (let x = 0; x < done; x++) { const r = apply(this.P, s, this.pl.ops[x].i, this.pl.ops[x].j, this.pl.ops[x].k); if (x >= from) last.push(r); }
+    return { s, done, last };
+  };
+  SingleView.prototype.render = function () {
+    const P = this.P, pl = this.pl, cfg = this.cfg;
+    const { s, done, last } = this.state();
+    const ctx = this.t < this.n;
+    const ref = pl.ops[this.t ? done - 1 : 0];
+    const blockLevel = cfg.gran === 'block';
+    const grpField = blockLevel ? 'bgrp' : 'igrp';
+    const stay = blockLevel ? STAY[pl.bo[2]] : STAY[pl.io[2]];
+    const cA = {}, cB = {}, cC = {};
+    const maps = { A: cA, B: cB, C: cC };
+    if (ctx) {
+      pl.ops.forEach((o) => { if (o[grpField] !== ref[grpField]) return; addCls(cA, key(o.i, o.k), 'sweep'); addCls(cB, key(o.k, o.j), 'sweep'); addCls(cC, key(o.i, o.j), 'sweep'); });
+      const T = pl.T;
+      const cellsOf = (op) => {
+        if (!blockLevel) return [op === 'A' ? key(ref.i, ref.k) : op === 'B' ? key(ref.k, ref.j) : key(ref.i, ref.j)];
+        const [rv, cv] = IDX[op]; const out = [];
+        for (let a = 0; a < T[rv]; a++) for (let b = 0; b < T[cv]; b++) out.push(key(ref.bid[rv] * T[rv] + a, ref.bid[cv] * T[cv] + b));
+        return out;
+      };
+      cellsOf(stay).forEach((k0) => addCls(maps[stay], k0, 'stay'));
+    }
+    for (let r = 0; r < P.M; r++) for (let c = 0; c < P.N; c++) { const t = s.T[r][c]; if (t) addCls(cC, key(r, c), t === P.K ? 'fin' : 'part'); }
+    if (this.t > 0) last.forEach((o) => { addCls(cA, key(o.i, o.k), 'read'); addCls(cB, key(o.k, o.j), 'read'); addCls(cC, key(o.i, o.j), 'write'); });
+    this.tri.A.paint(cA); this.tri.B.paint(cB);
+    this.tri.C.paint(cC, (r, c) => (s.T[r][c] ? String(s.C[r][c]) : '·'));
+    ['A', 'B', 'C'].forEach((m) => this.tri[m].clearBadges());
+    if (ctx && cfg.tiled && !blockLevel && (pl.nb.i * pl.nb.j * pl.nb.k > 1)) {
+      const T = pl.T, b = ref.bid;
+      this.tri.A.badge(b.i * T.i, b.k * T.k, T.i, T.k, null, 'soft');
+      this.tri.B.badge(b.k * T.k, b.j * T.j, T.k, T.j, null, 'soft');
+      this.tri.C.badge(b.i * T.i, b.j * T.j, T.i, T.j, null, 'soft');
+    }
+    if (ctx) { this.tri.A.heads([ref.i], [ref.k]); this.tri.B.heads([ref.k], [ref.j]); this.tri.C.heads([ref.i], [ref.j]); }
+    else ['A', 'B', 'C'].forEach((m) => this.tri[m].heads(null, null));
+    // code
+    this.lineEls.forEach((d, n) => {
+      const l = this.lines[n];
+      d.classList.toggle('on', l.v === 'body' && this.t > 0 && ctx);
+      d.classList.toggle('inner', ctx && ((blockLevel && l.v === 'b' + pl.bo[2]) || (!blockLevel && l.v === 's' + pl.io[2])));
+      const sp = this.valEls[n];
+      if (sp) {
+        let txt = '';
+        if (this.t > 0 && ctx) { const v = l.v[1]; txt = l.v[0] === 'b' ? BV[v] + ' = ' + ref.bid[v] : v + ' = ' + ref[v]; }
+        sp.textContent = txt;
+      }
+    });
+    // caption
+    let cap;
+    if (this.t === 0) cap = 'Press <b>Step</b> (or →). Tinted cells are the ones the current ' + (blockLevel ? 'block loop' : 'inner loop') + ' will visit; the glowing one stays put.';
+    else if (this.t === this.n) cap = 'Done: ' + s.mul + ' multiplies, ' + s.add + ' additions. ' + (eqRef(P, s.C) ? '<span class="ok">Check: C == A @ B ✓</span>' : '<span class="tsp">C differs ✗</span>');
+    else if (last.length === 1) {
+      const o = last[0], nm = 'C[' + o.i + '][' + o.j + ']';
+      cap = '<code><span class="tc">' + nm + '</span> += <span class="ta">A[' + o.i + '][' + o.k + ']</span>·<span class="tb">B[' + o.k + '][' + o.j + ']</span></code> = ' + o.a + '·' + o.b + ' = ' + o.p + ' → ' +
+        (o.first ? nm + ' = ' + o.nw + ' <small>(first term, just stored)</small>' : nm + ' = ' + o.old + ' + ' + o.p + ' = <b>' + o.nw + '</b>') + ' · term ' + o.terms + ' of ' + P.K + (o.terms === P.K ? ' <b class="tc">finished</b>' : ' <span class="tc">partial</span>');
+    } else {
+      const b = ref.bid;
+      cap = blockLevel
+        ? '<code><span class="tc">C[' + b.i + ',' + b.j + ']</span> += <span class="ta">A[' + b.i + ',' + b.k + ']</span> @ <span class="tb">B[' + b.k + ',' + b.j + ']</span></code> — one block product, ' + last.length + ' multiplies at once.'
+        : 'One whole inner loop over <b>' + pl.io[2] + '</b>: ' + last.length + ' multiplies. ' + stay + ' stayed put the whole time.';
+    }
+    this.cap.innerHTML = cap;
+    const MNK = P.M * P.N * P.K;
+    this.cnt.innerHTML = counters([
+      { label: 'step', value: this.t + '/' + this.n }, { label: 'multiplies', value: s.mul + '/' + MNK },
+      { label: 'additions', value: s.add + '/' + P.M * P.N * (P.K - 1) },
+      { label: 'partial now', value: s.part }, { label: 'most partial at once', value: s.maxPart }
+    ]);
+  };
+  SingleView.prototype.trace = function (limit) {
+    const { done } = this.state(); const s = newAcc(this.P); const out = [];
+    for (let x = 0; x < done; x++) {
+      const o = this.pl.ops[x], r = apply(this.P, s, o.i, o.j, o.k);
+      if (x >= done - (limit || 400)) {
+        out.push('step ' + String(x + 1).padStart(3) + ': C[' + o.i + '][' + o.j + '] += A[' + o.i + '][' + o.k + ']*B[' + o.k + '][' + o.j + '] = ' + r.a + '*' + r.b + ' = ' + r.p + '  ->  ' +
+          (r.first ? r.nw + ' (first term)' : r.old + ' + ' + r.p + ' = ' + r.nw) + '   term ' + r.terms + '/' + this.P.K + (r.terms === this.P.K ? ' FINISHED' : ''));
+      }
+    }
+    return out;
+  };
+  mix(SingleView.prototype);
+
+  // =====================================================================
+  // Many cores
+  // cfg: P, tm, tn, tk, cores, flow ('os'|'ws'|'is'), g (K-tiles per core, ws/is), S (split-K pieces, os)
+  // =====================================================================
+  function parallelPlan(P, cfg) {
+    const nM = P.M / cfg.tm, nN = P.N / cfg.tn, nK = P.K / cfg.tk;
+    const units = [];
+    const flow = cfg.flow;
+    if (flow === 'os') {
+      const S = cfg.S || 1, ps = nK / S;
+      for (let mt = 0; mt < nM; mt++) for (let nt = 0; nt < nN; nt++) for (let s = 0; s < S; s++) {
+        const prods = rng(ps).map((x) => ({ mt, nt, kt: s * ps + x }));
+        units.push({ prods, stay: 'C', stayBlocks: [[mt, nt]], cblocks: [[mt, nt]], label: 'C' + mt + nt + (S > 1 ? ' · piece ' + s : ''), short: 'C[' + mt + ',' + nt + ']' + (S > 1 ? ' p' + s : '') });
+      }
+    } else if (flow === 'ws') {
+      const g = cfg.g || 1, nG = nK / g;
+      for (let kg = 0; kg < nG; kg++) for (let nt = 0; nt < nN; nt++) {
+        const kts = rng(g).map((x) => kg * g + x);
+        const prods = []; rng(nM).forEach((mt) => kts.forEach((kt) => prods.push({ mt, nt, kt })));
+        units.push({ prods, stay: 'B', stayBlocks: kts.map((kt) => [kt, nt]), cblocks: rng(nM).map((mt) => [mt, nt]), label: 'B[' + kts.join('') + ',' + nt + ']', short: 'B[' + (g > 1 ? kts[0] + '–' + kts[g - 1] : kts[0]) + ',' + nt + ']' });
+      }
+    } else {
+      const g = cfg.g || 1, nG = nK / g;
+      for (let mt = 0; mt < nM; mt++) for (let kg = 0; kg < nG; kg++) {
+        const kts = rng(g).map((x) => kg * g + x);
+        const prods = []; rng(nN).forEach((nt) => kts.forEach((kt) => prods.push({ mt, nt, kt })));
+        units.push({ prods, stay: 'A', stayBlocks: kts.map((kt) => [mt, kt]), cblocks: rng(nN).map((nt) => [mt, nt]), label: 'A[' + mt + ',' + kts.join('') + ']', short: 'A[' + mt + ',' + (g > 1 ? kts[0] + '–' + kts[g - 1] : kts[0]) + ']' });
+      }
+    }
+    const C = cfg.cores, U = units.length, L = units[0].prods.length, W = Math.ceil(U / C);
+    units.forEach((u, x) => { u.id = x; u.wave = Math.floor(x / C); u.core = x % C; u.start = u.wave * L; });
+    const parts = {};
+    units.forEach((u) => u.cblocks.forEach(([a, b]) => { const k0 = key(a, b); (parts[k0] = parts[k0] || []).push(u.id); }));
+    const maxParts = Math.max.apply(null, Object.values(parts).map((x) => x.length));
+    const R = maxParts > 1 ? Math.ceil(Math.log2(maxParts)) : 0;
+    return { nM, nN, nK, units, C, U, L, W, R, parts, maxParts, compute: W * L, n: W * L + R };
+  }
+
+  function parallelState(P, cfg, pl, t) {
+    const tm = cfg.tm, tn = cfg.tn, tk = cfg.tk;
+    const comp = Math.min(t, pl.compute);
+    const bufs = pl.units.map(() => ({}));
+    let mul = 0, tadd = 0, sadd = 0;
+    pl.units.forEach((u) => {
+      const done = Math.max(0, Math.min(pl.L, comp - u.start));
+      for (let x = 0; x < done; x++) {
+        const p = u.prods[x];
+        for (let a = 0; a < tm; a++) for (let b = 0; b < tn; b++) for (let c = 0; c < tk; c++) {
+          const i = p.mt * tm + a, j = p.nt * tn + b, k = p.kt * tk + c;
+          const k0 = key(i, j), bf = bufs[u.id];
+          if (!bf[k0]) bf[k0] = { v: 0, T: 0 };
+          if (bf[k0].T > 0) tadd++;
+          bf[k0].v += P.A[i][k] * P.B[k][j]; bf[k0].T++; mul++;
+        }
+      }
+    });
+    const lv = Math.max(0, t - pl.compute);
+    const C = zeros(P.M, P.N), T = zeros(P.M, P.N), pieces = zeros(P.M, P.N);
+    for (let i = 0; i < P.M; i++) for (let j = 0; j < P.N; j++) {
+      const bk = key(Math.floor(i / tm), Math.floor(j / tn));
+      let list = pl.parts[bk].map((u) => bufs[u][key(i, j)]).filter(Boolean).map((x) => ({ v: x.v, T: x.T }));
+      if (pl.parts[bk].length === 1 || lv > 0) {
+        for (let L = 0; L < lv && list.length > 1; L++) {
+          const nx = [];
+          for (let q = 0; q < list.length; q += 2) {
+            if (q + 1 < list.length) { nx.push({ v: list[q].v + list[q + 1].v, T: list[q].T + list[q + 1].T }); sadd++; } else nx.push(list[q]);
+          }
+          list = nx;
+        }
+      }
+      pieces[i][j] = list.length;
+      if (list.length === 1) { C[i][j] = list[0].v; T[i][j] = list[0].T; }
+    }
+    return { bufs, mul, tadd, sadd, C, T, pieces, lv };
+  }
+
+  function parallelCode(cfg, pl) {
+    const g = cfg.g || 1, S = cfg.S || 1;
+    const L = [];
+    const kw = (x) => '<span class="kw">' + x + '</span>', cm = (x) => '<span class="cm">   # ' + x + '</span>';
+    if (cfg.flow === 'os') {
+      L.push({ v: 'grid', html: kw('parallel for') + ' (mt, nt' + (S > 1 ? ', piece' : '') + ') ' + kw('in') + ' grid:' + cm(pl.U + ' tiles, ' + cfg.cores + ' cores') });
+      L.push({ v: 'sweep', html: '    ' + kw('for') + ' kt ' + kw('in') + ' ' + (S > 1 ? 'piece_range(piece)' : 'range(' + pl.nK + ')') + ':' + cm('the sweep, in order') });
+      L.push({ v: 'body', html: '        ' + (S > 1 ? '<span class="tc">P</span>[piece]' : '<span class="tc">C</span>') + '[mt,nt] += <span class="ta">A</span>[mt,kt] @ <span class="tb">B</span>[kt,nt]' });
+      if (S > 1) L.push({ v: 'red', html: '<span class="tc">C</span>[mt,nt] = ' + kw('sum') + ' of <span class="tc">P</span>[piece][mt,nt]' + cm('across cores') });
+    } else {
+      const ws = cfg.flow === 'ws';
+      L.push({ v: 'grid', html: kw('parallel for') + ' (' + (ws ? 'kgroup, nt' : 'mt, kgroup') + ') ' + kw('in') + ' grid:' + cm(pl.U + ' tiles, ' + cfg.cores + ' cores') });
+      L.push({ v: 'sweep', html: '    ' + kw('for') + ' ' + (ws ? 'mt' : 'nt') + ' ' + kw('in') + ' range(' + (ws ? pl.nM : pl.nN) + '):' + cm('the sweep, in order') });
+      L.push({ v: 'kg', html: '        ' + kw('for') + ' kt ' + kw('in') + ' kgroup:' + cm(g + ' K-tile' + (g > 1 ? 's' : '') + ' per core, summed over time') });
+      L.push({ v: 'body', html: '            <span class="tc">P</span>[kgroup][mt,nt] += <span class="ta">A</span>[mt,kt] @ <span class="tb">B</span>[kt,nt]' });
+      if (pl.maxParts > 1) L.push({ v: 'red', html: '<span class="tc">C</span>[mt,nt] = ' + kw('sum') + ' of <span class="tc">P</span>[kgroup][mt,nt]' + cm('across cores') });
+      else L.push({ v: 'red', html: '<span class="tc">C</span>[mt,nt] = <span class="tc">P</span>[0][mt,nt]' + cm('one group holds all of K: nothing to combine') });
+    }
+    return L;
+  }
+
+  function ParallelView(root, cfg) {
+    this.cfg = cfg; this.root = root; this.P = cfg.P; root.classList.add('w', 'pv');
+    this.baseSpeed = 1000; this.t = 0;
+    this.pl = parallelPlan(this.P, cfg); this.n = this.pl.n;
+    if (cfg.title !== false) {
+      const head = el('div', 'w-head'); root.appendChild(head);
+      const f = cfg.flow, st = { os: 'C', ws: 'B', is: 'A' }[f];
+      head.innerHTML = '<span class="chip ' + st + '">each core keeps a ' + st + ' block · ' + f + '</span>' +
+        '<span class="chip">' + this.pl.U + ' tile' + (this.pl.U > 1 ? 's' : '') + ' → ' + cfg.cores + ' core' + (cfg.cores > 1 ? 's' : '') + ' → ' + this.pl.W + ' wave' + (this.pl.W > 1 ? 's' : '') + '</span>' +
+        '<span class="chip">' + this.pl.L + ' block product' + (this.pl.L > 1 ? 's' : '') + ' per tile, in order</span>' +
+        (this.pl.maxParts > 1 ? '<span class="chip sp">each C block in ' + this.pl.maxParts + ' pieces → combine</span>' : '<span class="chip">each C block made in one place</span>');
+    }
+    const top = el('div', 'pv-top'); root.appendChild(top);
+    this.tri = new Triple(this.P, cfg, 'tiles: ' + cfg.tm + '×' + cfg.tn + '×' + cfg.tk); top.appendChild(this.tri.root);
+    const codeWrap = el('div', 'stack'); top.appendChild(codeWrap);
+    this.codeEl = el('pre', 'code'); codeWrap.appendChild(this.codeEl);
+    this.lines = parallelCode(cfg, this.pl);
+    this.lineEls = this.lines.map((l) => { const d = el('div', 'ln', l.html); this.codeEl.appendChild(d); return d; });
+    this.legend = el('div', 'legend', '<span><i class="lg read"></i>block being read now (tag = which core)</span><span><i class="lg stay"></i>kept inside a core</span><span><i class="lg part"></i>partial</span><span><i class="lg scat"></i>exists as pieces on several cores</span><span><i class="lg fin"></i>finished</span>');
+    codeWrap.appendChild(this.legend);
+    root.appendChild(el('div', 'pv-lab', 'The chip: what every core is doing right now'));
+    this.floor = el('div', 'floor'); root.appendChild(this.floor);
+    this.coreEls = rng(cfg.cores).map((c) => { const b = el('div', 'corebox'); this.floor.appendChild(b); return b; });
+    root.appendChild(el('div', 'pv-lab', 'Timeline: one row per core, one column per step'));
+    this.ganttWrap = el('div', 'gantt-wrap'); root.appendChild(this.ganttWrap);
+    this.buildGantt();
+    this.cap = el('div', 'cap'); root.appendChild(this.cap);
+    const foot = el('div', 'w-foot'); root.appendChild(foot);
+    this.cnt = el('div', 'counters'); foot.appendChild(this.cnt);
+    const right = el('div', 'stack right'); right.append(this.controls(null), this.scrubber()); foot.appendChild(right);
+    this.keys(); this.go(0);
+  }
+  ParallelView.prototype.inner = function () { return this.step(); };
+  ParallelView.prototype.buildGantt = function () {
+    const pl = this.pl, cfg = this.cfg;
+    const g = el('div', 'gantt'); this.gantt = g;
+    const cols = pl.n;
+    g.style.gridTemplateColumns = '4.2rem repeat(' + cols + ', minmax(' + (cols > 24 ? '1.6rem' : '2.6rem') + ', 1fr))';
+    const rows = cfg.cores + 2 + (pl.R ? 1 : 0);
+    // header: waves
+    g.appendChild(Object.assign(el('div', 'g-h'), { style: 'grid-row:1;grid-column:1' }));
+    for (let w = 0; w < pl.W; w++) {
+      const h = el('div', 'g-wave', 'wave ' + (w + 1));
+      h.style.gridRow = '1'; h.style.gridColumn = (2 + w * pl.L) + ' / span ' + pl.L; g.appendChild(h);
+    }
+    if (pl.R) { const h = el('div', 'g-wave sp', 'combine'); h.style.gridRow = '1'; h.style.gridColumn = (2 + pl.compute) + ' / span ' + pl.R; g.appendChild(h); }
+    // step numbers
+    const sl = el('div', 'g-lab', 'step'); sl.style.gridRow = '2'; sl.style.gridColumn = '1'; g.appendChild(sl);
+    for (let c = 0; c < cols; c++) { const x = el('div', 'g-num', String(c + 1)); x.style.gridRow = '2'; x.style.gridColumn = String(2 + c); g.appendChild(x); }
+    // wave bands
+    for (let w = 0; w < pl.W; w++) {
+      const band = el('div', 'g-band' + (w % 2 ? ' alt' : ''));
+      band.style.gridRow = '3 / span ' + cfg.cores; band.style.gridColumn = (2 + w * pl.L) + ' / span ' + pl.L; g.appendChild(band);
+    }
+    // core rows
+    this.bars = [];
+    for (let c = 0; c < cfg.cores; c++) {
+      const lab = el('div', 'g-lab', 'core ' + c); lab.style.gridRow = String(3 + c); lab.style.gridColumn = '1'; g.appendChild(lab);
+      for (let w = 0; w < pl.W; w++) {
+        const u = pl.units.find((x) => x.wave === w && x.core === c);
+        const b = el('div', u ? 'bar f-' + cfg.flow : 'bar idle', u ? '<span class="fill"></span><span class="bt">' + u.short + '</span>' : '<span class="bt">idle</span>');
+        b.style.gridRow = String(3 + c); b.style.gridColumn = (2 + w * pl.L) + ' / span ' + pl.L;
+        if (u) {
+          b.title = 'tile ' + u.id + ' on core ' + c + ', wave ' + (w + 1) + ': keeps ' + u.label + ', makes ' + u.cblocks.map(([a, bb]) => 'C[' + a + ',' + bb + ']').join(' ');
+          b.dataset.u = u.id;
+          b.addEventListener('mouseenter', () => this.hover(u)); b.addEventListener('mouseleave', () => this.hover(null));
+          b.addEventListener('focus', () => this.hover(u)); b.addEventListener('blur', () => this.hover(null));
+          b.tabIndex = 0;
+          this.bars.push({ el: b, u });
+        }
+        g.appendChild(b);
+      }
+    }
+    if (pl.R) {
+      const lab = el('div', 'g-lab sp', 'across cores'); lab.style.gridRow = String(3 + cfg.cores); lab.style.gridColumn = '1'; g.appendChild(lab);
+      this.redBars = rng(pl.R).map((r) => {
+        const b = el('div', 'bar red', '<span class="fill"></span><span class="bt">+ level ' + (r + 1) + '</span>');
+        b.style.gridRow = String(3 + cfg.cores); b.style.gridColumn = String(2 + pl.compute + r); g.appendChild(b); return b;
+      });
+    }
+    this.cursor = el('div', 'g-cursor'); this.cursor.style.gridRow = '2 / span ' + (rows - 1); g.appendChild(this.cursor);
+    this.ganttWrap.appendChild(g);
+  };
+  ParallelView.prototype.hover = function (u) { this.hov = u; this.render(); };
+  ParallelView.prototype.render = function () {
+    const P = this.P, cfg = this.cfg, pl = this.pl, tm = cfg.tm, tn = cfg.tn, tk = cfg.tk;
+    const st = parallelState(P, cfg, pl, this.t);
+    const slot = this.t - 1; const inCompute = slot >= 0 && slot < pl.compute; const inRed = slot >= pl.compute;
+    const wave = inCompute ? Math.floor(slot / pl.L) : -1, pos = inCompute ? slot % pl.L : -1;
+    const active = inCompute ? pl.units.filter((u) => u.wave === wave) : [];
+    const cA = {}, cB = {}, cC = {}, maps = { A: cA, B: cB, C: cC };
+    const bdim = { A: [tm, tk], B: [tk, tn], C: [tm, tn] };
+    const blockCells = (op, r0, c0) => { const [R, Cc] = bdim[op]; const out = []; for (let a = 0; a < R; a++) for (let b = 0; b < Cc; b++) out.push(key(r0 * R + a, c0 * Cc + b)); return out; };
+    // blocks kept by active cores glow; blocks read now are lit
+    const tags = { A: {}, B: {}, C: {} };
+    active.forEach((u) => {
+      const p = u.prods[pos];
+      u.stayBlocks.forEach(([a, b]) => blockCells(u.stay, a, b).forEach((k0) => addCls(maps[u.stay], k0, 'stay')));
+      blockCells('A', p.mt, p.kt).forEach((k0) => addCls(cA, k0, 'read'));
+      blockCells('B', p.kt, p.nt).forEach((k0) => addCls(cB, k0, 'read'));
+      blockCells('C', p.mt, p.nt).forEach((k0) => addCls(cC, k0, 'write'));
+      [['A', p.mt, p.kt], ['B', p.kt, p.nt], ['C', p.mt, p.nt]].forEach(([op, a, b]) => { const k0 = key(a, b); (tags[op][k0] = tags[op][k0] || []).push(u.core); });
+    });
+    for (let i = 0; i < P.M; i++) for (let j = 0; j < P.N; j++) {
+      const k0 = key(i, j);
+      if (st.pieces[i][j] > 1) addCls(cC, k0, 'scat');
+      else if (st.T[i][j]) addCls(cC, k0, st.T[i][j] === P.K ? 'fin' : 'part');
+      if (inRed && pl.parts[key(Math.floor(i / tm), Math.floor(j / tn))].length > 1) addCls(cC, k0, 'spadd');
+    }
+    if (this.hov) {
+      const u = this.hov;
+      u.stayBlocks.forEach(([a, b]) => blockCells(u.stay, a, b).forEach((k0) => addCls(maps[u.stay], k0, 'hov')));
+      u.cblocks.forEach(([a, b]) => blockCells('C', a, b).forEach((k0) => addCls(cC, k0, 'hov')));
+    }
+    this.tri.A.paint(cA); this.tri.B.paint(cB);
+    this.tri.C.paint(cC, (i, j) => (st.pieces[i][j] > 1 ? st.pieces[i][j] + '×' : st.T[i][j] ? String(st.C[i][j]) : '·'));
+    ['A', 'B', 'C'].forEach((m) => {
+      this.tri[m].clearBadges();
+      const [R, Cc] = m === 'A' ? [tm, tk] : m === 'B' ? [tk, tn] : [tm, tn];
+      Object.keys(tags[m]).forEach((k0) => { const [a, b] = k0.split(',').map(Number); this.tri[m].badge(a * R, b * Cc, R, Cc, tags[m][k0].map((c) => 'c' + c).join(' '), 'tag'); });
+    });
+    // cores
+    this.coreEls.forEach((box, c) => {
+      const u = active.find((x) => x.core === c);
+      box.className = 'corebox' + (u ? '' : ' idle');
+      if (!u) {
+        const lastU = pl.units.filter((x) => x.core === c && x.start < Math.max(0, this.t)).pop();
+        let msg = this.t === 0 ? 'waiting to start' : inRed ? 'done — its partial sums are being combined across cores' : slot >= pl.compute ? 'done' : 'idle: no tile left for this core in wave ' + (wave + 1);
+        if (!inRed && this.t >= pl.n) msg = 'done';
+        box.innerHTML = '<h5><span>core ' + c + '</span><span class="muted">' + (lastU ? 'last: ' + lastU.short : '') + '</span></h5><div class="op">' + msg + '</div>';
+        return;
+      }
+      const p = u.prods[pos];
+      const blk = (op, r0, c0, R, Cc, vals, cls, label) => {
+        const w = el('div', 'cb-blk'); w.appendChild(el('div', 'cb-l', label));
+        const m = el('div', 'mini'); m.style.gridTemplateColumns = 'repeat(' + Cc + ', var(--cell))';
+        for (let a = 0; a < R; a++) for (let b = 0; b < Cc; b++) {
+          const i = r0 * R + a, j = c0 * Cc + b;
+          let txt = '', extra = cls;
+          if (op === 'C') { const bf = st.bufs[u.id][key(i, j)]; txt = bf ? String(bf.v) : '·'; extra += bf ? (bf.T === P.K ? ' fin' : ' part') : ''; }
+          else txt = String(vals[i][j]);
+          m.appendChild(el('div', 'cell k-' + op + ' ' + extra, txt));
+        }
+        w.appendChild(m); return w;
+      };
+      box.innerHTML = '';
+      box.appendChild(el('h5', null, '<span>core ' + c + '</span><span class="muted">tile ' + u.id + ' · ' + (pos + 1) + '/' + pl.L + '</span>'));
+      if (u.stayBlocks.length > 1) box.appendChild(el('div', 'op', 'in its slots: ' + u.stayBlocks.map(([a, b]) => { const nm = u.stay + '[' + a + ',' + b + ']'; const isCur = (u.stay === 'B' ? a === p.kt && b === p.nt : a === p.mt && b === p.kt); return isCur ? '<b>' + nm + '</b>' : nm; }).join(' · ')));
+      const row = el('div', 'cb-row');
+      row.append(
+        blk('A', p.mt, p.kt, tm, tk, P.A, u.stay === 'A' ? 'stay' : 'read', (u.stay === 'A' ? 'keeps' : 'gets') + ' A[' + p.mt + ',' + p.kt + ']'),
+        el('span', 'arrow', '@'),
+        blk('B', p.kt, p.nt, tk, tn, P.B, u.stay === 'B' ? 'stay' : 'read', (u.stay === 'B' ? 'keeps' : 'gets') + ' B[' + p.kt + ',' + p.nt + ']'),
+        el('span', 'arrow', '→'),
+        blk('C', p.mt, p.nt, tm, tn, null, u.stay === 'C' ? 'stay' : '', (u.stay === 'C' ? 'keeps ' : 'adds into ') + (pl.parts[key(p.mt, p.nt)].length > 1 ? 'its piece of ' : '') + 'C[' + p.mt + ',' + p.nt + ']'));
+      box.appendChild(row);
+    });
+    // gantt progress
+    this.bars.forEach(({ el: b, u }) => {
+      const done = Math.max(0, Math.min(pl.L, Math.min(this.t, pl.compute) - u.start));
+      b.querySelector('.fill').style.width = (100 * done / pl.L) + '%';
+      b.classList.toggle('now', u.wave === wave);
+      const sib = this.hov && this.hov !== u && u.cblocks.some(([a, c]) => this.hov.cblocks.some(([x, y]) => x === a && y === c));
+      b.classList.toggle('hovme', this.hov === u); b.classList.toggle('sib', !!sib);
+    });
+    if (this.redBars) this.redBars.forEach((b, r) => { b.querySelector('.fill').style.width = (st.lv > r ? 100 : 0) + '%'; b.classList.toggle('now', inRed && slot - pl.compute === r); });
+    this.cursor.style.gridColumn = String(2 + Math.max(0, slot));
+    this.cursor.hidden = this.t === 0 || this.t > pl.n;
+    // code
+    this.lineEls.forEach((d, n) => { const v = this.lines[n].v; d.classList.toggle('on', (inCompute && v === 'body') || (inRed && v === 'red')); });
+    // caption
+    const busy = active.length, idle = cfg.cores - busy;
+    let cap;
+    if (this.t === 0) cap = 'Press <b>Step</b>. In every step each busy core does <b>one block product</b>, and all busy cores do it <b>at the same time</b>.';
+    else if (inCompute) cap = '<b>Step ' + this.t + '</b> · wave ' + (wave + 1) + ' of ' + pl.W + ', sweep position ' + (pos + 1) + ' of ' + pl.L + ': ' + busy + ' core' + (busy > 1 ? 's' : '') + ' busy' + (idle ? ', <b>' + idle + ' idle</b> (no tile left for them)' : '') + '. ' +
+      (pl.maxParts > 1 ? 'Each core only makes a <b>piece</b> of its C blocks (shown as “2×” = still in 2 pieces).' : 'Each core adds straight into its own C block, over time.');
+    else if (inRed) cap = '<b class="tsp">Combine level ' + (slot - pl.compute + 1) + ':</b> pieces of the same C block, made on different cores, are added together. These additions happen <b>across cores</b> (in space).';
+    if (this.t === pl.n) cap = 'Done in ' + pl.n + ' steps. ' + (eqRef(P, st.C) ? '<span class="ok">Check: C == A @ B ✓</span>' : '<span class="tsp">C differs ✗</span>');
+    this.cap.innerHTML = cap;
+    const util = Math.round(100 * pl.U * pl.L / (pl.W * pl.L * cfg.cores));
+    this.cnt.innerHTML = counters([
+      { label: 'step', value: this.t + '/' + pl.n }, { label: 'multiplies', value: st.mul + '/' + P.M * P.N * P.K },
+      { label: 'additions over time', value: st.tadd }, { label: 'additions across cores', value: st.sadd, cls: 'csp' },
+      { label: 'total', value: (st.tadd + st.sadd) + '/' + P.M * P.N * (P.K - 1) }, { label: 'core use', value: util + '%' }
+    ]);
+  };
+  ParallelView.prototype.trace = function () {
+    const pl = this.pl, out = [];
+    for (let s = 0; s < Math.min(this.t, pl.n); s++) {
+      if (s < pl.compute) {
+        const w = Math.floor(s / pl.L), pos = s % pl.L;
+        const act = pl.units.filter((u) => u.wave === w);
+        out.push('step ' + String(s + 1).padStart(2) + ' (wave ' + (w + 1) + '): ' + act.map((u) => { const p = u.prods[pos]; return 'core' + u.core + ' A[' + p.mt + ',' + p.kt + ']@B[' + p.kt + ',' + p.nt + ']→C[' + p.mt + ',' + p.nt + ']'; }).join(' | ') + (act.length < this.cfg.cores ? ' | ' + (this.cfg.cores - act.length) + ' idle' : ''));
+      } else out.push('step ' + String(s + 1).padStart(2) + ' (combine level ' + (s - pl.compute + 1) + '): pieces added across cores');
+    }
+    return out;
+  };
+  mix(ParallelView.prototype);
+
+  // ---------------- deck mount ----------------
+  function PV(root, cfg) {
+    // deck widget: fixed problem, optional in-slide knobs
+    const P = problem(cfg.M || 4, cfg.N || 4, cfg.K || 4, 0);
+    const st = Object.assign({}, cfg);
+    root.classList.add('stack');
+    const knobs = el('div', 'pv-knobs'); root.appendChild(knobs);
+    const host = el('div'); root.appendChild(host);
+    const make = () => {
+      if (this.view) this.view.destroy();
+      host.innerHTML = ''; const d = el('div'); host.appendChild(d);
+      this.view = new ParallelView(d, Object.assign({}, st, { P }));
+      knobs.querySelectorAll('button').forEach((b) => b.setAttribute('aria-pressed', String(st[b.dataset.k]) === b.dataset.v ? 'true' : 'false'));
+    };
+    const LAB = { flow: { os: 'os · cores own C blocks', ws: 'ws · cores keep B blocks', is: 'is · cores keep A blocks' } };
+    (cfg.knobs || []).forEach((kn) => {
+      const grp = el('div', 'seg'); grp.appendChild(el('span', 'seg-l', { flow: 'flow', cores: 'cores', g: 'K-tiles per core', S: 'split-K pieces' }[kn.k]));
+      kn.v.forEach((v) => { const b = btn(LAB[kn.k] ? LAB[kn.k][v] : String(v), kn.k + ' ' + v, () => { st[kn.k] = v; make(); }); b.dataset.k = kn.k; b.dataset.v = String(v); grp.appendChild(b); });
+      knobs.appendChild(grp);
+    });
+    if (!(cfg.knobs || []).length) knobs.hidden = true;
+    make();
+    this.root = root;
+  }
+  ['step', 'back', 'inner', 'finish', 'reset', 'atEnd', 'atStart', 'play', 'stop'].forEach((m) => { PV.prototype[m] = function () { return this.view[m].apply(this.view, arguments); }; });
+
+  global.MM2 = { problem, divisors, singlePlan, parallelPlan, parallelState, SingleView, ParallelView, newAcc, apply, eqRef, STAY, SHORT, STATN, FORM, BV, ORDERS, TYPES: { pv: PV }, _: { el, btn, addCls, counters, Mat, Triple, mix, key, rng, zeros } };
+})(typeof window !== 'undefined' ? window : globalThis);
+</script><script>/* Attention simulator: plain attention (S through memory) and FlashAttention-2 (S never stored),
+   on any small shape, any block sizes, any number of cores. Every view replays from scratch, so the
+   counters are always the real ones, and every run ends by checking O against softmax(QKᵀ/√d)V.
+
+   Reuses the matmul notebook's helpers (../../matmul/src/engine2.js, MM2._): the matrix grid, the
+   stepping controls and the counters look and behave the same in both notebooks. The counts follow
+   the same formulas as `bwz attention` (docs/MODEL.md §6.9): programs = heads × ceil(S/Br),
+   waves = ceil(programs / cores), K and V read once per wave a head's programs span, O rescaled
+   d numbers per query row on every key block after the first. */
+(function (global) {
+  'use strict';
+  const X = global.MM2, H = X._;
+  const { el, btn, addCls, counters, Mat, mix, key, rng, zeros } = H;
+
+  // ---------------- the problem ----------------
+  // The running example: 4 queries, 4 keys, d = 2, one head. Small integers so every score can be
+  // checked by hand; the softmax makes the rest decimals.
+  const EX = {
+    Q: [[1, 0], [0, 1], [1, 1], [2, 0]],
+    K: [[1, 0], [0, 1], [1, 1], [0, 2]],
+    V: [[1, 2], [3, 0], [0, 1], [2, 2]]
+  };
+  function lcg(seed) { let s = (seed * 2654435761) >>> 0 || 1; return () => ((s = (Math.imul(s, 1664525) + 1013904223) >>> 0) / 4294967296); }
+  function problem(o) {
+    const Sq = o.S, Skv = o.T, d = o.d, heads = o.heads || 1, batch = o.batch || 1, HT = heads * batch;
+    const ex = !o.seed && Sq === 4 && Skv === 4 && d === 2 && HT === 1;
+    const r = lcg(o.seed || 11);
+    const draw = (rows) => rng(rows).map(() => rng(d).map(() => Math.floor(r() * 4) - 1));
+    const Q = [], K = [], V = [];
+    for (let h = 0; h < HT; h++) {
+      Q.push(ex ? EX.Q.map((x) => x.slice()) : draw(Sq));
+      K.push(ex ? EX.K.map((x) => x.slice()) : draw(Skv));
+      V.push(ex ? EX.V.map((x) => x.slice()) : draw(Skv));
+    }
+    const scale = 1 / Math.sqrt(d);
+    const REF = Q.map((q, h) => refAttention(q, K[h], V[h], scale));
+    return { Sq, Skv, d, heads, batch, HT, Q, K, V, REF, scale, seed: ex ? 0 : (o.seed || 11) };
+  }
+  // softmax(Q Kᵀ / √d) V the textbook way: every score of a row first, then the softmax, then P V.
+  function refAttention(Q, K, V, scale) {
+    return Q.map((q) => {
+      const s = K.map((k) => q.reduce((a, x, c) => a + x * k[c], 0) * scale);
+      const m = Math.max(...s), e = s.map((x) => Math.exp(x - m)), l = e.reduce((a, x) => a + x, 0);
+      return rng(V[0].length).map((c) => e.reduce((a, p, j) => a + p * V[j][c], 0) / l);
+    });
+  }
+  const TOL = 1e-9;
+  function closeTo(O, REF) { return O.every((row, i) => row.every((x, c) => Math.abs(x - REF[i][c]) <= TOL)); }
+  function fmt(x) {
+    if (x === -Infinity) return '−∞';
+    if (Number.isInteger(x)) return String(x);
+    const a = Math.abs(x);
+    return a >= 10 ? x.toFixed(0) : a >= 1 ? x.toFixed(1) : x.toFixed(2).replace(/^(-?)0\./, '$1.');
+  }
+  const ceil = Math.ceil, floor = Math.floor;
+
+  // An inner matmul's partial sums, as `bwz` charges them on a unit with no periphery accumulator
+  // (A100's tensor cores): os sums K inside one tile and owes nothing; ws and is cut K into
+  // ceil(K / tile) slices, and every slice beyond the first is an addition on the vector unit.
+  function innerAdds(flow, M, N, Kd, tile) { return flow === 'os' ? 0 : (ceil(Kd / Math.max(1, tile)) - 1) * M * N; }
+
+  // =====================================================================
+  // FlashAttention-2
+  // cfg: Br, Bc, cores, tile, qk, pv (inner dataflows)
+  // One PROGRAM = one (head, Br-row block of Q), on one core. Programs are dealt round-robin, one per
+  // core per lockstep wave. Inside a wave every core runs its program's key blocks in step:
+  //   qk  S = Q_i K_jᵀ / √d          (array)
+  //   sm  online softmax: m', P, l, and the rescale of O from the second block on   (vector unit)
+  //   pv  O += P V_j                  (array)
+  // and after the last block, norm: O = O / l, O written back.
+  // =====================================================================
+  function flashPlan(P, cfg) {
+    const Br = Math.max(1, Math.min(cfg.Br, P.Sq)), Bc = Math.max(1, Math.min(cfg.Bc, P.Skv));
+    const qb = ceil(P.Sq / Br), kb = ceil(P.Skv / Bc);
+    const programs = P.HT * qb, used = Math.max(1, Math.min(cfg.cores, programs)), W = ceil(programs / used);
+    const L = 3 * kb + 1, n = W * L;
+    const progs = rng(programs).map((p) => {
+      const head = floor(p / qb), blk = p % qb;
+      return { id: p, head, blk, r0: blk * Br, r1: Math.min((blk + 1) * Br, P.Sq), wave: floor(p / used), core: p % used };
+    });
+    const kbl = rng(kb).map((j) => [j * Bc, Math.min((j + 1) * Bc, P.Skv)]);
+    // K and V cross memory once per wave a head's programs span (D33's staging, as in bwz).
+    let streams = 0;
+    for (let h = 0; h < P.HT; h++) streams += floor(((h + 1) * qb - 1) / used) - floor((h * qb) / used) + 1;
+    return { Br, Bc, qb, kb, programs, used, W, L, n, progs, kbl, streams };
+  }
+  function phaseAt(pl, s) {
+    const wave = floor(s / pl.L), pos = s % pl.L;
+    if (pos < 3 * pl.kb) return { wave, j: floor(pos / 3), ph: ['qk', 'sm', 'pv'][pos % 3] };
+    return { wave, j: pl.kb - 1, ph: 'norm' };
+  }
+  function flashState(P, cfg, pl, t) {
+    const d = P.d, tile = cfg.tile || 1;
+    const st = {
+      prog: {}, mul: 0, exps: 0, rescaled: 0, normalised: 0, qRead: 0, kvRead: 0, oWritten: 0,
+      staged: new Set(), heldMax: 0, innerAdds: 0,
+      O: P.Q.map(() => zeros(P.Sq, d)), Odone: P.Q.map(() => rng(P.Sq).map(() => false))
+    };
+    for (let s = 0; s < Math.min(t, pl.n); s++) {
+      const { wave, j, ph } = phaseAt(pl, s);
+      const act = pl.progs.filter((p) => p.wave === wave);
+      let held = 0;
+      act.forEach((p) => {
+        const rows = p.r1 - p.r0, [c0, c1] = pl.kbl[j], w = c1 - c0, h = p.head;
+        const ps = st.prog[p.id] || (st.prog[p.id] = {
+          m: rng(rows).map(() => -Infinity), l: rng(rows).map(() => 0), O: zeros(rows, d),
+          S: null, Pm: null, mnew: null, alpha: null, j: -1, ph: null, doneBlocks: 0, done: false
+        });
+        ps.j = j; ps.ph = ph;
+        if (ph === 'qk') {
+          if (j === 0) st.qRead += rows * d;
+          const k0 = wave + ',' + h + ',' + j;
+          if (!st.staged.has(k0)) { st.staged.add(k0); st.kvRead += 2 * w * d; }
+          ps.S = rng(rows).map((a) => rng(w).map((b) => P.Q[h][p.r0 + a].reduce((acc, x, c) => acc + x * P.K[h][c0 + b][c], 0) * P.scale));
+          ps.Pm = null;
+          st.mul += rows * w * d;
+          st.innerAdds += innerAdds(cfg.qk, rows, w, d, tile);
+          held += rows * w;
+        } else if (ph === 'sm') {
+          ps.mnew = ps.m.map((m, a) => Math.max(m, ...ps.S[a]));
+          ps.Pm = ps.S.map((row, a) => row.map((x) => Math.exp(x - ps.mnew[a])));
+          ps.alpha = ps.m.map((m, a) => Math.exp(m - ps.mnew[a]));
+          ps.l = ps.l.map((l, a) => ps.alpha[a] * l + ps.Pm[a].reduce((x, y) => x + y, 0));
+          if (j > 0) { ps.O = ps.O.map((row, a) => row.map((x) => x * ps.alpha[a])); st.rescaled += rows * d; }
+          st.exps += rows * w;
+          held += rows * w;
+        } else if (ph === 'pv') {
+          ps.O = ps.O.map((row, a) => row.map((x, c) => x + ps.Pm[a].reduce((acc, pv, b) => acc + pv * P.V[h][c0 + b][c], 0)));
+          ps.m = ps.mnew;
+          ps.doneBlocks = j + 1;
+          st.mul += rows * d * w;
+          st.innerAdds += innerAdds(cfg.pv, rows, d, w, tile);
+        } else {
+          ps.O = ps.O.map((row, a) => row.map((x) => x / ps.l[a]));
+          for (let a = 0; a < rows; a++) { st.O[h][p.r0 + a] = ps.O[a].slice(); st.Odone[h][p.r0 + a] = true; }
+          st.normalised += rows * d; st.oWritten += rows * d; ps.done = true;
+        }
+      });
+      st.heldMax = Math.max(st.heldMax, held);
+    }
+    return st;
+  }
+  function flashTotals(P, pl, cfg) {
+    const tile = cfg.tile || 1;
+    let adds = 0;
+    pl.progs.forEach((p) => pl.kbl.forEach(([c0, c1]) => {
+      const rows = p.r1 - p.r0, w = c1 - c0;
+      adds += innerAdds(cfg.qk, rows, w, P.d, tile) + innerAdds(cfg.pv, rows, P.d, w, tile);
+    }));
+    return {
+      mul: 2 * P.HT * P.Sq * P.Skv * P.d, exps: P.HT * P.Sq * P.Skv,
+      rescaled: P.HT * P.Sq * P.d * (pl.kb - 1), normalised: P.HT * P.Sq * P.d,
+      qRead: P.HT * P.Sq * P.d, oWritten: P.HT * P.Sq * P.d,
+      kvRead: 2 * pl.streams * P.Skv * P.d, kvOnce: 2 * P.HT * P.Skv * P.d, innerAdds: adds
+    };
+  }
+  function flashCode(pl) {
+    return [
+      { html: '<span class="kw">for</span> wave <span class="kw">in</span> range(' + pl.W + '):   <span class="cm"># lockstep: every core, one program</span>', v: 'wave' },
+      { html: '  program = wave·' + pl.used + ' + core  <span class="cm"># → (head, Q block)</span>', v: 'wave' },
+      { html: '  <span class="kw">for</span> j <span class="kw">in</span> range(' + pl.kb + '):  <span class="cm"># key blocks, Bc = ' + pl.Bc + '</span>', v: 'loop' },
+      { html: '    S = <span class="ta">Q_i</span> <span class="tb">K_j</span>ᵀ / √d          <span class="cm"># array</span>', v: 'qk' },
+      { html: "    m' = max(m, rowmax S)", v: 'sm' },
+      { html: "    P  = exp(S − m')", v: 'sm' },
+      { html: "    l  = e^(m−m')·l + rowsum P", v: 'sm' },
+      { html: "    <span class=\"tc\">O</span> = e^(m−m')·<span class=\"tc\">O</span>      <span class=\"cm\"># rescale, j ≥ 1</span>", v: 'sm' },
+      { html: '    <span class="tc">O</span> += P <span class="tb">V_j</span>; m = m\'   <span class="cm"># array</span>', v: 'pv' },
+      { html: '  <span class="tc">O</span> = <span class="tc">O</span> / l;  write <span class="tc">O_i</span>', v: 'norm' }
+    ];
+  }
+
+  // =====================================================================
+  // Plain attention, one head, one query row per step and phase:
+  //   S row = q Kᵀ / √d   → written to memory
+  //   P row = softmax(S row)  (S read back, P written)
+  //   O row = P row V     (P read back)
+  // =====================================================================
+  function naivePlan(P) { return { n: 3 * P.Sq }; }
+  function naiveState(P, t) {
+    const st = { S: zeros(P.Sq, P.Skv), Pm: zeros(P.Sq, P.Skv), O: zeros(P.Sq, P.d), sOn: rng(P.Sq).map(() => 0), mul: 0, exps: 0, sW: 0, sR: 0, pW: 0, pR: 0 };
+    const q = P.Q[0], K = P.K[0], V = P.V[0];
+    for (let s = 0; s < t; s++) {
+      const i = floor(s / 3), ph = s % 3;
+      if (ph === 0) { st.S[i] = K.map((k) => q[i].reduce((a, x, c) => a + x * k[c], 0) * P.scale); st.mul += P.Skv * P.d; st.sW += P.Skv; st.sOn[i] = 1; }
+      else if (ph === 1) { const m = Math.max(...st.S[i]), e = st.S[i].map((x) => Math.exp(x - m)), l = e.reduce((a, x) => a + x, 0); st.Pm[i] = e.map((x) => x / l); st.exps += P.Skv; st.sR += P.Skv; st.pW += P.Skv; st.sOn[i] = 2; }
+      else { st.O[i] = rng(P.d).map((c) => st.Pm[i].reduce((a, p, j) => a + p * V[j][c], 0)); st.mul += P.Skv * P.d; st.pR += P.Skv; st.sOn[i] = 3; }
+    }
+    return st;
+  }
+
+  // ---------------- shared drawing ----------------
+  // Q on the left of S, Kᵀ on top of it, Vᵀ under it and O on its right: a row of S lines up with a
+  // row of Q and of O, a column of S with a column of Kᵀ and of Vᵀ — the shared axes of the formula.
+  function Quint(P, rb, cb, sTitle) {
+    this.root = el('div', 'att-grid');
+    if (Math.max(P.Sq, P.Skv) > 6) this.root.classList.add('dense');
+    const o = (kind, r, c, extra) => new Mat(kind, r, c, Object.assign({ rv: extra.rv, cv: extra.cv }, extra));
+    this.Q = o('Q', P.Sq, P.d, { rv: 'q', cv: 'd', rb, title: 'Q', dims: P.Sq + '×' + P.d });
+    this.K = o('K', P.d, P.Skv, { rv: 'd', cv: 'k', cb, title: 'Kᵀ', dims: P.d + '×' + P.Skv });
+    this.S = o('S', P.Sq, P.Skv, { rv: 'q', cv: 'k', rb, cb, title: sTitle, dims: P.Sq + '×' + P.Skv });
+    this.V = o('V', P.d, P.Skv, { rv: 'd', cv: 'k', cb, title: 'Vᵀ', dims: 'V is ' + P.Skv + '×' + P.d + ', drawn on its side' });
+    this.O = o('O', P.Sq, P.d, { rv: 'q', cv: 'd', rb, title: 'O', dims: P.Sq + '×' + P.d });
+    const slot = (m, cls) => { m.root.classList.add(cls); this.root.appendChild(m.root); };
+    slot(this.K, 'g-k'); slot(this.Q, 'g-q'); slot(this.S, 'g-s'); slot(this.O, 'g-o'); slot(this.V, 'g-v');
+  }
+  Quint.prototype.values = function (P, h) {
+    this.Q.paint({}, (r, c) => String(P.Q[h][r][c]));
+    this.K.paint({}, (r, c) => String(P.K[h][c][r]));
+    this.V.paint({}, (r, c) => String(P.V[h][c][r]));
+  };
+
+  // =====================================================================
+  // Views
+  // =====================================================================
+  function FlashView(root, cfg) {
+    this.cfg = cfg; this.root = root; this.P = cfg.P; root.classList.add('w', 'pv', 'att');
+    this.baseSpeed = 800; this.t = 0;
+    this.pl = flashPlan(this.P, cfg); this.n = this.pl.n; this.tot = flashTotals(this.P, this.pl, cfg);
+    const pl = this.pl;
+    if (cfg.title !== false) {
+      const head = el('div', 'w-head'); root.appendChild(head);
+      head.innerHTML = '<span class="chip">Br = ' + pl.Br + ' query rows × Bc = ' + pl.Bc + ' keys per block</span>' +
+        '<span class="chip">' + pl.programs + ' program' + (pl.programs > 1 ? 's' : '') + ' → ' + pl.used + ' core' + (pl.used > 1 ? 's' : '') + ' → ' + pl.W + ' wave' + (pl.W > 1 ? 's' : '') + '</span>' +
+        '<span class="chip">' + pl.kb + ' key block' + (pl.kb > 1 ? 's' : '') + ' per program</span>' +
+        '<span class="chip C">S never stored</span>';
+    }
+    const top = el('div', 'pv-top'); root.appendChild(top);
+    this.q = new Quint(this.P, pl.Br, pl.Bc, 'S = QKᵀ/√d → P');
+    const left = el('div', 'stack'); left.appendChild(this.q.root); top.appendChild(left);
+    this.headLab = el('div', 'att-head'); left.insertBefore(this.headLab, this.q.root);
+    const codeWrap = el('div', 'stack'); top.appendChild(codeWrap);
+    this.codeEl = el('pre', 'code'); codeWrap.appendChild(this.codeEl);
+    this.lines = flashCode(pl);
+    this.lineEls = this.lines.map((l) => { const d = el('div', 'ln', l.html); this.codeEl.appendChild(d); return d; });
+    this.run = el('div', 'att-run'); codeWrap.appendChild(this.run);
+    codeWrap.appendChild(el('div', 'legend', '<span><i class="lg read"></i>read now</span><span><i class="lg s-live"></i>S block on the array</span><span><i class="lg s-soft"></i>softmaxed on the vector unit</span><span><i class="lg s-gone"></i>used and discarded</span><span><i class="lg part"></i>O, unnormalised</span><span><i class="lg fin"></i>O, final</span>'));
+    root.appendChild(el('div', 'pv-lab', 'The chip: what every core is doing right now'));
+    this.floor = el('div', 'floor'); root.appendChild(this.floor);
+    this.coreEls = rng(cfg.cores).map(() => { const b = el('div', 'corebox'); this.floor.appendChild(b); return b; });
+    root.appendChild(el('div', 'pv-lab', 'Timeline: one row per core, one column per step'));
+    this.ganttWrap = el('div', 'gantt-wrap'); root.appendChild(this.ganttWrap);
+    this.buildGantt();
+    this.cap = el('div', 'cap'); root.appendChild(this.cap);
+    const foot = el('div', 'w-foot'); root.appendChild(foot);
+    this.cnt = el('div', 'counters'); foot.appendChild(this.cnt);
+    const right = el('div', 'stack right'); right.append(this.controls('Next block'), this.scrubber()); foot.appendChild(right);
+    this.keys(); this.go(0);
+  }
+  FlashView.prototype.inner = function () {
+    // Jump to the end of the current key block (or the next one).
+    // A block ends after its third phase; a wave ends after the normalise. Both land on a
+    // multiple of 3 within the wave, so that is where "next block" stops.
+    const L = this.pl.L;
+    let t = this.t + 1;
+    while (t < this.n && (t % L) % 3 !== 0) t++;
+    this.go(Math.min(this.n, t)); return true;
+  };
+  FlashView.prototype.buildGantt = function () {
+    const pl = this.pl, cfg = this.cfg, g = el('div', 'gantt');
+    g.style.gridTemplateColumns = '4.2rem repeat(' + pl.n + ', minmax(' + (pl.n > 24 ? '1.3rem' : '2.1rem') + ', 1fr))';
+    g.appendChild(Object.assign(el('div', 'g-h'), { style: 'grid-row:1;grid-column:1' }));
+    for (let w = 0; w < pl.W; w++) {
+      const h = el('div', 'g-wave', 'wave ' + (w + 1)); h.style.gridRow = '1'; h.style.gridColumn = (2 + w * pl.L) + ' / span ' + pl.L; g.appendChild(h);
+    }
+    const sl = el('div', 'g-lab', 'step'); sl.style.gridRow = '2'; sl.style.gridColumn = '1'; g.appendChild(sl);
+    for (let c = 0; c < pl.n; c++) {
+      const ph = phaseAt(pl, c).ph;
+      const x = el('div', 'g-num ph-' + ph, { qk: 'S', sm: 'σ', pv: 'O', norm: '/l' }[ph]);
+      x.title = { qk: 'S = QKᵀ on the array', sm: 'online softmax on the vector unit', pv: 'O += PV on the array', norm: 'O = O / l, written back' }[ph];
+      x.style.gridRow = '2'; x.style.gridColumn = String(2 + c); g.appendChild(x);
+    }
+    for (let w = 0; w < pl.W; w++) {
+      const band = el('div', 'g-band' + (w % 2 ? ' alt' : '')); band.style.gridRow = '3 / span ' + cfg.cores; band.style.gridColumn = (2 + w * pl.L) + ' / span ' + pl.L; g.appendChild(band);
+    }
+    this.bars = [];
+    for (let c = 0; c < cfg.cores; c++) {
+      const lab = el('div', 'g-lab', 'core ' + c); lab.style.gridRow = String(3 + c); lab.style.gridColumn = '1'; g.appendChild(lab);
+      for (let w = 0; w < pl.W; w++) {
+        const u = pl.progs.find((x) => x.wave === w && x.core === c);
+        const b = el('div', u ? 'bar f-os' : 'bar idle', u ? '<span class="fill"></span><span class="bt">h' + u.head + ' q' + u.r0 + (u.r1 - u.r0 > 1 ? '–' + (u.r1 - 1) : '') + '</span>' : '<span class="bt">idle</span>');
+        b.style.gridRow = String(3 + c); b.style.gridColumn = (2 + w * pl.L) + ' / span ' + pl.L;
+        if (u) { b.title = 'program ' + u.id + ': head ' + u.head + ', query rows ' + u.r0 + '…' + (u.r1 - 1) + ', on core ' + c + ', wave ' + (w + 1); this.bars.push({ el: b, u }); }
+        g.appendChild(b);
+      }
+    }
+    this.cursor = el('div', 'g-cursor'); this.cursor.style.gridRow = '2 / span ' + (cfg.cores + 1); g.appendChild(this.cursor);
+    this.ganttWrap.appendChild(g);
+  };
+  FlashView.prototype.render = function () {
+    const P = this.P, pl = this.pl, cfg = this.cfg;
+    const st = flashState(P, cfg, pl, this.t);
+    const slot = this.t - 1, live = slot >= 0 && slot < pl.n ? phaseAt(pl, slot) : null;
+    const active = live ? pl.progs.filter((p) => p.wave === live.wave) : [];
+    const shown = cfg.hsel != null && cfg.hsel >= 0 ? Math.min(cfg.hsel, P.HT - 1) : active.length ? active[0].head : (this.t >= pl.n ? P.HT - 1 : 0);
+    const nHeads = new Set(active.map((p) => p.head)).size;
+    this.headLab.innerHTML = 'Showing <b>head ' + shown + '</b> of ' + P.HT + (P.batch > 1 ? ' (batch ' + floor(shown / P.heads) + ', head ' + (shown % P.heads) + ')' : '') + (active.length && nHeads > 1 ? ' · this wave also runs head' + (nHeads > 2 ? 's ' : ' ') + [...new Set(active.map((p) => p.head))].filter((h) => h !== shown).join(', ') : '');
+    this.q.values(P, shown);
+    const cQ = {}, cK = {}, cV = {}, cS = {}, cO = {};
+    const sTxt = {}, oTxt = {};
+    pl.progs.filter((p) => p.head === shown).forEach((p) => {
+      const ps = st.prog[p.id]; if (!ps) return;
+      const isLive = live && p.wave === live.wave;
+      for (let a = p.r0; a < p.r1; a++) {
+        // S blocks this program already used: discarded.
+        for (let jj = 0; jj < ps.doneBlocks; jj++) { const [c0, c1] = pl.kbl[jj]; for (let b = c0; b < c1; b++) addCls(cS, key(a, b), 's-gone'); }
+        if (isLive && live.ph !== 'norm') {
+          const [c0, c1] = pl.kbl[live.j];
+          for (let b = c0; b < c1; b++) {
+            const k0 = key(a, b);
+            if (live.ph === 'qk') { addCls(cS, k0, 's-live'); sTxt[k0] = fmt(ps.S[a - p.r0][b - c0]); }
+            else if (live.ph === 'sm') { addCls(cS, k0, 's-soft'); sTxt[k0] = fmt(ps.Pm[a - p.r0][b - c0]); }
+            else { addCls(cS, k0, 's-soft'); sTxt[k0] = fmt(ps.Pm[a - p.r0][b - c0]); }
+          }
+        }
+        for (let c = 0; c < P.d; c++) {
+          const k0 = key(a, c);
+          if (ps.done) { addCls(cO, k0, 'fin'); oTxt[k0] = fmt(st.O[shown][a][c]); }
+          else if (ps.doneBlocks > 0 || (isLive && live.ph === 'pv')) { addCls(cO, k0, 'part'); oTxt[k0] = fmt(ps.O[a - p.r0][c]); }
+          if (isLive) addCls(cQ, k0, live.ph === 'qk' ? 'read' : 'stay');
+          if (isLive && (live.ph === 'pv' || (live.ph === 'sm' && live.j > 0) || live.ph === 'norm')) addCls(cO, k0, 'write');
+        }
+      }
+      if (isLive && live.ph !== 'norm') {
+        const [c0, c1] = pl.kbl[live.j];
+        for (let b = c0; b < c1; b++) for (let c = 0; c < P.d; c++) {
+          if (live.ph === 'qk') addCls(cK, key(c, b), 'read');
+          if (live.ph === 'pv') addCls(cV, key(c, b), 'read');
+        }
+      }
+    });
+    this.q.Q.paint(cQ, (r, c) => String(P.Q[shown][r][c]));
+    this.q.K.paint(cK, (r, c) => String(P.K[shown][c][r]));
+    this.q.V.paint(cV, (r, c) => String(P.V[shown][c][r]));
+    this.q.S.paint(cS, (r, c) => sTxt[key(r, c)] || '');
+    this.q.O.paint(cO, (r, c) => oTxt[key(r, c)] || '·');
+    // the running max and sum of the live program(s) of the shown head
+    const liveHere = active.filter((p) => p.head === shown);
+    if (liveHere.length) {
+      let h = '<table class="runtab"><tr><th>row</th><th>m (running max)</th><th>l (running sum)</th>' + (live.ph === 'sm' && live.j > 0 ? '<th>e^(m−m′)</th>' : '') + '</tr>';
+      liveHere.forEach((p) => {
+        const ps = st.prog[p.id];
+        for (let a = 0; a < p.r1 - p.r0; a++) {
+          const m = live.ph === 'sm' ? ps.mnew[a] : ps.m[a];
+          h += '<tr><td>q' + (p.r0 + a) + '</td><td>' + fmt(m) + '</td><td>' + fmt(ps.l[a]) + '</td>' + (live.ph === 'sm' && live.j > 0 ? '<td>' + fmt(ps.alpha[a]) + '</td>' : '') + '</tr>';
+        }
+      });
+      this.run.innerHTML = h + '</table>';
+    } else this.run.innerHTML = '<span class="muted">' + (this.t === 0 ? 'Running max m and sum l appear here.' : 'No program of this head is running now.') + '</span>';
+    // cores
+    this.coreEls.forEach((box, c) => {
+      const u = active.find((x) => x.core === c);
+      box.className = 'corebox' + (u ? '' : ' idle');
+      if (!u) {
+        box.innerHTML = '<h5><span>core ' + c + '</span></h5><div class="op">' + (this.t === 0 ? 'waiting to start' : this.t >= pl.n ? 'done' : 'idle: no program left for this core in wave ' + (live.wave + 1)) + '</div>';
+        return;
+      }
+      const [c0, c1] = pl.kbl[live.j];
+      const doing = {
+        qk: 'S = Q[' + u.r0 + '…' + (u.r1 - 1) + '] · K[' + c0 + '…' + (c1 - 1) + ']ᵀ on the array',
+        sm: 'online softmax' + (live.j > 0 ? ' + rescale O' : '') + ' on the vector unit',
+        pv: 'O += P · V[' + c0 + '…' + (c1 - 1) + '] on the array',
+        norm: 'O = O / l, write O[' + u.r0 + '…' + (u.r1 - 1) + ']'
+      }[live.ph];
+      box.innerHTML = '<h5><span>core ' + c + '</span><span class="muted">program ' + u.id + ' · head ' + u.head + ' · key block ' + (live.j + 1) + '/' + pl.kb + '</span></h5><div class="op"><b>' + doing + '</b></div>';
+    });
+    this.bars.forEach(({ el: b, u }) => {
+      const start = u.wave * pl.L, done = Math.max(0, Math.min(pl.L, this.t - start));
+      b.querySelector('.fill').style.width = (100 * done / pl.L) + '%';
+      b.classList.toggle('now', !!live && u.wave === live.wave);
+    });
+    this.cursor.style.gridColumn = String(2 + Math.max(0, slot)); this.cursor.hidden = this.t === 0 || this.t > pl.n;
+    // The rescale line (index 7) is part of the softmax phase, but on the first block there is
+    // nothing in O to rescale, so it stays dark there.
+    this.lineEls.forEach((d, n) => { const v = this.lines[n].v; d.classList.toggle('on', !!live && v === live.ph && !(n === 7 && live.j === 0)); });
+    let cap;
+    if (this.t === 0) cap = 'Press <b>Step</b>. Each step, every busy core does the same thing on its own program: <b>S = QKᵀ</b> on the array, then the <b>online softmax</b> on the vector unit, then <b>O += PV</b> on the array — one key block at a time.';
+    else if (live.ph === 'qk') cap = '<b>Step ' + this.t + '</b> · wave ' + (live.wave + 1) + '/' + pl.W + ', key block ' + (live.j + 1) + '/' + pl.kb + ': scores of ' + (live.j === 0 ? 'the first' : 'the next') + ' ' + (pl.kbl[live.j][1] - pl.kbl[live.j][0]) + ' key' + (pl.kbl[live.j][1] - pl.kbl[live.j][0] > 1 ? 's' : '') + '. ' + (live.j === 0 ? 'K and V for this block are fetched <b>once</b> and shared by every program of the same head in this wave.' : 'The earlier blocks of S are already gone.');
+    else if (live.ph === 'sm') cap = '<b>Step ' + this.t + '</b> · online softmax: the new running max m′, P = exp(S − m′), and the running sum l.' + (live.j > 0 ? ' The max may have grown, so everything O holds is <b>rescaled</b> by e^(m−m′) — the one extra piece of work FlashAttention adds.' : ' O is still empty, so there is nothing to rescale.');
+    else if (live.ph === 'pv') cap = '<b>Step ' + this.t + '</b> · O += P·V for this block, on the array. After this, the S block is <b>thrown away</b>.';
+    else cap = '<b>Step ' + this.t + '</b> · all key blocks seen: O = O / l, and O is written back — the only thing this program ever writes.';
+    if (this.t === pl.n) {
+      const ok = P.REF.every((R, h) => closeTo(st.O[h], R));
+      cap = 'Done in ' + pl.n + ' steps. ' + (ok ? '<span class="ok">Check: O == softmax(QKᵀ/√d)·V ✓</span>' : '<span class="tsp">O differs ✗</span>') + ' S was never stored: at most <b>' + st.heldMax + '</b> scores were on chip at once, against ' + P.HT * P.Sq * P.Skv + ' in all.';
+    }
+    this.cap.innerHTML = cap;
+    const util = Math.round(100 * pl.programs / (pl.W * cfg.cores));
+    const T = this.tot;
+    const items = [
+      { label: 'step', value: this.t + '/' + pl.n }, { label: 'multiplies', value: st.mul + '/' + T.mul },
+      { label: 'exp()', value: st.exps + '/' + T.exps }, { label: 'O rescaled', value: st.rescaled + '/' + T.rescaled, cls: 'csp' },
+      { label: 'Q read', value: st.qRead }, { label: 'K,V read', value: st.kvRead + (T.kvRead > T.kvOnce ? ' (once: ' + T.kvOnce + ')' : ''), cls: T.kvRead > T.kvOnce ? 'csp' : '' },
+      { label: 'O written', value: st.oWritten }, { label: 'S in memory', value: 0 },
+      { label: 'core use', value: util + '%' }
+    ];
+    if (cfg.qk !== 'os' || cfg.pv !== 'os') items.push({ label: 'inner partial adds', value: st.innerAdds + '/' + T.innerAdds, cls: 'csp' });
+    this.cnt.innerHTML = counters(items);
+  };
+  FlashView.prototype.trace = function (limit) {
+    const pl = this.pl, out = [];
+    for (let s = 0; s < Math.min(this.t, pl.n); s++) {
+      const { wave, j, ph } = phaseAt(pl, s);
+      const act = pl.progs.filter((p) => p.wave === wave);
+      const [c0, c1] = pl.kbl[j];
+      const what = {
+        qk: (p) => 'core' + p.core + ' h' + p.head + ' S=Q[' + p.r0 + ':' + p.r1 + ']K[' + c0 + ':' + c1 + ']ᵀ',
+        sm: (p) => 'core' + p.core + ' h' + p.head + ' softmax' + (j ? '+rescale' : ''),
+        pv: (p) => 'core' + p.core + ' h' + p.head + ' O+=PV[' + c0 + ':' + c1 + ']',
+        norm: (p) => 'core' + p.core + ' h' + p.head + ' O/=l, write O[' + p.r0 + ':' + p.r1 + ']'
+      }[ph];
+      out.push('step ' + String(s + 1).padStart(2) + ' (wave ' + (wave + 1) + ', key block ' + (j + 1) + '): ' + act.map(what).join(' | ') + (act.length < this.cfg.cores ? ' | ' + (this.cfg.cores - act.length) + ' idle' : ''));
+    }
+    return limit ? out.slice(-limit) : out;
+  };
+  mix(FlashView.prototype);
+
+  function NaiveView(root, cfg) {
+    this.cfg = cfg; this.root = root; this.P = cfg.P; root.classList.add('w', 'pv', 'att');
+    this.baseSpeed = 900; this.t = 0; this.n = naivePlan(this.P).n;
+    const P = this.P;
+    if (cfg.title !== false) {
+      const head = el('div', 'w-head'); root.appendChild(head);
+      head.innerHTML = '<span class="chip">one query row per step, three phases</span><span class="chip">S = ' + P.Sq + '×' + P.Skv + ' scores, all kept</span><span class="chip mem">S and P go through memory</span>';
+    }
+    const top = el('div', 'pv-top'); root.appendChild(top);
+    this.q = new Quint(P, P.Sq, P.Skv, 'S = QKᵀ/√d, then P');
+    top.appendChild(this.q.root);
+    const codeWrap = el('div', 'stack'); top.appendChild(codeWrap);
+    this.codeEl = el('pre', 'code'); codeWrap.appendChild(this.codeEl);
+    this.lines = [
+      { html: '<span class="kw">for</span> i <span class="kw">in</span> range(' + P.Sq + '):  S[i] = <span class="ta">Q[i]</span> <span class="tb">K</span>ᵀ / √d   <span class="cm"># write S</span>', v: 0 },
+      { html: '<span class="kw">for</span> i <span class="kw">in</span> range(' + P.Sq + '):  P[i] = softmax(S[i]) <span class="cm"># read S, write P</span>', v: 1 },
+      { html: '<span class="kw">for</span> i <span class="kw">in</span> range(' + P.Sq + '):  <span class="tc">O[i]</span> = P[i] <span class="tb">V</span>        <span class="cm"># read P</span>', v: 2 }
+    ];
+    this.lineEls = this.lines.map((l) => { const d = el('div', 'ln', l.html); this.codeEl.appendChild(d); return d; });
+    codeWrap.appendChild(el('div', 'legend', '<span><i class="lg read"></i>read now</span><span><i class="lg s-mem"></i>S (or P) stored</span><span><i class="lg fin"></i>O row done</span>'));
+    codeWrap.appendChild(el('p', 'small', 'Drawn one row at a time for clarity: phase by phase for each row. A real kernel computes the whole of S first, then the softmax, then O — the memory traffic is the same.'));
+    this.cap = el('div', 'cap'); root.appendChild(this.cap);
+    const foot = el('div', 'w-foot'); root.appendChild(foot);
+    this.cnt = el('div', 'counters'); foot.appendChild(this.cnt);
+    const right = el('div', 'stack right'); right.append(this.controls('Next row'), this.scrubber()); foot.appendChild(right);
+    this.keys(); this.go(0);
+  }
+  NaiveView.prototype.inner = function () { const t = Math.min(this.n, (floor(this.t / 3) + 1) * 3); this.go(t === this.t ? Math.min(this.n, t + 3) : t); return true; };
+  NaiveView.prototype.render = function () {
+    const P = this.P, st = naiveState(P, this.t), slot = this.t - 1, i = floor(slot / 3), ph = slot % 3;
+    this.q.values(P, 0);
+    const cQ = {}, cK = {}, cV = {}, cS = {}, cO = {};
+    for (let r = 0; r < P.Sq; r++) {
+      for (let c = 0; c < P.Skv; c++) if (st.sOn[r]) addCls(cS, key(r, c), 's-mem');
+      if (st.sOn[r] === 3) for (let c = 0; c < P.d; c++) addCls(cO, key(r, c), 'fin');
+    }
+    if (slot >= 0) {
+      if (ph === 0) { for (let c = 0; c < P.d; c++) addCls(cQ, key(i, c), 'read'); for (let c = 0; c < P.d; c++) for (let b = 0; b < P.Skv; b++) addCls(cK, key(c, b), 'read'); for (let b = 0; b < P.Skv; b++) addCls(cS, key(i, b), 'write'); }
+      if (ph === 1) for (let b = 0; b < P.Skv; b++) addCls(cS, key(i, b), 'read-s');
+      if (ph === 2) { for (let b = 0; b < P.Skv; b++) addCls(cS, key(i, b), 'read-s'); for (let c = 0; c < P.d; c++) for (let b = 0; b < P.Skv; b++) addCls(cV, key(c, b), 'read'); for (let c = 0; c < P.d; c++) addCls(cO, key(i, c), 'write'); }
+    }
+    this.q.Q.paint(cQ, (r, c) => String(P.Q[0][r][c]));
+    this.q.K.paint(cK, (r, c) => String(P.K[0][c][r]));
+    this.q.V.paint(cV, (r, c) => String(P.V[0][c][r]));
+    this.q.S.paint(cS, (r, c) => (st.sOn[r] >= 2 ? fmt(st.Pm[r][c]) : st.sOn[r] ? fmt(st.S[r][c]) : ''));
+    this.q.O.paint(cO, (r, c) => (st.sOn[r] === 3 ? fmt(st.O[r][c]) : '·'));
+    this.lineEls.forEach((d, n) => d.classList.toggle('on', slot >= 0 && n === ph));
+    let cap = this.t === 0 ? 'Press <b>Step</b>. Plain attention computes <b>every</b> score, keeps them, and only then turns them into probabilities.' :
+      ['<b>Row ' + i + '</b>: its scores against every key, written to memory.', '<b>Row ' + i + '</b>: softmax needs the <b>whole row</b> — its max and its sum — so the stored scores are read back and P is written.', '<b>Row ' + i + '</b>: O = P·V, reading P back.'][ph];
+    if (this.t === this.n) {
+      const ok = closeTo(st.O, P.REF[0]);
+      cap = 'Done. ' + (ok ? '<span class="ok">Check: O == softmax(QKᵀ/√d)·V ✓</span>' : '<span class="tsp">O differs ✗</span>') + ' ' + P.Sq * P.Skv + ' scores were stored and read back, then the same number of probabilities: <b>' + (st.sW + st.sR + st.pW + st.pR) + '</b> numbers through memory that FlashAttention never moves.';
+    }
+    this.cap.innerHTML = cap;
+    this.cnt.innerHTML = counters([
+      { label: 'step', value: this.t + '/' + this.n }, { label: 'multiplies', value: st.mul + '/' + 2 * P.Sq * P.Skv * P.d },
+      { label: 'exp()', value: st.exps }, { label: 'S written', value: st.sW, cls: 'cm' }, { label: 'S read', value: st.sR, cls: 'cm' },
+      { label: 'P written', value: st.pW, cls: 'cm' }, { label: 'P read', value: st.pR, cls: 'cm' }, { label: 'S held at once', value: st.sOn.filter((x) => x).length * P.Skv }
+    ]);
+  };
+  NaiveView.prototype.trace = function () {
+    const out = [];
+    for (let s = 0; s < this.t; s++) { const i = floor(s / 3); out.push('step ' + String(s + 1).padStart(2) + ': ' + ['S[' + i + '] = Q[' + i + ']·Kᵀ/√d → memory', 'P[' + i + '] = softmax(S[' + i + ']) (S read, P written)', 'O[' + i + '] = P[' + i + ']·V (P read)'][s % 3]); }
+    return out;
+  };
+  mix(NaiveView.prototype);
+
+  // Inside one block: S = Q_i K_jᵀ is an ordinary matmul, M = Br, K = d, N = Bc — shown by the
+  // matmul notebook's own SingleView, with the array tile and the stationarity as its block loops.
+  const BORDER = { os: 'ijk', ws: 'jki', is: 'ikj' };
+  function innerProblem(P, cfg) {
+    const pl = flashPlan(P, cfg), [c0, c1] = pl.kbl[0], rows = pl.progs[0].r1 - pl.progs[0].r0;
+    const A = rng(rows).map((a) => P.Q[0][a].slice());
+    const B = rng(P.d).map((c) => rng(c1 - c0).map((b) => P.K[0][c0 + b][c]));
+    const M = rows, N = c1 - c0, K = P.d;
+    const REF = rng(M).map((i) => rng(N).map((j) => rng(K).reduce((s, k) => s + A[i][k] * B[k][j], 0)));
+    return { M, N, K, A, B, REF, seed: 1 };
+  }
+  function largestDivisorUpTo(n, cap) { return X.divisors(n).filter((v) => v <= cap).pop(); }
+  function InnerView(root, cfg) {
+    const Pm = innerProblem(cfg.P, cfg), tile = cfg.tile || 1;
+    const sub = Object.assign({}, cfg, {
+      P: Pm, tiled: true, tm: largestDivisorUpTo(Pm.M, tile), tn: largestDivisorUpTo(Pm.N, tile), tk: largestDivisorUpTo(Pm.K, tile),
+      border: BORDER[cfg.qk], inner: 'ijk', gran: 'block'
+    });
+    root.classList.add('stack');
+    root.appendChild(el('div', 'att-head', 'Program 0, key block 0: <b>S = Q[0…' + (Pm.M - 1) + '] · K[0…' + (Pm.N - 1) + ']ᵀ</b> — M = Br = ' + Pm.M + ', K = d = ' + Pm.K + ', N = Bc = ' + Pm.N + ', before the 1/√d scale. Array tile ' + sub.tm + '×' + sub.tn + '×' + sub.tk + ', ' + cfg.qk + '.'));
+    const host = el('div'); root.appendChild(host);
+    this.view = new X.SingleView(host, sub);
+    this.cfg = this.view.cfg; this.root = root;
+  }
+  Object.defineProperty(InnerView.prototype, 'timer', { get() { return this.view.timer; } });
+  ['step', 'back', 'go', 'inner', 'finish', 'reset', 'atEnd', 'atStart', 'play', 'stop', 'keydown', 'destroy', 'trace'].forEach((m) => { InnerView.prototype[m] = function () { return this.view[m].apply(this.view, arguments); }; });
+
+  // ---------------- deck mount ----------------
+  const DEFAULTS = { S: 4, T: 4, d: 2, heads: 1, batch: 1, Br: 2, Bc: 2, cores: 1, tile: 1, qk: 'os', pv: 'os', seed: 0 };
+  const KNOB_LAB = { Br: 'Br', Bc: 'Bc', cores: 'cores', qk: 'S = QKᵀ flow', heads: 'heads', batch: 'batch', S: 'queries', tile: 'array tile' };
+  const VIEWS = { flash: FlashView, naive: NaiveView, inner: InnerView };
+  function Widget(root, cfg) {
+    const st = Object.assign({}, DEFAULTS, cfg);
+    root.classList.add('stack');
+    const knobs = el('div', 'pv-knobs'); root.appendChild(knobs);
+    const host = el('div'); root.appendChild(host);
+    const make = () => {
+      if (this.view) this.view.destroy();
+      host.innerHTML = ''; const d = el('div'); host.appendChild(d);
+      const P = problem(st);
+      this.view = new VIEWS[st.type](d, Object.assign({}, st, { P }));
+      knobs.querySelectorAll('button').forEach((b) => b.setAttribute('aria-pressed', String(st[b.dataset.k]) === b.dataset.v ? 'true' : 'false'));
+    };
+    (cfg.knobs || []).forEach((kn) => {
+      const grp = el('div', 'seg'); grp.appendChild(el('span', 'seg-l', KNOB_LAB[kn.k] || kn.k));
+      kn.v.forEach((v) => { const b = btn(String(v), kn.k + ' ' + v, () => { st[kn.k] = v; make(); }); b.dataset.k = kn.k; b.dataset.v = String(v); grp.appendChild(b); });
+      knobs.appendChild(grp);
+    });
+    if (!(cfg.knobs || []).length) knobs.hidden = true;
+    make();
+    this.root = root;
+  }
+  ['step', 'back', 'inner', 'finish', 'reset', 'atEnd', 'atStart', 'play', 'stop'].forEach((m) => { Widget.prototype[m] = function () { return this.view[m].apply(this.view, arguments); }; });
+  function mount(node) { const cfg = JSON.parse(node.dataset.widget); node._widget = new Widget(node, cfg); return node._widget; }
+  function mountAll(scope) { return Array.from((scope || document).querySelectorAll('[data-widget]')).map(mount); }
+
+  global.ATT = { problem, refAttention, closeTo, flashPlan, flashState, flashTotals, phaseAt, naivePlan, naiveState, innerAdds, innerProblem, FlashView, NaiveView, InnerView, mount, mountAll, fmt, DEFAULTS, TOL };
+  // The deck's shared script calls MM.mountAll(); on the attention deck it mounts attention widgets.
+  if (!global.MM) global.MM = { mountAll };
+})(typeof window !== 'undefined' ? window : globalThis);
+</script><script>
+(function () {
+  const slides = Array.from(document.querySelectorAll('.slide'));
+  MM.mountAll();
+  const secEl = document.getElementById('sec'), cntEl = document.getElementById('cnt'), prog = document.getElementById('prog');
+  slides.forEach((s, i) => { const d = document.createElement('i'); d.title = (i + 1) + ' · ' + s.dataset.sec; d.addEventListener('click', () => show(i)); prog.appendChild(d); });
+  let cur = 0;
+  const builds = (s) => Array.from(s.querySelectorAll('.b'));
+  const widget = (s) => { const n = s.querySelector('[data-widget]'); return n && n._widget && n._widget.step ? n._widget : null; };
+  function show(n, revealAll) {
+    n = Math.max(0, Math.min(slides.length - 1, n));
+    const w0 = widget(slides[cur]); if (w0) w0.stop();
+    cur = n;
+    slides.forEach((s, i) => s.classList.toggle('on', i === cur));
+    if (revealAll) builds(slides[cur]).forEach((b) => b.classList.add('shown'));
+    secEl.textContent = slides[cur].dataset.sec;
+    cntEl.textContent = (cur + 1) + ' / ' + slides.length;
+    Array.from(prog.children).forEach((d, i) => { d.className = i === cur ? 'cur' : i < cur ? 'done' : ''; });
+    document.querySelector('.stage').scrollTop = 0;
+    try { history.replaceState(null, '', '#s' + (cur + 1)); } catch (e) {}
+  }
+  function next() {
+    const s = slides[cur];
+    const hid = builds(s).find((b) => !b.classList.contains('shown'));
+    if (hid) { hid.classList.add('shown'); return; }
+    const w = widget(s);
+    if (w && !w.atEnd()) { w.stop(); w.step(); return; }
+    show(cur + 1);
+  }
+  function prev() {
+    const s = slides[cur];
+    const w = widget(s);
+    if (w && !w.atStart()) { w.stop(); w.back(); return; }
+    const shown = builds(s).filter((b) => b.classList.contains('shown'));
+    if (shown.length) { shown[shown.length - 1].classList.remove('shown'); return; }
+    show(cur - 1, true);
+  }
+  function inner() { const w = widget(slides[cur]); if (w && !w.atEnd()) { w.stop(); builds(slides[cur]).forEach((b) => b.classList.add('shown')); w.inner(); } else next(); }
+  document.getElementById('bprev').addEventListener('click', prev);
+  document.getElementById('bnext').addEventListener('click', next);
+  document.getElementById('bskip').addEventListener('click', () => show(cur + 1));
+  document.addEventListener('keydown', (e) => {
+    if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey) return;
+    const k = e.key, w = widget(slides[cur]);
+    let done = true;
+    if (k === 'ArrowRight' || k === ' ') next();
+    else if (k === 'ArrowLeft') prev();
+    else if (k === 'ArrowDown') inner();
+    else if (k === 'ArrowUp') { if (w) { w.stop(); w.reset(); } }
+    else if (k === 'PageDown' || k === 'n' || k === 'N') show(cur + 1);
+    else if (k === 'PageUp' || k === 'b' || k === 'B') show(cur - 1, true);
+    else if (k === 'Home') show(0);
+    else if (k === 'End') show(slides.length - 1, true);
+    else if ((k === 'p' || k === 'P') && w) w.play();
+    else if ((k === 'e' || k === 'E') && w) w.finish();
+    else if ((k === 'r' || k === 'R') && w) w.reset();
+    else done = false;
+    if (done) e.preventDefault();
+  });
+  const m = /^#s(\d+)$/.exec(location.hash);
+  show(m ? +m[1] - 1 : 0, !!m);
+})();
+</script>
+</body>
+</html>

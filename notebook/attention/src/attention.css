@@ -1,0 +1,35 @@
+/* Attention's own matrices and states, on the shared tokens: Q is the blue operand (--a), K and V the
+   orange ones (--b), O the green result (--c); the score matrix S takes violet (--mem) when it is
+   computed or stored and magenta (--sp) while the vector unit softmaxes it. */
+.att-grid { display: grid; grid-template-columns: auto auto auto; grid-template-areas: "x k y" "q s o" "z v w"; gap: 0.6rem 0.8rem; align-items: end; justify-items: start; }
+.att-grid > .g-k { grid-area: k; } .att-grid > .g-v { grid-area: v; align-self: start; }
+.att-grid > .g-q { grid-area: q; align-self: start; justify-self: end; }
+.att-grid > .g-s { grid-area: s; align-self: start; } .att-grid > .g-o { grid-area: o; align-self: start; }
+.att-grid.dense { --cell: 1.6rem; } .att-grid.dense .cell { font-size: 0.66rem; }
+.att .cell { font-size: 0.74rem; }
+.k-Q { background: color-mix(in oklab, var(--a) 11%, var(--surface)); color: var(--fg); }
+.k-Q.read { background: var(--a); color: var(--on-strong); }
+.k-K, .k-V { background: color-mix(in oklab, var(--b) 12%, var(--surface)); color: var(--fg); }
+.k-K.read, .k-V.read { background: var(--b); color: var(--on-strong); }
+.k-O { background: var(--surface); border: 1.5px dashed var(--line); color: var(--muted); }
+.k-O.part { background: var(--cp); color: var(--fg); border: 1.5px solid color-mix(in oklab, var(--c) 45%, transparent); }
+.k-O.fin { background: var(--c); color: var(--on-strong); border: 1.5px solid var(--c); }
+.k-O.write, .k-S.write { box-shadow: 0 0 0 2.5px var(--fg); }
+.k-S { background: var(--surface); border: 1.5px dashed var(--line); color: var(--muted); }
+.k-S.s-mem { background: color-mix(in oklab, var(--mem) 22%, var(--surface)); color: var(--fg); border: 1.5px solid color-mix(in oklab, var(--mem) 55%, transparent); }
+.k-S.read-s { box-shadow: 0 0 0 2.5px var(--mem); }
+.k-S.s-gone { background: repeating-linear-gradient(45deg, var(--surface-2) 0 3px, var(--surface) 3px 6px); border: 1.5px dashed var(--muted); color: transparent; }
+.k-S.s-live { background: color-mix(in oklab, var(--mem) 40%, var(--surface)); color: var(--fg); border: 1.5px solid var(--mem); }
+.k-S.s-soft { background: color-mix(in oklab, var(--sp) 30%, var(--surface)); color: var(--fg); border: 1.5px solid var(--sp); }
+.lg.s-live { background: color-mix(in oklab, var(--mem) 40%, var(--surface)); border: 1.5px solid var(--mem); }
+.lg.s-soft { background: color-mix(in oklab, var(--sp) 30%, var(--surface)); border: 1.5px solid var(--sp); }
+.lg.s-gone { background: repeating-linear-gradient(45deg, var(--surface-2) 0 3px, var(--surface) 3px 6px); border: 1.5px dashed var(--muted); }
+.lg.s-mem { background: color-mix(in oklab, var(--mem) 22%, var(--surface)); border: 1.5px solid var(--mem); }
+.counters .cm b { color: var(--mem); }
+.att-head { font-size: 0.85rem; color: var(--muted); } .att-head b { color: var(--fg); }
+.att-run table.runtab { border-collapse: collapse; font: 0.78rem var(--font-mono); margin-top: 0.4rem; }
+.att-run th { text-align: left; font: 600 0.66rem var(--font-body); text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); padding: 0.15rem 0.5rem; border-bottom: 1px solid var(--line); }
+.att-run td { padding: 0.12rem 0.5rem; border-bottom: 1px solid var(--line); }
+.g-num.ph-qk, .g-num.ph-pv { color: var(--mem); } .g-num.ph-sm { color: var(--sp); } .g-num.ph-norm { color: var(--c); }
+.kl code, .ksec code { font: 500 0.68rem var(--font-mono); text-transform: none; letter-spacing: 0; color: var(--muted); }
+.ts { color: var(--mem); font-weight: 600; } .tv { color: var(--b); font-weight: 600; } .tq { color: var(--a); font-weight: 600; }

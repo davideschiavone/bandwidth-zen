@@ -1,11 +1,13 @@
-"""Build ../deck.html and ../notebook.html from the files in this folder.
+"""Shared page shell for every notebook under notebook/: the reset, the fonts, the deck and
+notebook chrome (CSS + JS), the document wrapper, and the two page builders.
 
-Usage:  python3 src/build.py      (Python 3.8+, standard library only)
+Each notebook's src/build.py passes its own title, header and scripts; the look, the keys and the
+controls are the same everywhere because they come from here.
 """
 import os
+
 HERE = os.path.dirname(os.path.abspath(__file__))
-DEST = os.path.dirname(HERE)
-os.chdir(HERE)
+CSS = open(os.path.join(HERE, 'engine.css')).read()
 
 RESET = ('body{margin:0;font:14px system-ui,sans-serif;'
          '-webkit-text-size-adjust:100%}img{max-width:100%}[hidden]{display:none!important}'
@@ -19,10 +21,6 @@ def document(page):
             '<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">\n'
             '<style>' + RESET + '</style>\n' + head + '\n</head>\n<body>\n' + body + '\n</body>\n</html>\n')
 
-CSS = open('engine.css').read()
-JS = open('engine.js').read()
-JS2 = open('engine2.js').read() + '\n' + open('engine3.js').read()
-LABJS = open('lab.js').read()
 FONTS = '<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">'
 
 # ---------------- deck ----------------
@@ -183,28 +181,28 @@ details.console summary { cursor: pointer; padding: 0.5rem 0.8rem; font: 600 0.8
 details.console pre { margin: 0; padding: 0.6rem 0.8rem; max-height: 16rem; overflow: auto; font: 0.74rem/1.5 var(--font-mono); border-top: 1px solid var(--line); background: var(--surface-2); white-space: pre; }
 """
 
-def build_lab():
-    page = (f'<title>Matmul Rearranged Notebook</title>{FONTS}<style>{CSS}{LAB_CSS}</style>'
-            '<header class="lab-head"><p class="eyebrow">Interactive notebook · pick a chapter, then turn the knobs</p><h1>Matmul, rearranged</h1>'
-            '<span class="formula"><span class="ta">A</span>[M, K] @ <span class="tb">B</span>[K, N] → <span class="tc">C</span>[M, N]</span></header>'
-            '<nav class="chapters" id="chapters" aria-label="Chapters"></nav>'
-            '<div class="lab"><aside class="knobs" id="knobs" aria-label="Knobs"></aside>'
-            '<main class="labmain"><section class="story" id="story"></section><div class="rule" id="rule"></div><div id="view"></div>'
-            '<details class="console" id="tracebox" open><summary>Printed steps — the same run as text</summary><pre id="trace"></pre></details></main></div>'
-            f'<script>{JS2}</script><script>{LABJS}</script>')
-    open(os.path.join(DEST, 'notebook.html'), 'w', encoding='utf-8').write(document(page))
 
-def build_deck():
-    slides = open('deck_slides.html').read()
-    page = (f'<title>Matmul Rearranged Deck</title>{FONTS}<style>{CSS}{DECK_CSS}</style>'
-            '<div class="deck"><header class="top"><span class="name">Matmul, rearranged</span><span class="sec" id="sec"></span></header>'
-            f'<main class="stage">{slides}</main>'
-            '<footer class="bot"><div class="navb"><button class="btn" id="bprev" type="button" aria-label="Back (←)">◀ Back</button>'
-            '<span class="count" id="cnt"></span><button class="btn pri" id="bnext" type="button" aria-label="Next build or step (→)">Next ▶</button>'
-            '<button class="btn" id="bskip" type="button" aria-label="Next slide (PgDn)">Next slide ⇥</button></div>'
-            '<div class="prog" id="prog"></div><span class="hint">→ step · ↓ inner loop · PgDn slide · P play</span></footer></div>'
-            f'<script>{JS}</script><script>{JS2}</script><script>{DECK_JS}</script>')
-    open(os.path.join(DEST, 'deck.html'), 'w', encoding='utf-8').write(document(page))
+def lab_page(title, eyebrow, heading, formula, scripts, extra_css=''):
+    """The interactive notebook: chapter bar, knob panel, story, rule, view and printed steps."""
+    return document(
+        f'<title>{title}</title>{FONTS}<style>{CSS}{LAB_CSS}{extra_css}</style>'
+        f'<header class="lab-head"><p class="eyebrow">{eyebrow}</p><h1>{heading}</h1>'
+        f'<span class="formula">{formula}</span></header>'
+        '<nav class="chapters" id="chapters" aria-label="Chapters"></nav>'
+        '<div class="lab"><aside class="knobs" id="knobs" aria-label="Knobs"></aside>'
+        '<main class="labmain"><section class="story" id="story"></section><div class="rule" id="rule"></div><div id="view"></div>'
+        '<details class="console" id="tracebox" open><summary>Printed steps — the same run as text</summary><pre id="trace"></pre></details></main></div>'
+        + ''.join(f'<script>{s}</script>' for s in scripts))
 
-build_lab(); build_deck()
-print('built deck.html and notebook.html in', DEST)
+
+def deck_page(title, name, slides, scripts, extra_css=''):
+    """The slide deck: top bar, stage, footer with the navigation and the progress strip."""
+    return document(
+        f'<title>{title}</title>{FONTS}<style>{CSS}{DECK_CSS}{extra_css}</style>'
+        f'<div class="deck"><header class="top"><span class="name">{name}</span><span class="sec" id="sec"></span></header>'
+        f'<main class="stage">{slides}</main>'
+        '<footer class="bot"><div class="navb"><button class="btn" id="bprev" type="button" aria-label="Back (←)">◀ Back</button>'
+        '<span class="count" id="cnt"></span><button class="btn pri" id="bnext" type="button" aria-label="Next build or step (→)">Next ▶</button>'
+        '<button class="btn" id="bskip" type="button" aria-label="Next slide (PgDn)">Next slide ⇥</button></div>'
+        '<div class="prog" id="prog"></div><span class="hint">→ step · ↓ inner loop · PgDn slide · P play</span></footer></div>'
+        + ''.join(f'<script>{s}</script>' for s in scripts) + f'<script>{DECK_JS}</script>')

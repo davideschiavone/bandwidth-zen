@@ -1,0 +1,124 @@
+<section class="slide title-slide" data-sec="Start">
+  <p class="eyebrow">One formula · the blocks that make it fast</p>
+  <h1>Attention, blocked</h1>
+  <p class="formula"><span class="tc">O</span> = softmax(<span class="ta">Q</span> <span class="tb">K</span>ᵀ / √d) <span class="tb">V</span></p>
+  <p class="lede">FlashAttention computes exactly this — the same multiplies, the same exps — without ever storing the score matrix. This deck builds it up from the textbook formula, one idea per slide.</p>
+  <div class="keys">
+    <span><kbd>→</kbd> next build or animation step</span><span><kbd>↓</kbd> next row / block</span><span><kbd>←</kbd> back</span>
+    <span><kbd>PgDn</kbd> / <kbd>N</kbd> next slide</span><span><kbd>P</kbd> play</span><span><kbd>E</kbd> finish animation</span>
+  </div>
+</section>
+
+<section class="slide" data-sec="The formula">
+  <h2>Three steps, one head</h2>
+  <div class="points">
+    <p class="b"><b>Scores.</b> Every query row against every key: <code>S = Q Kᵀ / √d</code>. Q is Sq × d, K is Skv × d, so S is Sq × Skv.</p>
+    <p class="b"><b>Probabilities.</b> Each row of S through a softmax: subtract the row's max, exponentiate, divide by the row's sum.</p>
+    <p class="b"><b>Mix.</b> <code>O = P V</code>: each output row is a probability-weighted mix of the value rows. O is Sq × d, like Q.</p>
+    <p class="b small">Both S = QKᵀ and O = PV are matmuls — the ones the matmul deck rearranges. What is new is the softmax between them.</p>
+  </div>
+</section>
+
+<section class="slide" data-sec="Plain attention">
+  <h2>Done the obvious way</h2>
+  <p>One query row per step: its scores go to memory, come back for the softmax, the probabilities go to memory, come back for O. Watch the violet counters.</p>
+  <div data-widget='{"type":"naive"}'></div>
+</section>
+
+<section class="slide" data-sec="Why S is stored">
+  <h2>Softmax needs the whole row</h2>
+  <div class="points">
+    <p class="b">A softmax divides by the <b>sum</b> of its row, after subtracting the row's <b>max</b>. Neither is known until every score of the row exists.</p>
+    <p class="b">So plain attention keeps all of S: <b>Sq × Skv</b> numbers, then as many probabilities. At 4096 tokens that is 16.8 million scores per head — memory traffic, not arithmetic, sets the time.</p>
+    <p class="b big">The fix: do not wait for the row. Keep a <b>running</b> max and a <b>running</b> sum.</p>
+  </div>
+</section>
+
+<section class="slide" data-sec="Online softmax">
+  <h2>Online softmax, one key at a time</h2>
+  <div class="split">
+    <div class="points">
+      <p class="b">Keep, per query row, <b>m</b> (the largest score so far) and <b>l</b> (the sum of exp(score − m) so far), and O unnormalised.</p>
+      <p class="b">A new score s: <code>m′ = max(m, s)</code>. Everything kept so far was weighted with e<sup>−m</sup>, so multiply l and O by <b>e<sup>m−m′</sup></b>, then add the new term.</p>
+      <p class="b">At the end, <code>O = O / l</code> — exactly the softmax. Nothing was stored but m, l and O.</p>
+    </div>
+  </div>
+  <div data-widget='{"type":"flash","S":1,"T":4,"Br":1,"Bc":1,"cores":1,"seed":16,"d":2}'></div>
+</section>
+
+<section class="slide" data-sec="Blocks of keys">
+  <h2>Keys in blocks of Bc</h2>
+  <p>Take keys Bc at a time: one small matmul for the scores, one softmax update, one small matmul into O. The rescale happens once per block after the first — bigger blocks, fewer rescales, a bigger S block on chip. <code>bwz attention --bc</code>.</p>
+  <div data-widget='{"type":"flash","S":1,"T":8,"Br":1,"Bc":2,"cores":1,"seed":28,"knobs":[{"k":"Bc","v":[1,2,4,8]}]}'></div>
+</section>
+
+<section class="slide" data-sec="Blocks of queries">
+  <h2>Queries in blocks of Br: programs</h2>
+  <p>A <b>program</b> owns Br rows of Q and their O, and streams every key block past them. Each block of S is Br × Bc and never leaves the core. <code>bwz attention --br</code>.</p>
+  <div data-widget='{"type":"flash","S":4,"T":4,"Br":2,"Bc":2,"cores":1,"knobs":[{"k":"Br","v":[1,2,4]}]}'></div>
+</section>
+
+<section class="slide" data-sec="Cores and waves">
+  <h2>Programs on cores, in waves</h2>
+  <p>Programs share only K and V, so they run on different cores at once, dealt round-robin: core c takes program <code>wave · cores + c</code>. Every busy core does the same phase on its own rows.</p>
+  <div data-widget='{"type":"flash","S":4,"T":4,"Br":1,"Bc":2,"cores":2,"knobs":[{"k":"cores","v":[1,2,3,4]}]}'></div>
+</section>
+
+<section class="slide" data-sec="Inside a block">
+  <h2>Inside a block: S = Q<sub>i</sub>K<sub>j</sub>ᵀ is a matmul</h2>
+  <p>M = Br, K = d, N = Bc — drawn by the matmul deck's own view. os keeps a block of S and sweeps d inside it; ws and is cut d over the grid and leave pieces to add. <code>bwz attention --stationarity</code>.</p>
+  <div data-widget='{"type":"inner","S":4,"T":4,"d":4,"Br":4,"Bc":4,"tile":2,"qk":"os","knobs":[{"k":"qk","v":["os","ws","is"]}]}'></div>
+</section>
+
+<section class="slide" data-sec="Inner dataflow">
+  <h2>What the inner dataflow costs</h2>
+  <div class="points">
+    <p class="b">On a GPU tensor core there is no accumulator that keeps K's pieces in place: ws and is leave <b>(slices − 1) · M · N</b> partial sums per inner matmul for the vector unit. os leaves none.</p>
+    <p class="b">S = QKᵀ is cut along d; O += PV is cut along Bc. A bigger Bc means fewer rescales but, under ws, more pieces of P·V to add.</p>
+    <p class="b small"><code>bwz attention</code> costs every block size under every dataflow the unit declares and keeps the cheapest — on A100 that is os, on Metis ws, whose periphery adds the pieces for free.</p>
+  </div>
+  <div data-widget='{"type":"flash","S":4,"T":4,"d":4,"Br":2,"Bc":2,"cores":2,"tile":2,"qk":"ws","pv":"ws","knobs":[{"k":"qk","v":["os","ws","is"]},{"k":"tile","v":[1,2]}]}'></div>
+</section>
+
+<section class="slide" data-sec="Heads and batch">
+  <h2>Heads and batch: more programs, nothing shared</h2>
+  <p>Every (batch, head) has its own Q, K and V, so both simply multiply the programs. Unlike a projection, where a batch reuses the weights, nothing is reused here: K and V bytes grow with batch × heads.</p>
+  <div data-widget='{"type":"flash","S":2,"T":4,"Br":2,"Bc":2,"heads":2,"batch":2,"cores":4,"knobs":[{"k":"heads","v":[1,2,4]},{"k":"batch","v":[1,2]}]}'></div>
+</section>
+
+<section class="slide" data-sec="Re-reads">
+  <h2>A head across two waves reads K and V twice</h2>
+  <p>K and V are fetched once per wave and shared by the programs of that head in the wave. 3 heads × 3 programs on 4 cores: heads 1 and 2 straddle a wave boundary, so their K and V cross memory twice — the magenta counter.</p>
+  <div data-widget='{"type":"flash","S":6,"T":4,"Br":2,"Bc":2,"heads":3,"cores":4,"knobs":[{"k":"cores","v":[3,4,9]}]}'></div>
+</section>
+
+<section class="slide" data-sec="Never stored">
+  <h2>The point: S never leaves the core</h2>
+  <div class="tw"><table class="rule">
+    <tr><th></th><th>plain attention</th><th>FlashAttention</th></tr>
+    <tr class="b"><td>multiplies</td><td>2·Sq·Skv·d</td><td>2·Sq·Skv·d</td></tr>
+    <tr class="b"><td>exp()</td><td>Sq·Skv</td><td>Sq·Skv</td></tr>
+    <tr class="b"><td>S and P through memory</td><td class="tm">4·Sq·Skv</td><td>0</td></tr>
+    <tr class="b"><td>extra vector work</td><td>—</td><td>Sq·d per key block after the first</td></tr>
+  </table></div>
+  <p class="b">Same arithmetic, a little more vector work, and the Sq × Skv traffic gone. That is why it is fast.</p>
+</section>
+
+<section class="slide" data-sec="The flags">
+  <h2>Every knob is a <code>bwz attention</code> flag</h2>
+  <div class="tw"><table class="rule cheat">
+    <tr><th>flag</th><th>here</th><th>what it is</th></tr>
+    <tr><td><code>-S</code>, <code>--kv-len</code></td><td>queries, keys</td><td>rows of Q; rows of K and V</td></tr>
+    <tr><td><code>--head-dim</code></td><td>d</td><td>one head's width — the contraction of QKᵀ</td></tr>
+    <tr><td><code>--heads</code>, <code>--batch</code></td><td>heads, batch</td><td>independent programs, nothing shared</td></tr>
+    <tr><td><code>--br</code></td><td>Br</td><td>query rows per program</td></tr>
+    <tr><td><code>--bc</code></td><td>Bc</td><td>keys per block; one rescale per block after the first</td></tr>
+    <tr><td><code>--stationarity</code></td><td>flow</td><td>the inner matmuls' dataflow</td></tr>
+  </table></div>
+  <p class="small">Leave Br, Bc and the flow out and <code>bwz attention</code> chooses them by costing every combination; <code>--emit</code> writes the plan as a program that walks it, <code>--timeline</code> and <code>--animate</code> draw it.</p>
+</section>
+
+<section class="slide title-slide" data-sec="End">
+  <h1>Same arithmetic, no S</h1>
+  <p class="lede">Open the notebook to turn every knob yourself, or run <code>bwz attention --emit</code> to get the same walk as a program on real chip numbers.</p>
+</section>

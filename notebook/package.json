@@ -1,0 +1,12 @@
+{
+  "name": "bandwidth-zen-notebooks",
+  "private": true,
+  "description": "Interactive notebooks and slide decks: matmul rearranged, and attention as FlashAttention.",
+  "scripts": {
+    "build": "python3 matmul/src/build.py && python3 attention/src/build.py",
+    "test": "node matmul/tests/check.js && node attention/tests/check.js"
+  },
+  "devDependencies": {
+    "jsdom": "^24.1.0"
+  }
+}

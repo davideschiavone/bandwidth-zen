@@ -1,4 +1,4 @@
-# Publishes matmul-notebook/ (the animated deck and the interactive notebook) to GitHub Pages.
+# Publishes notebook/ (the matmul and attention decks and interactive notebooks) to GitHub Pages.
 # One-time setup: Settings -> Pages -> Build and deployment -> Source: "GitHub Actions".
 # Site: https://davideschiavone.github.io/bandwidth-zen/
 name: pages
@@ -6,7 +6,7 @@ name: pages
 on:
   push:
     branches: [main]
-    paths: ["matmul-notebook/**", ".github/workflows/pages.yml"]
+    paths: ["notebook/**", ".github/workflows/pages.yml"]
   workflow_dispatch:
 
 permissions:
@@ -29,6 +29,6 @@ jobs:
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: matmul-notebook
+          path: notebook
       - id: deployment
         uses: actions/deploy-pages@v4
