@@ -1,0 +1,350 @@
+<section class="slide title-slide" data-sec="Start">
+  <p class="eyebrow">One multiplication · many loop orders</p>
+  <h1>Matmul, rearranged</h1>
+  <p class="formula"><span class="ta">A</span>[M, K] @ <span class="tb">B</span>[K, N] → <span class="tc">C</span>[M, N]</p>
+  <p class="lede">Every form in this deck is the loop you already know, with the loops moved around. Same 64 multiplies, different order, unfinished sums kept in different places.</p>
+  <div class="keys">
+    <span><kbd>→</kbd> next build or animation step</span><span><kbd>↓</kbd> whole inner loop</span><span><kbd>←</kbd> back</span>
+    <span><kbd>PgDn</kbd> / <kbd>N</kbd> next slide</span><span><kbd>P</kbd> play</span><span><kbd>E</kbd> finish animation</span>
+  </div>
+</section>
+
+<section class="slide" data-sec="Notation">
+  <h2>The names we use everywhere</h2>
+  <div class="split">
+    <div class="points">
+      <p class="b"><b>i</b> walks over M: rows of <span class="ta">A</span> and of <span class="tc">C</span></p>
+      <p class="b"><b>j</b> walks over N: columns of <span class="tb">B</span> and of <span class="tc">C</span></p>
+      <p class="b"><b>k</b> walks over K: columns of <span class="ta">A</span> = rows of <span class="tb">B</span>. <span class="tc">C</span> has no k: it gets summed away.</p>
+      <p class="b big"><code><span class="tc">C</span>[i][j] += <span class="ta">A</span>[i][k] * <span class="tb">B</span>[k][j]</code></p>
+      <p class="b small">Pale green = unfinished <span class="tc">C</span> value (some of its 4 terms). Solid green = finished. A glowing outline = the operand that stays put.</p>
+    </div>
+    <div data-widget='{"type":"static","hl":[1,2,3],"caption":"One elementary step: i = 1, j = 2, k = 3. B sits on top and A on the left, so row i of A lines up with row i of C and column j of B with column j of C."}'></div>
+  </div>
+</section>
+
+<section class="slide" data-sec="Running example">
+  <h2>The running example</h2>
+  <div class="split">
+    <div data-widget='{"type":"static","note":"4×4 @ 4×4<br>values 0…3"}'></div>
+    <div class="points">
+      <p>Small whole numbers, so every step can be checked by hand.</p>
+      <p class="b">Each <span class="tc">C</span> value is a sum of K = 4 products.</p>
+      <p class="b">16 values × 4 products = <b>64 multiplies</b>.</p>
+      <p class="b">The first product of each value is just stored, the other 3 are added: <b>48 additions</b>.</p>
+      <p class="b">Every animation ends with the same <span class="tc">C</span> and checks it against A @ B.</p>
+    </div>
+  </div>
+</section>
+
+<section class="slide" data-sec="1 · Textbook loop">
+  <h2>The loop you already know</h2>
+  <div data-widget='{"type":"player","order":"ijk","register":true,"labels":false}'></div>
+</section>
+
+<section class="slide" data-sec="1 · Textbook loop">
+  <h2>What just happened</h2>
+  <div class="points wide">
+    <p class="b">Each <span class="tc">C</span> value was started, finished and never visited again.</p>
+    <p class="b">During the whole k loop the running sum sat in one register. <span class="ta">A</span> and <span class="tb">B</span> values streamed past it.</p>
+    <p class="b">"One dot product per C value" is the <b>inner-product form</b>.</p>
+    <p class="b">Hardware names a loop after what stays put. Here <span class="tc">C</span>, the output, stays put: <b>output-stationary (os)</b>.</p>
+  </div>
+</section>
+
+<section class="slide" data-sec="2 · The rule">
+  <h2>The one rule behind every name</h2>
+  <p class="b">Each operand uses two of the three indices: <span class="ta">A</span>[i][k], <span class="tb">B</span>[k][j], <span class="tc">C</span>[i][j].</p>
+  <p class="b">The innermost loop changes one index every step. The two operands that contain it change. The third one <b>stays put</b>.</p>
+  <div class="tw">
+  <table class="rule">
+    <tr><th>innermost loop</th><th>changes every step</th><th>stays put</th><th>name</th></tr>
+    <tr class="b"><td>k</td><td><span class="ta">A</span>[i][k], <span class="tb">B</span>[k][j]</td><td><span class="stay-c">C[i][j]</span></td><td><b>output-stationary (os)</b></td></tr>
+    <tr class="b"><td>i</td><td><span class="ta">A</span>[i][k], <span class="tc">C</span>[i][j]</td><td><span class="stay-b">B[k][j]</span></td><td><b>weight-stationary (ws)</b></td></tr>
+    <tr class="b"><td>j</td><td><span class="tb">B</span>[k][j], <span class="tc">C</span>[i][j]</td><td><span class="stay-a">A[i][k]</span></td><td><b>input-stationary (is)</b></td></tr>
+  </table>
+  </div>
+  <p class="b small">"Weight": in a neural network B usually holds the trained weights. "Input": A holds the activations coming in.</p>
+</section>
+
+<section class="slide" data-sec="2 · The rule">
+  <h2>Same product, three things staying put</h2>
+  <div data-widget='{"type":"group","players":[{"order":"ijk","title":"os"},{"order":"jki","title":"ws"},{"order":"ikj","title":"is"}]}'></div>
+</section>
+
+<section class="slide" data-sec="3 · Six loop orders">
+  <h2>All six loop orders</h2>
+  <p class="b">Three loops nest in 3 × 2 × 1 = 6 orders. The line inside never changes.</p>
+  <div class="tw">
+  <table class="rule">
+    <tr><th>order</th><th>innermost</th><th>stays put</th><th>classic name</th><th>one inner loop builds…</th></tr>
+    <tr class="b"><td>ijk, jik</td><td>k</td><td><span class="stay-c">C[i][j]</span></td><td><b>inner product</b> · os</td><td>one finished C value (a dot product)</td></tr>
+    <tr class="b"><td>ikj</td><td>j</td><td><span class="stay-a">A[i][k]</span></td><td><b>row-wise</b> (Gustavson) · is</td><td><code>C[i,:] += A[i][k] * B[k,:]</code></td></tr>
+    <tr class="b"><td>jki</td><td>i</td><td><span class="stay-b">B[k][j]</span></td><td><b>column-wise</b> · ws</td><td><code>C[:,j] += A[:,k] * B[k][j]</code></td></tr>
+    <tr class="b"><td>kij</td><td>j</td><td><span class="stay-a">A[i][k]</span></td><td><b>outer product</b> · is inside</td><td>a row of <code>A[:,k] ⊗ B[k,:]</code></td></tr>
+    <tr class="b"><td>kji</td><td>i</td><td><span class="stay-b">B[k][j]</span></td><td><b>outer product</b> · ws inside</td><td>a column of <code>A[:,k] ⊗ B[k,:]</code></td></tr>
+  </table>
+  </div>
+  <p class="b small">In kij / kji the two inner loops together add one whole 4×4 <b>rank-1 update</b> into C for each k.</p>
+</section>
+
+<section class="slide" data-sec="3 · Six loop orders">
+  <h2>Row-wise: one A value kept, a row of B streams past</h2>
+  <div data-widget='{"type":"player","order":"ikj"}'></div>
+</section>
+
+<section class="slide" data-sec="3 · Six loop orders">
+  <h2>Column-wise: one B value kept, a column of A streams past</h2>
+  <div data-widget='{"type":"player","order":"jki"}'></div>
+</section>
+
+<section class="slide" data-sec="3 · Six loop orders">
+  <h2>Outer product: all of C grows together</h2>
+  <div data-widget='{"type":"player","order":"kij","selector":true,"orders":["kij","kji"],"startCap":"k is outermost. For each k, column k of A times row k of B is added into every C value."}'></div>
+</section>
+
+<section class="slide" data-sec="3 · Six loop orders">
+  <h2>Try any order</h2>
+  <div data-widget='{"type":"player","order":"jik","selector":true}'></div>
+</section>
+
+<section class="slide" data-sec="4 · Partial sums">
+  <h2>Finished in one go, or one term per visit?</h2>
+  <div data-widget='{"type":"group","players":[{"order":"ijk","title":"inner product"},{"order":"kij","title":"outer product"}],"hint":"Press ↓ four times: after 16 steps, left has 4 finished and 0 partial, right has 0 finished and 16 partial."}'></div>
+</section>
+
+<section class="slide" data-sec="4 · Partial sums">
+  <h2>Where the unfinished sums wait</h2>
+  <div class="split">
+    <div class="points">
+      <p class="b">Outside the inner-product form, a C value gets <b>one</b> of its 4 terms per visit and stays pale until the last one.</p>
+      <p class="b">Between visits it waits in <b>one place</b> and is added to at <b>many moments</b>.</p>
+      <p class="b big">This is <b>accumulating over time</b>.</p>
+    </div>
+    <div class="b">
+      <table class="rule narrow">
+        <tr><th>order</th><th>most partial values at once</th></tr>
+        <tr><td>ijk, jik</td><td>1 (one register)</td></tr>
+        <tr><td>ikj</td><td>4 (a row of C)</td></tr>
+        <tr><td>jki</td><td>4 (a column of C)</td></tr>
+        <tr><td>kij, kji</td><td>16 (all of C)</td></tr>
+      </table>
+    </div>
+  </div>
+</section>
+
+<section class="slide" data-sec="5 · Tiling">
+  <h2>Tiling: the same thing, in chunks</h2>
+  <div class="split">
+    <div data-widget='{"type":"static","bs":2,"blocks":true,"note":"each matrix<br>= 2×2 blocks"}'></div>
+    <div class="points">
+      <p class="b">Cut each 4×4 into four 2×2 blocks.</p>
+      <p class="b">Treat each block as one "number" and each <code>*</code> as a small matrix product.</p>
+      <p class="b">Block indices <b>mt</b>, <b>nt</b>, <b>kt</b>, each 0 or 1: a 2 × 2 × 2 grid of 8 block products.</p>
+      <p class="b"><code>C[mt,nt] = A[mt,0] @ B[0,nt] + A[mt,1] @ B[1,nt]</code> — the textbook formula with blocks.</p>
+    </div>
+  </div>
+</section>
+
+<section class="slide" data-sec="5 · Tiling">
+  <h2>Same six orders, on blocks</h2>
+  <div data-widget='{"type":"player","order":"ijk","bs":2,"selector":true}'></div>
+</section>
+
+<section class="slide" data-sec="5 · Tiling">
+  <h2>Open one block product: 8 ordinary multiplies</h2>
+  <div data-widget='{"type":"player","order":"ijk","ranges":{"i":[0,1],"j":[0,1],"k":[2,3]},"pre":[[0,0,0],[0,0,1],[0,1,0],[0,1,1],[1,0,0],[1,0,1],[1,1,0],[1,1,1]],"labels":false,"checkBlock":[0,0,2],"startCap":"C[0,0] already holds A[0,0] @ B[0,0] (pale). Step through the 8 multiplies of C[0,0] += A[0,1] @ B[1,0]."}'></div>
+</section>
+
+<section class="slide" data-sec="5 · Tiling">
+  <h2>The rule, one level up</h2>
+  <div class="tw">
+  <table class="rule">
+    <tr><th>innermost block loop</th><th>stays put</th><th>name</th></tr>
+    <tr class="b"><td>kt</td><td><span class="stay-c">block C[mt,nt]</span></td><td><b>os</b></td></tr>
+    <tr class="b"><td>mt</td><td><span class="stay-b">block B[kt,nt]</span></td><td><b>ws</b></td></tr>
+    <tr class="b"><td>nt</td><td><span class="stay-a">block A[mt,kt]</span></td><td><b>is</b></td></tr>
+  </table>
+  </div>
+  <p class="b">Inside each block product you can pick any of the six scalar orders again. The two choices are independent.</p>
+</section>
+
+
+
+<section class="slide" data-sec="6 · Hardware step">
+  <h2>scalar × scalar</h2>
+  <div data-widget='{"type":"cpu"}'></div>
+</section>
+
+<section class="slide" data-sec="6 · Hardware step">
+  <h2>vector × matrix</h2>
+  <div data-widget='{"type":"imc"}'></div>
+</section>
+
+<section class="slide" data-sec="6 · Hardware step">
+  <h2>matrix × matrix</h2>
+  <div data-widget='{"type":"tensor"}'></div>
+</section>
+
+<section class="slide" data-sec="6 · Hardware step">
+  <h2>Three sizes of one step</h2>
+  <div class="points wide">
+    <p class="b">The loops never change. The hardware decides how many of them happen at once.</p>
+    <p class="b"><b>CPU core</b>: scalar × scalar, 1 multiply.</p>
+    <p class="b"><b>In-memory-compute array</b>: vector × matrix, a row of A through a block of B that is stored in the memory cells.</p>
+    <p class="b"><b>GPU tensor core</b>: matrix × matrix, a block of A times a block of B.</p>
+  </div>
+</section>
+
+
+
+<section class="slide" data-sec="7 · Parallelism">
+  <h2>Four cores: how to read the picture</h2>
+  <div class="points wide">
+    <p class="b"><b>Top — the matrices.</b> Blocks being read right now are lit, and a tag like <code>c2</code> says which core is reading them. A glowing block is kept inside a core.</p>
+    <p class="b"><b>Middle — the chip.</b> One box per core, showing the three blocks it touches in this step: what it keeps, what it gets, and the C block it adds into.</p>
+    <p class="b"><b>Bottom — the timeline.</b> One row per core, one column per step. A bar is one tile of work; it fills up as the core works through it. Hatched = the core has nothing to do.</p>
+    <p class="b">Every step, every busy core does one 2×2 block product (8 multiplies) at the same time.</p>
+  </div>
+</section>
+
+<section class="slide" data-sec="7 · Parallelism">
+  <h2>Four cores, one product</h2>
+  <div data-widget='{"type":"pv","tm":2,"tn":2,"tk":2,"cores":4,"flow":"os","speed":1,"knobs":[{"k":"flow","v":["os","ws","is"]}]}'></div>
+</section>
+
+<section class="slide" data-sec="7 · Parallelism">
+  <h2>Naming it: grid and sweep</h2>
+  <div class="points wide">
+    <p class="b">Two of the three block loops were shared out: each core got one combination, and all cores ran <b>at the same time</b> (the rows of the timeline). That is the <b>tile grid</b>.</p>
+    <p class="b">The third loop ran <b>in order</b> inside each core (the columns inside one bar). That is the <b>sweep</b>.</p>
+    <p class="b">os: grid mt × nt, sweep kt &nbsp;·&nbsp; ws: grid kt × nt, sweep mt &nbsp;·&nbsp; is: grid mt × kt, sweep nt</p>
+    <p class="b">The operand that stays put inside each core is the one the sweep does not index — the same rule as before, one level up.</p>
+  </div>
+</section>
+
+<section class="slide" data-sec="7 · Parallelism">
+  <h2>More tiles than cores: waves</h2>
+  <p class="b">Cut C into 8 tiles of 1×2. Each tile is swept over K in 2 steps. With 3 cores the tiles are handed out in rounds; try other core counts.</p>
+  <div data-widget='{"type":"pv","tm":1,"tn":2,"tk":2,"cores":3,"flow":"os","knobs":[{"k":"cores","v":[2,3,4,5,8]}]}'></div>
+</section>
+
+<section class="slide" data-sec="8 · Over space">
+  <h2>When k is on the grid</h2>
+  <p class="b">Now the cores keep blocks of B (ws) or A (is). Two cores make pieces of the <b>same</b> C block — watch the “2×” cells, then the extra combine step.</p>
+  <div data-widget='{"type":"pv","tm":2,"tn":2,"tk":2,"cores":4,"flow":"ws","knobs":[{"k":"flow","v":["ws","is"]}]}'></div>
+</section>
+
+<section class="slide" data-sec="8 · Over space">
+  <h2>Zoom on one output: where the additions happen</h2>
+  <div data-widget='{"type":"kgroups","g":2}'></div>
+</section>
+
+<section class="slide" data-sec="9 · Split-K">
+  <h2>os runs out of tiles</h2>
+  <p class="b">In os one core owns one output block and sweeps <b>all</b> of K inside it. So the number of tiles is the number of output blocks: here 4 (a 4×4 C in 2×2 blocks), however many cores there are.</p>
+  <div data-widget='{"type":"pv","tm":2,"tn":2,"tk":2,"cores":8,"flow":"os","knobs":[{"k":"cores","v":[4,8]}]}'></div>
+</section>
+
+<section class="slide" data-sec="9 · Split-K">
+  <h2>Split-K: cut the sweep into pieces</h2>
+  <div class="points wide">
+    <p class="b">Cut each block's K sweep into <b>P</b> pieces: with P = 2, k 0–1 and k 2–3.</p>
+    <p class="b">The unit of work becomes <b>(output block, piece of K)</b>: 4 blocks × 2 pieces = <b>8 tiles</b>, so 8 cores can work at once.</p>
+    <p class="b">Each tile gives only part of the sum: a <b>pale</b> block. It must wait somewhere until the other pieces are done, so it goes out to <b class="tm">memory</b>.</p>
+    <p class="b">A <b class="tm">second pass</b> reads the pieces back and adds them into the final C.</p>
+    <p class="b small">Same 64 multiplies and 48 additions. What is new: (P−1)·16 of the additions happen in pass 2, and 2·P·16 values go through memory (P·16 written, P·16 read back).</p>
+  </div>
+</section>
+
+<section class="slide" data-sec="9 · Split-K">
+  <h2>Split-K, step by step</h2>
+  <div data-widget='{"type":"skm","tm":2,"tn":2,"pieces":2,"cores":8,"knobs":[{"k":"pieces","v":[1,2,4]},{"k":"cores","v":[4,8]}]}'></div>
+</section>
+
+<section class="slide" data-sec="9 · Split-K">
+  <h2>The other way to 8 tiles: ws</h2>
+  <p class="b">ws also puts K to work in parallel, but it puts <b>every</b> K-slice on the grid: 4 slices × 2 column blocks = 8 tiles. No memory trip — the pieces meet across cores.</p>
+  <div data-widget='{"type":"pv","tm":2,"tn":2,"tk":1,"cores":8,"flow":"ws","g":1}'></div>
+</section>
+
+<section class="slide" data-sec="9 · Split-K">
+  <h2>Split-K vs ws</h2>
+  <div class="tw">
+  <table class="rule">
+    <tr><th>on the 4×4 example, 8 cores</th><th>split-K, P = 2</th><th>ws, K on the grid</th></tr>
+    <tr class="b"><td>how K is cut</td><td>2 big contiguous pieces (k 0–1, 2–3)</td><td>every slice (4 slices of 1)</td></tr>
+    <tr class="b"><td>unit of work</td><td>(output block, piece)</td><td>(K-slice, column block)</td></tr>
+    <tr class="b"><td>tiles</td><td>4 × 2 = 8</td><td>4 × 2 = 8</td></tr>
+    <tr class="b"><td>each core keeps</td><td><span class="stay-c">a C block</span> os</td><td><span class="stay-b">a slice of B</span> ws</td></tr>
+    <tr class="b"><td>pieces per C value</td><td>2</td><td>4</td></tr>
+    <tr class="b"><td>additions over time</td><td>32</td><td>0</td></tr>
+    <tr class="b"><td>the rest of the additions</td><td class="mem">16, in pass 2</td><td class="tsp">48, across cores</td></tr>
+    <tr class="b"><td>what it pays with</td><td class="mem">memory traffic: 32 written + 32 read</td><td class="tsp">additions between cores (2 combine levels)</td></tr>
+    <tr class="b"><td>total arithmetic</td><td>64 multiplies, 48 additions</td><td>64 multiplies, 48 additions</td></tr>
+  </table>
+  </div>
+  <p class="b small">Both buy parallel work by cutting K. Split-K cuts it into big pieces and pays with memory traffic. ws puts every K-slice on the grid and pays with additions across cores.</p>
+</section>
+
+<section class="slide" data-sec="10 · Weight sets">
+  <h2>A core that stores several blocks of B</h2>
+  <div class="points wide">
+    <p class="b">An in-memory-compute core keeps B <b>in its cells</b> (ws). Some can store a few blocks at once: <b>weight sets</b>, or slots.</p>
+    <p class="b">It computes with <b>one slot at a time</b>. The others only hold data.</p>
+    <p class="b">Writing a block into a slot takes time: here 2 steps. The extra slots can be used in two ways:</p>
+    <p class="b"><b>(a)</b> hide the loading: fill the next slot while computing with this one.<br><b>(b)</b> keep K in one place: put successive K-pieces of the same column in the slots.</p>
+    <p class="b small">Tiny version: 2 slots of a 2×2 block. Real (your figures): Axelera Metis has 4 cores, each holding 4 weight sets of 512×512 bytes and computing with one at a time. 4 × 512 × 512 B = 1 MiB per core, which matches the 1 MiB of compute memory per core that Axelera publishes.</p>
+  </div>
+</section>
+
+<section class="slide" data-sec="10 · Weight sets">
+  <h2>(a) Hide the loading</h2>
+  <div data-widget='{"type":"wsets","tn":2,"tk":2,"slots":2,"load":2,"sched":"overlap","group":"block","both":true,"knobs":[{"k":"sched","v":["seq","overlap"]},{"k":"load","v":[1,2,4,6]}]}'></div>
+</section>
+
+<section class="slide" data-sec="10 · Weight sets">
+  <h2>(b) Accumulate K in one place</h2>
+  <div data-widget='{"type":"wsets","tn":2,"tk":2,"slots":2,"load":2,"sched":"overlap","group":"row","both":false,"knobs":[{"k":"slots","v":[1,2]}]}'></div>
+</section>
+
+<section class="slide" data-sec="10 · Weight sets">
+  <h2>More cores than columns: K-groups</h2>
+  <p class="b">B has only 2 column blocks but there are 4 cores. Cut K into 4 slices, give each core a group of them in its slots: it sums its group over time, and only one partial per core meets the others at the end. With 2 per core, 2 pieces per C value instead of 4.</p>
+  <div data-widget='{"type":"pv","tm":2,"tn":2,"tk":1,"cores":4,"flow":"ws","g":2,"knobs":[{"k":"g","v":[1,2,4]}]}'></div>
+</section>
+
+<section class="slide" data-sec="11 · Cheat sheet">
+  <h2>Cheat sheet</h2>
+  <div class="tw">
+  <table class="rule cheat">
+    <tr><th>loop order</th><th>classic name</th><th>stays put</th><th>one inner loop produces</th><th>finished / partial</th><th>K-sum happens</th></tr>
+    <tr><td>ijk, jik</td><td>inner product</td><td><span class="stay-c">C[i][j]</span> os</td><td>one scalar C[i][j]</td><td>finished</td><td>time · 1 register</td></tr>
+    <tr><td>ikj</td><td>row-wise (Gustavson)</td><td><span class="stay-a">A[i][k]</span> is</td><td>a row update of C</td><td>partial until last k of the row</td><td>time · a row of C</td></tr>
+    <tr><td>jki</td><td>column-wise</td><td><span class="stay-b">B[k][j]</span> ws</td><td>a column update of C</td><td>partial until last k of the column</td><td>time · a column of C</td></tr>
+    <tr><td>kij</td><td>outer product</td><td><span class="stay-a">A[i][k]</span> is</td><td>row of a rank-1 update (2 inner loops: whole matrix)</td><td>partial until last k</td><td>time · all of C</td></tr>
+    <tr><td>kji</td><td>outer product</td><td><span class="stay-b">B[k][j]</span> ws</td><td>column of a rank-1 update (2 inner loops: whole matrix)</td><td>partial until last k</td><td>time · all of C</td></tr>
+    <tr><td>tiled</td><td>same names per block</td><td>a block</td><td>a block product</td><td>as its scalar order</td><td>as its scalar order</td></tr>
+    <tr><td>os grid</td><td>M×N tiles on cores</td><td>C block</td><td>whole output tiles</td><td>finished on its core</td><td>time</td></tr>
+    <tr><td>ws / is grid</td><td>K on the grid</td><td>B or A block</td><td>pieces of C blocks</td><td>partial until combined</td><td class="tsp">space</td></tr>
+    <tr><td>K-groups</td><td>ws / is, g K-slices per core</td><td>g blocks, in slots</td><td>pieces of C blocks</td><td>partial until combined</td><td>time for g, <span class="tsp">space</span> between groups</td></tr>
+    <tr><td>split-K</td><td>os, K cut into P pieces</td><td><span class="stay-c">C block</span> per tile</td><td>a pale block per (block, piece)</td><td>partial until pass 2</td><td>time in a piece, then <span class="tm">memory</span> + pass 2</td></tr>
+    <tr><td>weight sets (b)</td><td>ws, a row through all slots</td><td><span class="stay-b">K-pieces of one B column</span></td><td>one row of C per pass</td><td>finished after the last slot</td><td>time · one accumulator</td></tr>
+  </table>
+  </div>
+  <p class="small">Every row: 64 multiplies and 48 additions on the 4×4 example.</p>
+</section>
+
+<section class="slide" data-sec="End">
+  <h2>Every form, same answer</h2>
+  <div class="split">
+    <div data-widget='{"type":"static","filled":true,"note":"C == A @ B"}'></div>
+    <div class="points">
+      <p class="b">Loop order decides <b>what stays put</b> and <b>when</b> a C value is finished.</p>
+      <p class="b">Tiling applies the same rule to blocks.</p>
+      <p class="b">Hardware decides how big one step is.</p>
+      <p class="b">Parallelism decides whether the K-sum happens over <b>time</b> or across <b class="tsp">space</b>.</p>
+      <p class="b">The arithmetic never changes: 64 multiplies, 48 additions.</p>
+    </div>
+  </div>
+</section>

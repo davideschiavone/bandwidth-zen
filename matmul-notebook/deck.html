@@ -1,0 +1,2668 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>body{margin:0;font:14px system-ui,sans-serif;-webkit-text-size-adjust:100%}img{max-width:100%}[hidden]{display:none!important}:root{padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}</style>
+<title>Matmul Rearranged Deck</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap"><style>/* Layout concept: every picture is the textbook matmul layout — B on top, A on the left, C where row i meets column j. */
+:root {
+  --bg: #f4f6f9;
+  --surface: #ffffff;
+  --surface-2: #eaeef4;
+  --fg: #18202b;
+  --muted: #5b6676;
+  --line: #d3dae4;
+  --a: #2360c8;          /* A — blue   */
+  --b: #d9730a;          /* B — orange */
+  --c: #148552;          /* C — green  */
+  --cp: #c9ecd8;         /* C partial — pale green */
+  --sp: #a8329a;         /* additions across cores (space) — magenta */
+  --mem: #6a4bc4;        /* trips through memory — violet */
+  --on-strong: #ffffff;
+  --font-display: "Bricolage Grotesque", "Avenir Next", "Segoe UI", system-ui, sans-serif;
+  --font-body: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  --cell: 2.1rem;
+  --radius: 6px;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #11151b; --surface: #191f28; --surface-2: #222a35; --fg: #e8edf4; --muted: #9aa6b7; --line: #323c4a;
+    --a: #6a9eff; --b: #ffa347; --c: #3cc986; --cp: #1f4a35; --sp: #e27ad6; --mem: #a993ff; --on-strong: #0b0f14;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #11151b; --surface: #191f28; --surface-2: #222a35; --fg: #e8edf4; --muted: #9aa6b7; --line: #323c4a;
+  --a: #6a9eff; --b: #ffa347; --c: #3cc986; --cp: #1f4a35; --sp: #e27ad6; --mem: #a993ff; --on-strong: #0b0f14;
+  color-scheme: dark;
+}
+body { background: var(--bg); color: var(--fg); font-family: var(--font-body); }
+
+.ta { color: var(--a); font-weight: 600; }
+.tb { color: var(--b); font-weight: 600; }
+.tc { color: var(--c); font-weight: 600; }
+.tsp { color: var(--sp); font-weight: 600; }
+code, .mono { font-family: var(--font-mono); font-size: 0.92em; }
+
+/* ---------- matrices ---------- */
+.triple { display: grid; grid-template-columns: auto auto; grid-template-areas: "x b" "a c"; gap: 0.6rem 0.8rem; align-items: end; justify-items: start; }
+.triple > .m-A { grid-area: a; align-self: start; justify-self: end; }
+.triple > .m-B { grid-area: b; }
+.triple > .m-C { grid-area: c; align-self: start; }
+.triple > .tx { grid-area: x; align-self: end; justify-self: end; color: var(--muted); font-family: var(--font-mono); font-size: 0.78rem; text-align: right; line-height: 1.3; }
+.mat { display: flex; flex-direction: column; gap: 0.25rem; }
+.mat-title { font-family: var(--font-mono); font-size: 0.78rem; color: var(--muted); display: flex; gap: 0.35rem; align-items: baseline; }
+.mat-title b { font-family: var(--font-display); font-size: 1.05rem; font-weight: 700; }
+.m-A .mat-title b { color: var(--a); } .m-B .mat-title b { color: var(--b); } .m-C .mat-title b { color: var(--c); }
+.mat-grid { display: grid; gap: 3px; position: relative; }
+.mh { font-family: var(--font-mono); font-size: 0.68rem; color: var(--muted); display: grid; place-items: center; min-width: 1rem; border-radius: 3px; }
+.mh.on { background: var(--fg); color: var(--bg); }
+.mh.corner { font-size: 0.62rem; opacity: 0.8; }
+.cell { width: var(--cell); height: var(--cell); display: grid; place-items: center; border-radius: 4px; font-family: var(--font-mono); font-weight: 600; font-size: 0.92rem; font-variant-numeric: tabular-nums; border: 1.5px solid transparent; transition: background-color .18s, color .18s, box-shadow .18s, border-color .18s; position: relative; }
+.cell.bl { margin-left: 5px; } .cell.bt { margin-top: 5px; }
+.mh.bl { margin-left: 5px; } .mh.bt { margin-top: 5px; }
+/* A */
+.k-A { background: color-mix(in oklab, var(--a) 11%, var(--surface)); color: var(--fg); }
+.k-A.sweep { background: color-mix(in oklab, var(--a) 30%, var(--surface)); }
+.k-A.read { background: var(--a); color: var(--on-strong); }
+/* B */
+.k-B { background: color-mix(in oklab, var(--b) 12%, var(--surface)); color: var(--fg); }
+.k-B.sweep { background: color-mix(in oklab, var(--b) 32%, var(--surface)); }
+.k-B.read { background: var(--b); color: var(--on-strong); }
+/* C */
+.k-C { background: var(--surface); border: 1.5px dashed var(--line); color: var(--muted); }
+.k-C.sweep { border-color: color-mix(in oklab, var(--c) 60%, var(--line)); border-style: solid; }
+.k-C.part { background: var(--cp); color: var(--fg); border: 1.5px solid color-mix(in oklab, var(--c) 45%, transparent); }
+.k-C.fin { background: var(--c); color: var(--on-strong); border: 1.5px solid var(--c); }
+.k-C.write { box-shadow: 0 0 0 2.5px var(--fg); }
+.k-C.spadd { box-shadow: 0 0 0 3px var(--sp); }
+.cell.stay { z-index: 1; }
+.k-A.stay { box-shadow: 0 0 0 3px var(--a), 0 0 12px 3px color-mix(in oklab, var(--a) 55%, transparent); }
+.k-B.stay { box-shadow: 0 0 0 3px var(--b), 0 0 12px 3px color-mix(in oklab, var(--b) 55%, transparent); }
+.k-C.stay { box-shadow: 0 0 0 3px var(--c), 0 0 12px 3px color-mix(in oklab, var(--c) 55%, transparent); }
+.cell.dim { opacity: 0.35; }
+.badge { pointer-events: none; border: 2px solid var(--fg); border-radius: 6px; position: relative; opacity: 0.85; }
+.badge span { position: absolute; top: -0.62rem; left: 0.2rem; background: var(--fg); color: var(--bg); font-family: var(--font-mono); font-size: 0.6rem; padding: 0 0.28rem; border-radius: 3px; line-height: 1.1rem; white-space: nowrap; }
+.badge.soft { border-style: dashed; opacity: 0.55; }
+.badge.lit { border-color: var(--sp); } .badge.lit span { background: var(--sp); }
+
+/* ---------- code ---------- */
+.code { font-family: var(--font-mono); font-size: 0.84rem; line-height: 1.55; background: var(--surface-2); border-radius: var(--radius); padding: 0.6rem 0.2rem; margin: 0; overflow-x: auto; min-width: 0; }
+.code .ln { padding: 0 0.7rem; white-space: pre; border-left: 3px solid transparent; }
+.code .ln.inner { background: color-mix(in oklab, var(--fg) 5%, transparent); }
+.code .ln.on { background: color-mix(in oklab, var(--c) 22%, transparent); border-left-color: var(--c); }
+.code .kw { color: var(--muted); }
+.code .val { color: var(--bg); background: var(--fg); border-radius: 3px; padding: 0 0.3rem; margin-left: 0.6rem; font-size: 0.75rem; }
+.code .cm { color: var(--muted); font-style: italic; }
+
+/* ---------- widget chrome ---------- */
+.w { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 0.9rem; display: flex; flex-direction: column; gap: 0.7rem; min-width: 0; }
+.w:focus-visible { outline: 3px solid var(--a); outline-offset: 2px; }
+.w-head { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; }
+.w-title { font-family: var(--font-display); font-weight: 700; font-size: 1rem; margin-right: 0.3rem; }
+.chip { font-family: var(--font-mono); font-size: 0.72rem; padding: 0.12rem 0.5rem; border-radius: 99px; background: var(--surface-2); color: var(--fg); white-space: nowrap; }
+.chip.A { box-shadow: inset 0 0 0 2px var(--a); } .chip.B { box-shadow: inset 0 0 0 2px var(--b); } .chip.C { box-shadow: inset 0 0 0 2px var(--c); }
+.w-body { display: flex; flex-wrap: wrap; gap: 1rem 1.4rem; align-items: flex-start; }
+.w-body > * { min-width: 0; }
+.cap { font-size: 0.9rem; min-height: 2.6em; line-height: 1.45; color: var(--fg); }
+.cap code { background: var(--surface-2); padding: 0 0.25rem; border-radius: 3px; }
+.cap .ok { color: var(--c); font-weight: 700; }
+.w-foot { display: flex; flex-wrap: wrap; gap: 0.6rem 1rem; align-items: center; justify-content: space-between; }
+.counters { display: flex; flex-wrap: wrap; gap: 0.35rem 0.9rem; font-family: var(--font-mono); font-size: 0.78rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+.counters b { color: var(--fg); font-weight: 600; }
+.counters .csp b { color: var(--sp); }
+.controls { display: flex; flex-wrap: wrap; gap: 0.3rem; }
+.btn { font: 600 0.78rem var(--font-body); background: var(--surface-2); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 0.3rem 0.6rem; cursor: pointer; }
+.btn:hover { border-color: var(--fg); }
+.btn:focus-visible { outline: 2px solid var(--a); outline-offset: 1px; }
+.btn.pri { background: var(--fg); color: var(--bg); border-color: var(--fg); }
+.btn[aria-pressed="true"] { background: var(--fg); color: var(--bg); border-color: var(--fg); }
+.seg { display: inline-flex; flex-wrap: wrap; gap: 0.25rem; }
+.reg { font-family: var(--font-mono); font-size: 0.82rem; display: flex; align-items: center; gap: 0.5rem; }
+.reg .box { min-width: 3rem; text-align: center; padding: 0.25rem 0.5rem; border-radius: 6px; border: 2px solid var(--c); font-weight: 700; font-size: 1.05rem; }
+.stack { display: flex; flex-direction: column; gap: 0.6rem; min-width: 0; }
+.pgroup { display: grid; grid-template-columns: repeat(auto-fit, minmax(15.5rem, 1fr)); gap: 0.8rem; }
+.pgroup .w { padding: 0.6rem; }
+.compact { --cell: 1.55rem; }
+.compact .cell { font-size: 0.74rem; }
+.compact .code { font-size: 0.7rem; padding: 0.35rem 0; }
+
+/* core panels, timelines */
+.cores { display: grid; grid-template-columns: repeat(auto-fit, minmax(9.5rem, 1fr)); gap: 0.5rem; }
+.core { border: 1px solid var(--line); border-radius: 8px; padding: 0.45rem 0.55rem; display: flex; flex-direction: column; gap: 0.35rem; background: var(--bg); min-width: 0; }
+.core h5 { margin: 0; font: 700 0.8rem var(--font-display); display: flex; justify-content: space-between; gap: 0.4rem; }
+.core .op { font-family: var(--font-mono); font-size: 0.7rem; color: var(--muted); min-height: 1.1rem; }
+.core.idle { background: repeating-linear-gradient(45deg, var(--surface-2) 0 6px, var(--bg) 6px 12px); }
+.core.spent { opacity: 0.5; }
+.mini { display: grid; gap: 2px; --cell: 1.35rem; }
+.mini .cell { font-size: 0.68rem; }
+.tl-wrap { overflow-x: auto; }
+table.tl { border-collapse: collapse; font-family: var(--font-mono); font-size: 0.72rem; }
+table.tl th, table.tl td { border: 1px solid var(--line); padding: 0.25rem 0.45rem; text-align: center; white-space: nowrap; }
+table.tl th { color: var(--muted); font-weight: 500; }
+table.tl td.now { background: color-mix(in oklab, var(--c) 20%, transparent); }
+table.tl td.done { color: var(--muted); }
+table.tl td.idle { background: repeating-linear-gradient(45deg, var(--surface-2) 0 5px, transparent 5px 10px); color: var(--muted); }
+table.tl td.red { color: var(--sp); font-weight: 600; }
+table.tl td.red.now { background: color-mix(in oklab, var(--sp) 18%, transparent); }
+
+/* hardware pictures */
+.hw { display: flex; flex-wrap: wrap; gap: 1rem; align-items: center; }
+.node { width: 2.4rem; height: 2.4rem; border-radius: 50%; display: grid; place-items: center; font: 700 1.1rem var(--font-mono); border: 2px solid var(--fg); background: var(--surface); }
+.pill { font-family: var(--font-mono); font-weight: 600; padding: 0.35rem 0.6rem; border-radius: 6px; font-size: 0.85rem; }
+.pill.A { background: var(--a); color: var(--on-strong); } .pill.B { background: var(--b); color: var(--on-strong); }
+.pill.C { background: var(--c); color: var(--on-strong); } .pill.Cp { background: var(--cp); color: var(--fg); }
+.arrow { color: var(--muted); font-size: 1.2rem; }
+.imc { display: grid; gap: 3px; align-items: center; justify-items: center; }
+.imc .drv { font-family: var(--font-mono); font-size: 0.72rem; }
+.imc .lab { font-family: var(--font-mono); font-size: 0.66rem; color: var(--muted); }
+.unit { border: 2px solid var(--fg); border-radius: 10px; padding: 0.5rem 0.7rem; display: flex; gap: 0.6rem; align-items: center; flex-wrap: wrap; }
+.unit-lab { font: 700 0.75rem var(--font-display); text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+.terms { display: flex; flex-wrap: wrap; gap: 0.3rem; }
+.term { font-family: var(--font-mono); font-size: 0.74rem; padding: 0.2rem 0.4rem; border-radius: 5px; border: 1px dashed var(--line); color: var(--muted); }
+.term.done { border: 1px solid var(--c); color: var(--fg); background: var(--cp); }
+.term.now { border: 2px solid var(--fg); color: var(--fg); }
+.red-row { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; font-family: var(--font-mono); font-size: 0.8rem; }
+.red-node { border: 2px solid var(--sp); color: var(--sp); border-radius: 6px; padding: 0.2rem 0.45rem; font-weight: 600; }
+.red-node.todo { border-style: dashed; opacity: 0.5; }
+table.mini-tab { border-collapse: collapse; font-size: 0.8rem; font-variant-numeric: tabular-nums; }
+table.mini-tab th, table.mini-tab td { border-bottom: 1px solid var(--line); padding: 0.3rem 0.6rem; text-align: right; }
+table.mini-tab th:first-child, table.mini-tab td:first-child { text-align: left; }
+table.mini-tab tr.cur td { background: color-mix(in oklab, var(--fg) 7%, transparent); font-weight: 600; }
+@media (prefers-reduced-motion: reduce) { .cell { transition: none; } }
+@media (max-width: 520px) { :root { --cell: 1.75rem; } .compact { --cell: 1.4rem; } }
+
+/* ---------- multi-core view ---------- */
+.pv { gap: 0.85rem; }
+.pv-top { display: flex; flex-wrap: wrap; gap: 1rem 1.6rem; align-items: flex-start; }
+.pv-top > .stack { flex: 1 1 18rem; }
+.pv-lab { font: 700 0.72rem var(--font-display); text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin-bottom: -0.35rem; }
+.chip.sp { box-shadow: inset 0 0 0 2px var(--sp); color: var(--sp); }
+.legend { display: flex; flex-wrap: wrap; gap: 0.35rem 0.9rem; font-size: 0.74rem; color: var(--muted); }
+.legend span { display: inline-flex; align-items: center; gap: 0.35rem; }
+.lg { width: 0.9rem; height: 0.9rem; border-radius: 3px; display: inline-block; }
+.lg.read { background: linear-gradient(90deg, var(--a) 50%, var(--b) 50%); }
+.lg.stay { background: var(--surface); box-shadow: 0 0 0 2px var(--fg), 0 0 6px 2px color-mix(in oklab, var(--fg) 40%, transparent); }
+.lg.part { background: var(--cp); }
+.lg.fin { background: var(--c); }
+.lg.scat { background: repeating-linear-gradient(45deg, color-mix(in oklab, var(--sp) 30%, var(--surface)) 0 3px, var(--surface) 3px 6px); border: 1.5px dashed var(--sp); }
+.k-C.scat { background: repeating-linear-gradient(45deg, color-mix(in oklab, var(--sp) 22%, var(--surface)) 0 4px, var(--surface) 4px 8px); border: 1.5px dashed var(--sp); color: var(--sp); font-size: 0.72rem; }
+.cell.hov { outline: 2.5px dashed var(--fg); outline-offset: 1px; z-index: 2; }
+.badge.tag { border: 2px solid var(--fg); opacity: 1; }
+.badge.tag span { top: auto; bottom: -0.55rem; left: auto; right: -0.2rem; font-size: 0.58rem; line-height: 0.95rem; z-index: 3; }
+.floor { display: grid; grid-template-columns: repeat(auto-fill, minmax(15.5rem, 1fr)); gap: 0.6rem; padding: 0.6rem; border-radius: 12px; background: var(--surface-2); border: 1px solid var(--line); }
+.corebox { background: var(--surface); border: 2px solid var(--fg); border-radius: 9px; padding: 0.5rem 0.6rem; display: flex; flex-direction: column; gap: 0.4rem; min-width: 0; min-height: 5.5rem; }
+.corebox h5 { margin: 0; font: 700 0.85rem var(--font-display); display: flex; justify-content: space-between; gap: 0.5rem; }
+.corebox .muted, .muted { color: var(--muted); font-weight: 500; font-family: var(--font-mono); font-size: 0.7rem; }
+.corebox .op { font-size: 0.78rem; color: var(--muted); }
+.corebox.idle { border-style: dashed; border-color: var(--line); background: repeating-linear-gradient(45deg, var(--surface-2) 0 7px, var(--surface) 7px 14px); }
+.cb-row { display: flex; align-items: center; gap: 0.35rem; flex-wrap: wrap; }
+.cb-blk { display: flex; flex-direction: column; gap: 0.15rem; }
+.cb-l { font: 500 0.62rem var(--font-mono); color: var(--muted); white-space: nowrap; }
+.corebox .mini { --cell: 1.25rem; }
+.corebox .mini .cell { font-size: 0.64rem; border-radius: 3px; }
+.gantt-wrap { overflow-x: auto; padding-bottom: 0.2rem; }
+.gantt { display: grid; gap: 4px 3px; align-items: stretch; position: relative; min-width: min-content; }
+.g-wave { font: 700 0.72rem var(--font-display); text-transform: uppercase; letter-spacing: 0.06em; text-align: center; padding: 0.2rem; border-bottom: 2px solid var(--fg); }
+.g-wave.sp { color: var(--sp); border-bottom-color: var(--sp); }
+.g-num { font: 500 0.62rem var(--font-mono); color: var(--muted); text-align: center; }
+.g-lab { font: 600 0.72rem var(--font-mono); display: flex; align-items: center; }
+.g-lab.sp { color: var(--sp); }
+.g-band { background: color-mix(in oklab, var(--fg) 4%, transparent); border-radius: 6px; }
+.g-band.alt { background: color-mix(in oklab, var(--fg) 9%, transparent); }
+.bar { position: relative; height: 2.1rem; border-radius: 6px; overflow: hidden; display: flex; align-items: center; justify-content: center; margin: 0 2px; cursor: default; }
+.bar .fill { position: absolute; inset: 0 auto 0 0; width: 0; transition: width .25s; }
+.bar .bt { position: relative; font: 600 0.7rem var(--font-mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding: 0 0.3rem; }
+.bar.f-os { background: color-mix(in oklab, var(--c) 18%, var(--surface)); } .bar.f-os .fill { background: color-mix(in oklab, var(--c) 55%, var(--surface)); }
+.bar.f-ws { background: color-mix(in oklab, var(--b) 18%, var(--surface)); } .bar.f-ws .fill { background: color-mix(in oklab, var(--b) 55%, var(--surface)); }
+.bar.f-is { background: color-mix(in oklab, var(--a) 18%, var(--surface)); } .bar.f-is .fill { background: color-mix(in oklab, var(--a) 50%, var(--surface)); }
+.bar.idle { background: repeating-linear-gradient(45deg, var(--surface-2) 0 6px, var(--surface) 6px 12px); border: 1.5px dashed var(--line); color: var(--muted); }
+.bar.red { background: color-mix(in oklab, var(--sp) 14%, var(--surface)); color: var(--sp); } .bar.red .fill { background: color-mix(in oklab, var(--sp) 40%, var(--surface)); }
+.bar.now { box-shadow: 0 0 0 2px var(--fg); }
+.bar.hovme { box-shadow: 0 0 0 3px var(--fg); }
+.bar.sib { box-shadow: 0 0 0 3px var(--sp); }
+.bar:focus-visible { outline: 3px solid var(--a); }
+.g-cursor { border: 2px solid var(--fg); border-radius: 6px; pointer-events: none; z-index: 2; background: color-mix(in oklab, var(--fg) 6%, transparent); }
+.scrub { display: flex; align-items: center; gap: 0.5rem; font: 500 0.72rem var(--font-mono); color: var(--muted); }
+.scrub input { flex: 1; min-width: 8rem; accent-color: var(--c); }
+.w-foot .right { align-items: stretch; flex: 0 1 auto; }
+.pv-knobs { display: flex; flex-wrap: wrap; gap: 0.5rem 1.2rem; }
+.seg-l { font: 600 0.72rem var(--font-body); text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); align-self: center; margin-right: 0.2rem; }
+.triple.dense { --cell: 1.6rem; }
+.triple.dense .cell { font-size: 0.72rem; }
+.compact .floor { grid-template-columns: repeat(auto-fill, minmax(14rem, 1fr)); }
+
+/* ---------- split-K memory + weight sets ---------- */
+.tm { color: var(--mem); font-weight: 600; }
+.chip.mem { box-shadow: inset 0 0 0 2px var(--mem); color: var(--mem); }
+.counters .cmem b { color: var(--mem); }
+.lg.memw { background: var(--cp); box-shadow: 0 0 0 2px var(--mem); }
+.lg.memr { background: var(--surface); box-shadow: 0 0 0 2px var(--mem); border: 1px dashed var(--mem); }
+.lg.load { background: color-mix(in oklab, var(--b) 18%, var(--surface)); border: 1.5px dashed var(--b); }
+.k-C.memw { box-shadow: 0 0 0 2.5px var(--mem); }
+.k-C.memr { box-shadow: 0 0 0 2.5px var(--mem), 0 0 10px 2px color-mix(in oklab, var(--mem) 45%, transparent); }
+.membox { display: flex; flex-wrap: wrap; gap: 1rem 1.6rem; padding: 0.7rem 0.8rem; border-radius: 12px; border: 2px solid var(--mem); background: color-mix(in oklab, var(--mem) 6%, var(--surface)); }
+.membox .mat-title b { color: var(--mem); }
+.bar.mem { background: color-mix(in oklab, var(--mem) 14%, var(--surface)); color: var(--mem); } .bar.mem .fill { background: color-mix(in oklab, var(--mem) 35%, var(--surface)); }
+.bar.mem2 { background: color-mix(in oklab, var(--mem) 22%, var(--surface)); color: var(--mem); } .bar.mem2 .fill { background: color-mix(in oklab, var(--mem) 50%, var(--surface)); }
+.g-wave.mem { color: var(--mem); border-bottom-color: var(--mem); }
+.g-lab.mem { color: var(--mem); }
+.wscore { display: flex; flex-wrap: wrap; align-items: center; gap: 0.6rem; padding: 0.7rem; border: 2px solid var(--fg); border-radius: 12px; background: var(--surface); }
+.ws-io { display: flex; flex-direction: column; gap: 0.25rem; align-items: flex-start; }
+.ws-slots { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+.slot { border: 2px solid var(--line); border-radius: 9px; padding: 0.35rem 0.45rem; display: flex; flex-direction: column; gap: 0.3rem; min-width: 5.4rem; background: var(--bg); }
+.slot-h { display: flex; justify-content: space-between; gap: 0.4rem; font: 500 0.7rem var(--font-mono); }
+.slot-h b { font-family: var(--font-display); }
+.slot-s { font-size: 0.7rem; color: var(--muted); }
+.slot.on { border-color: var(--b); box-shadow: 0 0 12px 2px color-mix(in oklab, var(--b) 45%, transparent); }
+.slot.on .slot-s { color: var(--b); font-weight: 600; }
+.slot.loading { border: 2px dashed var(--b); background: color-mix(in oklab, var(--b) 7%, var(--bg)); }
+.slot.loading .slot-s { color: var(--b); }
+.slot.empty, .slot.used { opacity: 0.6; }
+.wscore .mini { --cell: 1.5rem; }
+.wscore .mini .cell { font-size: 0.72rem; }
+.cell.ghost { opacity: 0.35; }
+.k-B.stayq { box-shadow: 0 0 0 2px color-mix(in oklab, var(--b) 60%, transparent); }
+.badge.tag.ld { border-style: dashed; border-color: var(--b); }
+.badge.tag.ld span { background: var(--b); }
+.ws-port { font: 0.8rem var(--font-mono); padding: 0.3rem 0.5rem; border-radius: 6px; background: var(--surface-2); }
+.tl-box { display: flex; flex-direction: column; gap: 0.3rem; padding: 0.5rem 0.6rem; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); }
+.tl-box.anim { border: 2px solid var(--fg); }
+.tl-title { font-size: 0.85rem; }
+.bar.wld { background: color-mix(in oklab, var(--b) 12%, var(--surface)); border: 1.5px dashed var(--b); } .bar.wld .fill { background: color-mix(in oklab, var(--b) 35%, var(--surface)); }
+.bar.wcp { background: color-mix(in oklab, var(--c) 16%, var(--surface)); } .bar.wcp .fill { background: color-mix(in oklab, var(--c) 50%, var(--surface)); }
+.bar.wait { background: repeating-linear-gradient(45deg, color-mix(in oklab, var(--sp) 14%, var(--surface)) 0 5px, var(--surface) 5px 10px); color: var(--sp); border: 1.5px dashed color-mix(in oklab, var(--sp) 50%, var(--line)); }
+.bar .fill { pointer-events: none; }
+.g-end { font: 700 0.72rem var(--font-mono); color: var(--c); display: flex; align-items: center; padding-left: 0.3rem; }
+table.rule td.mem { color: var(--mem); font-weight: 600; }
+
+html, body { height: 100%; }
+.deck { height: 100%; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; }
+.top, .bot { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 0.55rem clamp(16px, 3vw, 2rem); border-bottom: 1px solid var(--line); background: var(--surface); }
+.bot { border-bottom: none; border-top: 1px solid var(--line); flex-wrap: wrap; }
+.top .name { font: 700 0.95rem var(--font-display); }
+.top .sec { font: 500 0.8rem var(--font-mono); color: var(--muted); }
+.stage { overflow: auto; }
+.slide { display: none; flex-direction: column; gap: 1rem; max-width: 76rem; margin: 0 auto; padding-inline: clamp(16px, 4vw, 3rem); padding-block: 1.4rem 2.2rem; }
+.slide.on { display: flex; animation: sin .28s ease-out; }
+@keyframes sin { from { opacity: 0; transform: translateX(10px); } to { opacity: 1; transform: none; } }
+.slide h2 { font: 700 clamp(1.5rem, 3.2vw, 2.3rem)/1.1 var(--font-display); margin: 0; letter-spacing: -0.015em; text-wrap: balance; }
+.slide p { margin: 0; line-height: 1.5; font-size: clamp(1rem, 1.6vw, 1.15rem); max-width: 60ch; }
+.slide p.small { font-size: 0.9rem; color: var(--muted); }
+.slide p.big { font-size: clamp(1.15rem, 2vw, 1.4rem); }
+.b { opacity: 0; transform: translateY(8px); transition: opacity .3s, transform .3s; }
+.b.shown { opacity: 1; transform: none; }
+tr.b { transform: none; }
+.split { display: flex; flex-wrap: wrap; gap: 1.5rem 2.5rem; align-items: flex-start; }
+.split > * { min-width: 0; flex: 1 1 20rem; }
+.split > [data-widget] { flex: 0 1 auto; }
+.points { display: flex; flex-direction: column; gap: 0.8rem; }
+.points.wide p { max-width: 62ch; }
+.title-slide { justify-content: center; min-height: 100%; gap: 1.2rem; }
+.title-slide h1 { font: 800 clamp(3rem, 10vw, 6.5rem)/0.95 var(--font-display); letter-spacing: -0.04em; margin: 0; }
+.eyebrow { font: 600 0.85rem var(--font-mono) !important; color: var(--muted); }
+.formula { font: 600 clamp(1.2rem, 3vw, 2rem) var(--font-mono) !important; }
+.lede { font-size: clamp(1.05rem, 2vw, 1.3rem) !important; max-width: 52ch !important; }
+.keys { display: flex; flex-wrap: wrap; gap: 0.5rem 1.2rem; font-size: 0.85rem; color: var(--muted); }
+kbd { font: 600 0.75rem var(--font-mono); border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 0 0.35rem; background: var(--surface); color: var(--fg); }
+.tw { overflow-x: auto; }
+table.rule { border-collapse: collapse; font-size: clamp(0.85rem, 1.4vw, 1rem); }
+table.rule th { text-align: left; font: 600 0.72rem var(--font-body); text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); border-bottom: 2px solid var(--line); padding: 0.5rem 0.8rem; }
+table.rule td { border-bottom: 1px solid var(--line); padding: 0.55rem 0.8rem; vertical-align: top; }
+table.rule code { background: var(--surface-2); padding: 0.05rem 0.3rem; border-radius: 4px; }
+table.cheat { font-size: 0.82rem; }
+table.cheat td, table.cheat th { padding: 0.4rem 0.6rem; }
+.stay-a, .stay-b, .stay-c { font-family: var(--font-mono); font-weight: 600; padding: 0 0.3rem; border-radius: 4px; white-space: nowrap; }
+.stay-a { box-shadow: 0 0 0 2px var(--a); color: var(--a); } .stay-b { box-shadow: 0 0 0 2px var(--b); color: var(--b); } .stay-c { box-shadow: 0 0 0 2px var(--c); color: var(--c); }
+.navb { display: flex; gap: 0.4rem; align-items: center; }
+.count { font: 500 0.8rem var(--font-mono); color: var(--muted); min-width: 4.5rem; text-align: center; }
+.prog { flex: 1 1 12rem; display: flex; gap: 3px; min-width: 0; }
+.prog i { flex: 1; height: 5px; border-radius: 3px; background: var(--line); cursor: pointer; }
+.prog i.done { background: color-mix(in oklab, var(--c) 50%, var(--line)); }
+.prog i.cur { background: var(--c); }
+.hint { font-size: 0.75rem; color: var(--muted); }
+@media (prefers-reduced-motion: reduce) { .slide.on { animation: none; } .b { transition: none; } }
+</style>
+</head>
+<body>
+<div class="deck"><header class="top"><span class="name">Matmul, rearranged</span><span class="sec" id="sec"></span></header><main class="stage"><section class="slide title-slide" data-sec="Start">
+  <p class="eyebrow">One multiplication · many loop orders</p>
+  <h1>Matmul, rearranged</h1>
+  <p class="formula"><span class="ta">A</span>[M, K] @ <span class="tb">B</span>[K, N] → <span class="tc">C</span>[M, N]</p>
+  <p class="lede">Every form in this deck is the loop you already know, with the loops moved around. Same 64 multiplies, different order, unfinished sums kept in different places.</p>
+  <div class="keys">
+    <span><kbd>→</kbd> next build or animation step</span><span><kbd>↓</kbd> whole inner loop</span><span><kbd>←</kbd> back</span>
+    <span><kbd>PgDn</kbd> / <kbd>N</kbd> next slide</span><span><kbd>P</kbd> play</span><span><kbd>E</kbd> finish animation</span>
+  </div>
+</section>
+
+<section class="slide" data-sec="Notation">
+  <h2>The names we use everywhere</h2>
+  <div class="split">
+    <div class="points">
+      <p class="b"><b>i</b> walks over M: rows of <span class="ta">A</span> and of <span class="tc">C</span></p>
+      <p class="b"><b>j</b> walks over N: columns of <span class="tb">B</span> and of <span class="tc">C</span></p>
+      <p class="b"><b>k</b> walks over K: columns of <span class="ta">A</span> = rows of <span class="tb">B</span>. <span class="tc">C</span> has no k: it gets summed away.</p>
+      <p class="b big"><code><span class="tc">C</span>[i][j] += <span class="ta">A</span>[i][k] * <span class="tb">B</span>[k][j]</code></p>
+      <p class="b small">Pale green = unfinished <span class="tc">C</span> value (some of its 4 terms). Solid green = finished. A glowing outline = the operand that stays put.</p>
+    </div>
+    <div data-widget='{"type":"static","hl":[1,2,3],"caption":"One elementary step: i = 1, j = 2, k = 3. B sits on top and A on the left, so row i of A lines up with row i of C and column j of B with column j of C."}'></div>
+  </div>
+</section>
+
+<section class="slide" data-sec="Running example">
+  <h2>The running example</h2>
+  <div class="split">
+    <div data-widget='{"type":"static","note":"4×4 @ 4×4<br>values 0…3"}'></div>
+    <div class="points">
+      <p>Small whole numbers, so every step can be checked by hand.</p>
+      <p class="b">Each <span class="tc">C</span> value is a sum of K = 4 products.</p>
+      <p class="b">16 values × 4 products = <b>64 multiplies</b>.</p>
+      <p class="b">The first product of each value is just stored, the other 3 are added: <b>48 additions</b>.</p>
+      <p class="b">Every animation ends with the same <span class="tc">C</span> and checks it against A @ B.</p>
+    </div>
+  </div>
+</section>
+
+<section class="slide" data-sec="1 · Textbook loop">
+  <h2>The loop you already know</h2>
+  <div data-widget='{"type":"player","order":"ijk","register":true,"labels":false}'></div>
+</section>
+
+<section class="slide" data-sec="1 · Textbook loop">
+  <h2>What just happened</h2>
+  <div class="points wide">
+    <p class="b">Each <span class="tc">C</span> value was started, finished and never visited again.</p>
+    <p class="b">During the whole k loop the running sum sat in one register. <span class="ta">A</span> and <span class="tb">B</span> values streamed past it.</p>
+    <p class="b">"One dot product per C value" is the <b>inner-product form</b>.</p>
+    <p class="b">Hardware names a loop after what stays put. Here <span class="tc">C</span>, the output, stays put: <b>output-stationary (os)</b>.</p>
+  </div>
+</section>
+
+<section class="slide" data-sec="2 · The rule">
+  <h2>The one rule behind every name</h2>
+  <p class="b">Each operand uses two of the three indices: <span class="ta">A</span>[i][k], <span class="tb">B</span>[k][j], <span class="tc">C</span>[i][j].</p>
+  <p class="b">The innermost loop changes one index every step. The two operands that contain it change. The third one <b>stays put</b>.</p>
+  <div class="tw">
+  <table class="rule">
+    <tr><th>innermost loop</th><th>changes every step</th><th>stays put</th><th>name</th></tr>
+    <tr class="b"><td>k</td><td><span class="ta">A</span>[i][k], <span class="tb">B</span>[k][j]</td><td><span class="stay-c">C[i][j]</span></td><td><b>output-stationary (os)</b></td></tr>
+    <tr class="b"><td>i</td><td><span class="ta">A</span>[i][k], <span class="tc">C</span>[i][j]</td><td><span class="stay-b">B[k][j]</span></td><td><b>weight-stationary (ws)</b></td></tr>
+    <tr class="b"><td>j</td><td><span class="tb">B</span>[k][j], <span class="tc">C</span>[i][j]</td><td><span class="stay-a">A[i][k]</span></td><td><b>input-stationary (is)</b></td></tr>
+  </table>
+  </div>
+  <p class="b small">"Weight": in a neural network B usually holds the trained weights. "Input": A holds the activations coming in.</p>
+</section>
+
+<section class="slide" data-sec="2 · The rule">
+  <h2>Same product, three things staying put</h2>
+  <div data-widget='{"type":"group","players":[{"order":"ijk","title":"os"},{"order":"jki","title":"ws"},{"order":"ikj","title":"is"}]}'></div>
+</section>
+
+<section class="slide" data-sec="3 · Six loop orders">
+  <h2>All six loop orders</h2>
+  <p class="b">Three loops nest in 3 × 2 × 1 = 6 orders. The line inside never changes.</p>
+  <div class="tw">
+  <table class="rule">
+    <tr><th>order</th><th>innermost</th><th>stays put</th><th>classic name</th><th>one inner loop builds…</th></tr>
+    <tr class="b"><td>ijk, jik</td><td>k</td><td><span class="stay-c">C[i][j]</span></td><td><b>inner product</b> · os</td><td>one finished C value (a dot product)</td></tr>
+    <tr class="b"><td>ikj</td><td>j</td><td><span class="stay-a">A[i][k]</span></td><td><b>row-wise</b> (Gustavson) · is</td><td><code>C[i,:] += A[i][k] * B[k,:]</code></td></tr>
+    <tr class="b"><td>jki</td><td>i</td><td><span class="stay-b">B[k][j]</span></td><td><b>column-wise</b> · ws</td><td><code>C[:,j] += A[:,k] * B[k][j]</code></td></tr>
+    <tr class="b"><td>kij</td><td>j</td><td><span class="stay-a">A[i][k]</span></td><td><b>outer product</b> · is inside</td><td>a row of <code>A[:,k] ⊗ B[k,:]</code></td></tr>
+    <tr class="b"><td>kji</td><td>i</td><td><span class="stay-b">B[k][j]</span></td><td><b>outer product</b> · ws inside</td><td>a column of <code>A[:,k] ⊗ B[k,:]</code></td></tr>
+  </table>
+  </div>
+  <p class="b small">In kij / kji the two inner loops together add one whole 4×4 <b>rank-1 update</b> into C for each k.</p>
+</section>
+
+<section class="slide" data-sec="3 · Six loop orders">
+  <h2>Row-wise: one A value kept, a row of B streams past</h2>
+  <div data-widget='{"type":"player","order":"ikj"}'></div>
+</section>
+
+<section class="slide" data-sec="3 · Six loop orders">
+  <h2>Column-wise: one B value kept, a column of A streams past</h2>
+  <div data-widget='{"type":"player","order":"jki"}'></div>
+</section>
+
+<section class="slide" data-sec="3 · Six loop orders">
+  <h2>Outer product: all of C grows together</h2>
+  <div data-widget='{"type":"player","order":"kij","selector":true,"orders":["kij","kji"],"startCap":"k is outermost. For each k, column k of A times row k of B is added into every C value."}'></div>
+</section>
+
+<section class="slide" data-sec="3 · Six loop orders">
+  <h2>Try any order</h2>
+  <div data-widget='{"type":"player","order":"jik","selector":true}'></div>
+</section>
+
+<section class="slide" data-sec="4 · Partial sums">
+  <h2>Finished in one go, or one term per visit?</h2>
+  <div data-widget='{"type":"group","players":[{"order":"ijk","title":"inner product"},{"order":"kij","title":"outer product"}],"hint":"Press ↓ four times: after 16 steps, left has 4 finished and 0 partial, right has 0 finished and 16 partial."}'></div>
+</section>
+
+<section class="slide" data-sec="4 · Partial sums">
+  <h2>Where the unfinished sums wait</h2>
+  <div class="split">
+    <div class="points">
+      <p class="b">Outside the inner-product form, a C value gets <b>one</b> of its 4 terms per visit and stays pale until the last one.</p>
+      <p class="b">Between visits it waits in <b>one place</b> and is added to at <b>many moments</b>.</p>
+      <p class="b big">This is <b>accumulating over time</b>.</p>
+    </div>
+    <div class="b">
+      <table class="rule narrow">
+        <tr><th>order</th><th>most partial values at once</th></tr>
+        <tr><td>ijk, jik</td><td>1 (one register)</td></tr>
+        <tr><td>ikj</td><td>4 (a row of C)</td></tr>
+        <tr><td>jki</td><td>4 (a column of C)</td></tr>
+        <tr><td>kij, kji</td><td>16 (all of C)</td></tr>
+      </table>
+    </div>
+  </div>
+</section>
+
+<section class="slide" data-sec="5 · Tiling">
+  <h2>Tiling: the same thing, in chunks</h2>
+  <div class="split">
+    <div data-widget='{"type":"static","bs":2,"blocks":true,"note":"each matrix<br>= 2×2 blocks"}'></div>
+    <div class="points">
+      <p class="b">Cut each 4×4 into four 2×2 blocks.</p>
+      <p class="b">Treat each block as one "number" and each <code>*</code> as a small matrix product.</p>
+      <p class="b">Block indices <b>mt</b>, <b>nt</b>, <b>kt</b>, each 0 or 1: a 2 × 2 × 2 grid of 8 block products.</p>
+      <p class="b"><code>C[mt,nt] = A[mt,0] @ B[0,nt] + A[mt,1] @ B[1,nt]</code> — the textbook formula with blocks.</p>
+    </div>
+  </div>
+</section>
+
+<section class="slide" data-sec="5 · Tiling">
+  <h2>Same six orders, on blocks</h2>
+  <div data-widget='{"type":"player","order":"ijk","bs":2,"selector":true}'></div>
+</section>
+
+<section class="slide" data-sec="5 · Tiling">
+  <h2>Open one block product: 8 ordinary multiplies</h2>
+  <div data-widget='{"type":"player","order":"ijk","ranges":{"i":[0,1],"j":[0,1],"k":[2,3]},"pre":[[0,0,0],[0,0,1],[0,1,0],[0,1,1],[1,0,0],[1,0,1],[1,1,0],[1,1,1]],"labels":false,"checkBlock":[0,0,2],"startCap":"C[0,0] already holds A[0,0] @ B[0,0] (pale). Step through the 8 multiplies of C[0,0] += A[0,1] @ B[1,0]."}'></div>
+</section>
+
+<section class="slide" data-sec="5 · Tiling">
+  <h2>The rule, one level up</h2>
+  <div class="tw">
+  <table class="rule">
+    <tr><th>innermost block loop</th><th>stays put</th><th>name</th></tr>
+    <tr class="b"><td>kt</td><td><span class="stay-c">block C[mt,nt]</span></td><td><b>os</b></td></tr>
+    <tr class="b"><td>mt</td><td><span class="stay-b">block B[kt,nt]</span></td><td><b>ws</b></td></tr>
+    <tr class="b"><td>nt</td><td><span class="stay-a">block A[mt,kt]</span></td><td><b>is</b></td></tr>
+  </table>
+  </div>
+  <p class="b">Inside each block product you can pick any of the six scalar orders again. The two choices are independent.</p>
+</section>
+
+
+
+<section class="slide" data-sec="6 · Hardware step">
+  <h2>scalar × scalar</h2>
+  <div data-widget='{"type":"cpu"}'></div>
+</section>
+
+<section class="slide" data-sec="6 · Hardware step">
+  <h2>vector × matrix</h2>
+  <div data-widget='{"type":"imc"}'></div>
+</section>
+
+<section class="slide" data-sec="6 · Hardware step">
+  <h2>matrix × matrix</h2>
+  <div data-widget='{"type":"tensor"}'></div>
+</section>
+
+<section class="slide" data-sec="6 · Hardware step">
+  <h2>Three sizes of one step</h2>
+  <div class="points wide">
+    <p class="b">The loops never change. The hardware decides how many of them happen at once.</p>
+    <p class="b"><b>CPU core</b>: scalar × scalar, 1 multiply.</p>
+    <p class="b"><b>In-memory-compute array</b>: vector × matrix, a row of A through a block of B that is stored in the memory cells.</p>
+    <p class="b"><b>GPU tensor core</b>: matrix × matrix, a block of A times a block of B.</p>
+  </div>
+</section>
+
+
+
+<section class="slide" data-sec="7 · Parallelism">
+  <h2>Four cores: how to read the picture</h2>
+  <div class="points wide">
+    <p class="b"><b>Top — the matrices.</b> Blocks being read right now are lit, and a tag like <code>c2</code> says which core is reading them. A glowing block is kept inside a core.</p>
+    <p class="b"><b>Middle — the chip.</b> One box per core, showing the three blocks it touches in this step: what it keeps, what it gets, and the C block it adds into.</p>
+    <p class="b"><b>Bottom — the timeline.</b> One row per core, one column per step. A bar is one tile of work; it fills up as the core works through it. Hatched = the core has nothing to do.</p>
+    <p class="b">Every step, every busy core does one 2×2 block product (8 multiplies) at the same time.</p>
+  </div>
+</section>
+
+<section class="slide" data-sec="7 · Parallelism">
+  <h2>Four cores, one product</h2>
+  <div data-widget='{"type":"pv","tm":2,"tn":2,"tk":2,"cores":4,"flow":"os","speed":1,"knobs":[{"k":"flow","v":["os","ws","is"]}]}'></div>
+</section>
+
+<section class="slide" data-sec="7 · Parallelism">
+  <h2>Naming it: grid and sweep</h2>
+  <div class="points wide">
+    <p class="b">Two of the three block loops were shared out: each core got one combination, and all cores ran <b>at the same time</b> (the rows of the timeline). That is the <b>tile grid</b>.</p>
+    <p class="b">The third loop ran <b>in order</b> inside each core (the columns inside one bar). That is the <b>sweep</b>.</p>
+    <p class="b">os: grid mt × nt, sweep kt &nbsp;·&nbsp; ws: grid kt × nt, sweep mt &nbsp;·&nbsp; is: grid mt × kt, sweep nt</p>
+    <p class="b">The operand that stays put inside each core is the one the sweep does not index — the same rule as before, one level up.</p>
+  </div>
+</section>
+
+<section class="slide" data-sec="7 · Parallelism">
+  <h2>More tiles than cores: waves</h2>
+  <p class="b">Cut C into 8 tiles of 1×2. Each tile is swept over K in 2 steps. With 3 cores the tiles are handed out in rounds; try other core counts.</p>
+  <div data-widget='{"type":"pv","tm":1,"tn":2,"tk":2,"cores":3,"flow":"os","knobs":[{"k":"cores","v":[2,3,4,5,8]}]}'></div>
+</section>
+
+<section class="slide" data-sec="8 · Over space">
+  <h2>When k is on the grid</h2>
+  <p class="b">Now the cores keep blocks of B (ws) or A (is). Two cores make pieces of the <b>same</b> C block — watch the “2×” cells, then the extra combine step.</p>
+  <div data-widget='{"type":"pv","tm":2,"tn":2,"tk":2,"cores":4,"flow":"ws","knobs":[{"k":"flow","v":["ws","is"]}]}'></div>
+</section>
+
+<section class="slide" data-sec="8 · Over space">
+  <h2>Zoom on one output: where the additions happen</h2>
+  <div data-widget='{"type":"kgroups","g":2}'></div>
+</section>
+
+<section class="slide" data-sec="9 · Split-K">
+  <h2>os runs out of tiles</h2>
+  <p class="b">In os one core owns one output block and sweeps <b>all</b> of K inside it. So the number of tiles is the number of output blocks: here 4 (a 4×4 C in 2×2 blocks), however many cores there are.</p>
+  <div data-widget='{"type":"pv","tm":2,"tn":2,"tk":2,"cores":8,"flow":"os","knobs":[{"k":"cores","v":[4,8]}]}'></div>
+</section>
+
+<section class="slide" data-sec="9 · Split-K">
+  <h2>Split-K: cut the sweep into pieces</h2>
+  <div class="points wide">
+    <p class="b">Cut each block's K sweep into <b>P</b> pieces: with P = 2, k 0–1 and k 2–3.</p>
+    <p class="b">The unit of work becomes <b>(output block, piece of K)</b>: 4 blocks × 2 pieces = <b>8 tiles</b>, so 8 cores can work at once.</p>
+    <p class="b">Each tile gives only part of the sum: a <b>pale</b> block. It must wait somewhere until the other pieces are done, so it goes out to <b class="tm">memory</b>.</p>
+    <p class="b">A <b class="tm">second pass</b> reads the pieces back and adds them into the final C.</p>
+    <p class="b small">Same 64 multiplies and 48 additions. What is new: (P−1)·16 of the additions happen in pass 2, and 2·P·16 values go through memory (P·16 written, P·16 read back).</p>
+  </div>
+</section>
+
+<section class="slide" data-sec="9 · Split-K">
+  <h2>Split-K, step by step</h2>
+  <div data-widget='{"type":"skm","tm":2,"tn":2,"pieces":2,"cores":8,"knobs":[{"k":"pieces","v":[1,2,4]},{"k":"cores","v":[4,8]}]}'></div>
+</section>
+
+<section class="slide" data-sec="9 · Split-K">
+  <h2>The other way to 8 tiles: ws</h2>
+  <p class="b">ws also puts K to work in parallel, but it puts <b>every</b> K-slice on the grid: 4 slices × 2 column blocks = 8 tiles. No memory trip — the pieces meet across cores.</p>
+  <div data-widget='{"type":"pv","tm":2,"tn":2,"tk":1,"cores":8,"flow":"ws","g":1}'></div>
+</section>
+
+<section class="slide" data-sec="9 · Split-K">
+  <h2>Split-K vs ws</h2>
+  <div class="tw">
+  <table class="rule">
+    <tr><th>on the 4×4 example, 8 cores</th><th>split-K, P = 2</th><th>ws, K on the grid</th></tr>
+    <tr class="b"><td>how K is cut</td><td>2 big contiguous pieces (k 0–1, 2–3)</td><td>every slice (4 slices of 1)</td></tr>
+    <tr class="b"><td>unit of work</td><td>(output block, piece)</td><td>(K-slice, column block)</td></tr>
+    <tr class="b"><td>tiles</td><td>4 × 2 = 8</td><td>4 × 2 = 8</td></tr>
+    <tr class="b"><td>each core keeps</td><td><span class="stay-c">a C block</span> os</td><td><span class="stay-b">a slice of B</span> ws</td></tr>
+    <tr class="b"><td>pieces per C value</td><td>2</td><td>4</td></tr>
+    <tr class="b"><td>additions over time</td><td>32</td><td>0</td></tr>
+    <tr class="b"><td>the rest of the additions</td><td class="mem">16, in pass 2</td><td class="tsp">48, across cores</td></tr>
+    <tr class="b"><td>what it pays with</td><td class="mem">memory traffic: 32 written + 32 read</td><td class="tsp">additions between cores (2 combine levels)</td></tr>
+    <tr class="b"><td>total arithmetic</td><td>64 multiplies, 48 additions</td><td>64 multiplies, 48 additions</td></tr>
+  </table>
+  </div>
+  <p class="b small">Both buy parallel work by cutting K. Split-K cuts it into big pieces and pays with memory traffic. ws puts every K-slice on the grid and pays with additions across cores.</p>
+</section>
+
+<section class="slide" data-sec="10 · Weight sets">
+  <h2>A core that stores several blocks of B</h2>
+  <div class="points wide">
+    <p class="b">An in-memory-compute core keeps B <b>in its cells</b> (ws). Some can store a few blocks at once: <b>weight sets</b>, or slots.</p>
+    <p class="b">It computes with <b>one slot at a time</b>. The others only hold data.</p>
+    <p class="b">Writing a block into a slot takes time: here 2 steps. The extra slots can be used in two ways:</p>
+    <p class="b"><b>(a)</b> hide the loading: fill the next slot while computing with this one.<br><b>(b)</b> keep K in one place: put successive K-pieces of the same column in the slots.</p>
+    <p class="b small">Tiny version: 2 slots of a 2×2 block. Real (your figures): Axelera Metis has 4 cores, each holding 4 weight sets of 512×512 bytes and computing with one at a time. 4 × 512 × 512 B = 1 MiB per core, which matches the 1 MiB of compute memory per core that Axelera publishes.</p>
+  </div>
+</section>
+
+<section class="slide" data-sec="10 · Weight sets">
+  <h2>(a) Hide the loading</h2>
+  <div data-widget='{"type":"wsets","tn":2,"tk":2,"slots":2,"load":2,"sched":"overlap","group":"block","both":true,"knobs":[{"k":"sched","v":["seq","overlap"]},{"k":"load","v":[1,2,4,6]}]}'></div>
+</section>
+
+<section class="slide" data-sec="10 · Weight sets">
+  <h2>(b) Accumulate K in one place</h2>
+  <div data-widget='{"type":"wsets","tn":2,"tk":2,"slots":2,"load":2,"sched":"overlap","group":"row","both":false,"knobs":[{"k":"slots","v":[1,2]}]}'></div>
+</section>
+
+<section class="slide" data-sec="10 · Weight sets">
+  <h2>More cores than columns: K-groups</h2>
+  <p class="b">B has only 2 column blocks but there are 4 cores. Cut K into 4 slices, give each core a group of them in its slots: it sums its group over time, and only one partial per core meets the others at the end. With 2 per core, 2 pieces per C value instead of 4.</p>
+  <div data-widget='{"type":"pv","tm":2,"tn":2,"tk":1,"cores":4,"flow":"ws","g":2,"knobs":[{"k":"g","v":[1,2,4]}]}'></div>
+</section>
+
+<section class="slide" data-sec="11 · Cheat sheet">
+  <h2>Cheat sheet</h2>
+  <div class="tw">
+  <table class="rule cheat">
+    <tr><th>loop order</th><th>classic name</th><th>stays put</th><th>one inner loop produces</th><th>finished / partial</th><th>K-sum happens</th></tr>
+    <tr><td>ijk, jik</td><td>inner product</td><td><span class="stay-c">C[i][j]</span> os</td><td>one scalar C[i][j]</td><td>finished</td><td>time · 1 register</td></tr>
+    <tr><td>ikj</td><td>row-wise (Gustavson)</td><td><span class="stay-a">A[i][k]</span> is</td><td>a row update of C</td><td>partial until last k of the row</td><td>time · a row of C</td></tr>
+    <tr><td>jki</td><td>column-wise</td><td><span class="stay-b">B[k][j]</span> ws</td><td>a column update of C</td><td>partial until last k of the column</td><td>time · a column of C</td></tr>
+    <tr><td>kij</td><td>outer product</td><td><span class="stay-a">A[i][k]</span> is</td><td>row of a rank-1 update (2 inner loops: whole matrix)</td><td>partial until last k</td><td>time · all of C</td></tr>
+    <tr><td>kji</td><td>outer product</td><td><span class="stay-b">B[k][j]</span> ws</td><td>column of a rank-1 update (2 inner loops: whole matrix)</td><td>partial until last k</td><td>time · all of C</td></tr>
+    <tr><td>tiled</td><td>same names per block</td><td>a block</td><td>a block product</td><td>as its scalar order</td><td>as its scalar order</td></tr>
+    <tr><td>os grid</td><td>M×N tiles on cores</td><td>C block</td><td>whole output tiles</td><td>finished on its core</td><td>time</td></tr>
+    <tr><td>ws / is grid</td><td>K on the grid</td><td>B or A block</td><td>pieces of C blocks</td><td>partial until combined</td><td class="tsp">space</td></tr>
+    <tr><td>K-groups</td><td>ws / is, g K-slices per core</td><td>g blocks, in slots</td><td>pieces of C blocks</td><td>partial until combined</td><td>time for g, <span class="tsp">space</span> between groups</td></tr>
+    <tr><td>split-K</td><td>os, K cut into P pieces</td><td><span class="stay-c">C block</span> per tile</td><td>a pale block per (block, piece)</td><td>partial until pass 2</td><td>time in a piece, then <span class="tm">memory</span> + pass 2</td></tr>
+    <tr><td>weight sets (b)</td><td>ws, a row through all slots</td><td><span class="stay-b">K-pieces of one B column</span></td><td>one row of C per pass</td><td>finished after the last slot</td><td>time · one accumulator</td></tr>
+  </table>
+  </div>
+  <p class="small">Every row: 64 multiplies and 48 additions on the 4×4 example.</p>
+</section>
+
+<section class="slide" data-sec="End">
+  <h2>Every form, same answer</h2>
+  <div class="split">
+    <div data-widget='{"type":"static","filled":true,"note":"C == A @ B"}'></div>
+    <div class="points">
+      <p class="b">Loop order decides <b>what stays put</b> and <b>when</b> a C value is finished.</p>
+      <p class="b">Tiling applies the same rule to blocks.</p>
+      <p class="b">Hardware decides how big one step is.</p>
+      <p class="b">Parallelism decides whether the K-sum happens over <b>time</b> or across <b class="tsp">space</b>.</p>
+      <p class="b">The arithmetic never changes: 64 multiplies, 48 additions.</p>
+    </div>
+  </div>
+</section>
+</main><footer class="bot"><div class="navb"><button class="btn" id="bprev" type="button" aria-label="Back (←)">◀ Back</button><span class="count" id="cnt"></span><button class="btn pri" id="bnext" type="button" aria-label="Next build or step (→)">Next ▶</button><button class="btn" id="bskip" type="button" aria-label="Next slide (PgDn)">Next slide ⇥</button></div><div class="prog" id="prog"></div><span class="hint">→ step · ↓ inner loop · PgDn slide · P play</span></footer></div><script>/* Matmul animation engine — shared by the slide deck and the notebook page.
+   Everything is replayed from the running example, so every picture is checkable by hand. */
+(function (global) {
+  'use strict';
+
+  // ---------------- the running example ----------------
+  const A = [[1, 2, 0, 3], [0, 1, 2, 1], [3, 0, 1, 2], [2, 1, 3, 0]];
+  const B = [[2, 0, 1, 3], [1, 3, 0, 2], [0, 1, 2, 1], [3, 2, 1, 0]];
+  const M = 4, N = 4, K = 4;
+  const rng = (n) => Array.from({ length: n }, (_, i) => i);
+  const zeros = (r = 4, c = 4) => rng(r).map(() => rng(c).map(() => 0));
+  const REF = rng(M).map((i) => rng(N).map((j) => rng(K).reduce((s, k) => s + A[i][k] * B[k][j], 0)));
+
+  // ---------------- the rule ----------------
+  const IDX = { A: ['i', 'k'], B: ['k', 'j'], C: ['i', 'j'] };
+  const STAY = { k: 'C', i: 'B', j: 'A' };
+  const STAT = { C: 'output-stationary', B: 'weight-stationary', A: 'input-stationary' };
+  const SHORT = { C: 'os', B: 'ws', A: 'is' };
+  const FORM = { ijk: 'inner product', jik: 'inner product', ikj: 'row-wise (Gustavson)', jki: 'column-wise', kij: 'outer product', kji: 'outer product' };
+  const BVAR = { i: 'mt', j: 'nt', k: 'kt' };
+  const ORDERS = ['ijk', 'jik', 'ikj', 'kij', 'jki', 'kji'];
+
+  function makeFrames(order, bs, ranges) {
+    bs = bs || 1;
+    const nb = 4 / bs;
+    const R = Object.assign({ i: rng(nb), j: rng(nb), k: rng(nb) }, ranges || {});
+    const v = order.split('');
+    const fr = [];
+    for (const a of R[v[0]]) for (const b of R[v[1]]) for (const c of R[v[2]]) {
+      const idx = {}; idx[v[0]] = a; idx[v[1]] = b; idx[v[2]] = c;
+      const ops = [];
+      for (let ii = 0; ii < bs; ii++) for (let jj = 0; jj < bs; jj++) for (let kk = 0; kk < bs; kk++)
+        ops.push([idx.i * bs + ii, idx.j * bs + jj, idx.k * bs + kk]);
+      fr.push({ idx, ops });
+    }
+    return { frames: fr, R, v };
+  }
+  function newState() { return { C: zeros(), T: zeros(), mul: 0, add: 0 }; }
+  // one elementary step. The first term of a C value is just stored, so it costs no addition.
+  function apply(s, op) {
+    const [i, j, k] = op;
+    const a = A[i][k], b = B[k][j], p = a * b, old = s.C[i][j], first = s.T[i][j] === 0;
+    if (!first) s.add++;
+    s.C[i][j] = old + p; s.T[i][j]++; s.mul++;
+    return { i, j, k, a, b, p, old, nw: old + p, terms: s.T[i][j], first };
+  }
+  function census(T) { let p = 0, f = 0; T.forEach((r) => r.forEach((t) => { if (t === K) f++; else if (t > 0) p++; })); return { p, f }; }
+  function equalsRef(C) { return C.every((r, i) => r.every((x, j) => x === REF[i][j])); }
+
+  // ---------------- DOM helpers ----------------
+  function el(tag, cls, html) { const e = document.createElement(tag); if (cls) e.className = cls; if (html != null) e.innerHTML = html; return e; }
+  function btn(label, title, fn, pri) { const b = el('button', 'btn' + (pri ? ' pri' : ''), label); b.type = 'button'; b.title = title; b.setAttribute('aria-label', title); b.addEventListener('click', fn); return b; }
+  function key(i, j) { return i + ',' + j; }
+
+  // A matrix picture. kind: 'A' | 'B' | 'C'. opt: vals, rows, cols, rowOff, colOff, bs, rv, cv, title, dims
+  function Mat(kind, opt) {
+    opt = opt || {};
+    this.kind = kind;
+    this.rows = opt.rows || 4; this.cols = opt.cols || 4;
+    this.rowOff = opt.rowOff || 0; this.colOff = opt.colOff || 0;
+    this.bs = opt.bs || 1;
+    this.root = el('div', 'mat m-' + kind + (opt.cls ? ' ' + opt.cls : ''));
+    const rv = opt.rv || IDX[kind][0], cv = opt.cv || IDX[kind][1];
+    const dims = opt.dims || { A: 'M×K', B: 'K×N', C: 'M×N' }[kind];
+    this.root.appendChild(el('div', 'mat-title', '<b>' + (opt.title || kind) + '</b><span>' + dims + '</span>'));
+    const g = el('div', 'mat-grid');
+    g.style.gridTemplateColumns = 'auto repeat(' + this.cols + ', auto)';
+    this.grid = g;
+    const put = (e, r, c) => { e.style.gridRow = String(r); e.style.gridColumn = String(c); g.appendChild(e); return e; };
+    put(el('div', 'mh corner', rv + '\\' + cv), 1, 1);
+    this.colH = []; this.rowH = []; this.cells = [];
+    for (let c = 0; c < this.cols; c++) {
+      const cc = c + this.colOff;
+      const h = el('div', 'mh' + (this.bs > 1 && cc % this.bs === 0 && c > 0 ? ' bl' : ''), String(cc));
+      this.colH.push(h); put(h, 1, c + 2);
+    }
+    for (let r = 0; r < this.rows; r++) {
+      const rr = r + this.rowOff;
+      const h = el('div', 'mh' + (this.bs > 1 && rr % this.bs === 0 && r > 0 ? ' bt' : ''), String(rr));
+      this.rowH.push(h); put(h, r + 2, 1);
+      const row = [];
+      for (let c = 0; c < this.cols; c++) {
+        const cc = c + this.colOff;
+        const x = el('div', 'cell');
+        x.dataset.base = 'cell k-' + kind +
+          (this.bs > 1 && cc % this.bs === 0 && c > 0 ? ' bl' : '') +
+          (this.bs > 1 && rr % this.bs === 0 && r > 0 ? ' bt' : '');
+        x.className = x.dataset.base;
+        if (opt.vals) x.textContent = opt.vals[rr][cc];
+        row.push(x); put(x, r + 2, c + 2);
+      }
+      this.cells.push(row);
+    }
+    this.badges = [];
+    this.root.appendChild(g);
+  }
+  // cls: map "r,c" (absolute indices) -> extra class string; text: optional function(r,c) -> string
+  Mat.prototype.paint = function (cls, text) {
+    for (let r = 0; r < this.rows; r++) for (let c = 0; c < this.cols; c++) {
+      const rr = r + this.rowOff, cc = c + this.colOff, x = this.cells[r][c];
+      const extra = cls[key(rr, cc)] || '';
+      const want = x.dataset.base + (extra ? ' ' + extra : '');
+      if (x.className !== want) x.className = want;
+      if (text) { const t = text(rr, cc); if (x.textContent !== t) x.textContent = t; }
+    }
+  };
+  Mat.prototype.heads = function (rowOn, colOn) {
+    this.rowH.forEach((h, r) => h.classList.toggle('on', rowOn != null && rowOn.indexOf(r + this.rowOff) >= 0));
+    this.colH.forEach((h, c) => h.classList.toggle('on', colOn != null && colOn.indexOf(c + this.colOff) >= 0));
+  };
+  // outline a rectangle of cells (absolute indices) with a label
+  Mat.prototype.badge = function (r0, c0, rs, cs, text, cls) {
+    const b = el('div', 'badge' + (cls ? ' ' + cls : ''), text ? '<span>' + text + '</span>' : '');
+    b.style.gridRow = (2 + r0 - this.rowOff) + ' / span ' + rs;
+    b.style.gridColumn = (2 + c0 - this.colOff) + ' / span ' + cs;
+    this.grid.appendChild(b); this.badges.push(b); return b;
+  };
+  Mat.prototype.clearBadges = function () { this.badges.forEach((b) => b.remove()); this.badges = []; };
+
+  function Triple(opt) {
+    opt = opt || {};
+    this.root = el('div', 'triple');
+    const bs = opt.bs || 1;
+    this.A = new Mat('A', { vals: A, bs });
+    this.B = new Mat('B', { vals: B, bs });
+    this.C = new Mat('C', { bs });
+    const tx = el('div', 'tx', opt.note || 'C = A @ B<br>C[i][j] sits where<br>row i meets col j');
+    this.root.append(tx, this.B.root, this.A.root, this.C.root);
+  }
+  function cText(s) { return (r, c) => (s.T[r][c] > 0 ? String(s.C[r][c]) : '·'); }
+  function cClass(s, cls) {
+    for (let r = 0; r < 4; r++) for (let c = 0; c < 4; c++) {
+      const t = s.T[r][c];
+      const k0 = key(r, c);
+      const add = t === K ? 'fin' : t > 0 ? 'part' : '';
+      if (add) cls[k0] = cls[k0] ? cls[k0] + ' ' + add : add;
+    }
+  }
+  function addCls(map, k0, c) { map[k0] = map[k0] ? map[k0] + ' ' + c : c; }
+
+  // ---------------- controls interface shared by all widgets ----------------
+  // Each widget implements: n (number of steps), t, go(t), innerSize(), render()
+  const Steppable = {
+    step() { if (this.t < this.n) { this.go(this.t + 1); return true; } return false; },
+    back() { if (this.t > 0) { this.go(this.t - 1); return true; } return false; },
+    inner() {
+      if (this.t >= this.n) return false;
+      const s = this.innerSize ? this.innerSize() : 1;
+      let t = this.t + 1; while (t < this.n && t % s !== 0) t++;
+      this.go(t); return true;
+    },
+    finish() { this.stop(); if (this.t < this.n) { this.go(this.n); return true; } return false; },
+    reset() { this.stop(); this.go(0); },
+    atEnd() { return this.t >= this.n; },
+    atStart() { return this.t <= 0; },
+    play() {
+      if (this.timer) { this.stop(); return; }
+      if (this.t >= this.n) this.go(0);
+      const self = this;
+      this.timer = setInterval(() => { if (!self.step()) self.stop(); }, this.speed || 320);
+      this.syncPlay();
+    },
+    stop() { if (this.timer) { clearInterval(this.timer); this.timer = null; } this.syncPlay(); },
+    syncPlay() { if (this.playBtn) { this.playBtn.textContent = this.timer ? 'Pause' : 'Play'; this.playBtn.setAttribute('aria-pressed', this.timer ? 'true' : 'false'); } },
+    makeControls(opts) {
+      opts = opts || {};
+      const c = el('div', 'controls');
+      c.append(
+        btn('Reset', 'Reset to the start (R)', () => this.reset()),
+        btn('◀', 'Step back (←)', () => { this.stop(); this.back(); }),
+        btn('Step ▶', 'One step (→)', () => { this.stop(); this.step(); }, true)
+      );
+      if (!opts.noInner) c.append(btn(opts.innerLabel || 'Whole inner loop ⏭', 'Jump to the end of the current inner loop (↓)', () => { this.stop(); this.inner(); }));
+      this.playBtn = btn('Play', 'Play / pause (P)', () => this.play());
+      c.append(this.playBtn, btn('Finish', 'Jump to the end (E)', () => this.finish()));
+      return c;
+    },
+    keydown(e) {
+      const k = e.key;
+      if (k === 'ArrowRight') { this.stop(); return this.step(); }
+      if (k === 'ArrowLeft') { this.stop(); return this.back(); }
+      if (k === 'ArrowDown') { this.stop(); return this.inner(); }
+      if (k === 'p' || k === 'P') { this.play(); return true; }
+      if (k === 'e' || k === 'E') { return this.finish(); }
+      if (k === 'r' || k === 'R') { this.reset(); return true; }
+      return false;
+    },
+    enableKeys() {
+      this.root.tabIndex = 0;
+      this.root.addEventListener('keydown', (e) => { if (e.target !== this.root) return; if (this.keydown(e)) e.preventDefault(); });
+    }
+  };
+  function mix(P) { Object.keys(Steppable).forEach((k) => { if (!P[k]) P[k] = Steppable[k]; }); }
+
+  function countersHTML(items) {
+    return items.map((x) => '<span class="' + (x.cls || '') + '">' + x.label + ' <b>' + x.value + '</b></span>').join('');
+  }
+  function checkLine(C, extra) {
+    return equalsRef(C) ? '<span class="ok">Check: C == A @ B ✓</span>' + (extra || '') : '<span class="tsp">C differs from A @ B ✗</span>';
+  }
+
+  // ---------------- code panel ----------------
+  function codeLines(order, bs, ranges, fullR) {
+    const vn = (v) => (bs > 1 ? BVAR[v] : v);
+    const size = bs > 1 ? { i: '2', j: '2', k: '2' } : { i: 'M', j: 'N', k: 'K' };
+    const lines = [];
+    order.split('').forEach((v, d) => {
+      const full = !ranges || !ranges[v] || ranges[v].length === fullR;
+      const r = full ? 'range(' + size[v] + ')' : '(' + ranges[v].join(', ') + ')';
+      lines.push({ v, html: '  '.repeat(d) + '<span class="kw">for</span> ' + vn(v) + ' <span class="kw">in</span> ' + r + ':' });
+    });
+    lines.push({ v: 'body', html: '      ' + (bs > 1
+      ? '<span class="tc">C</span>[mt,nt] += <span class="ta">A</span>[mt,kt] @ <span class="tb">B</span>[kt,nt]'
+      : '<span class="tc">C</span>[i][j] += <span class="ta">A</span>[i][k] * <span class="tb">B</span>[k][j]') });
+    return lines;
+  }
+
+  // ---------------- Player: one loop order, scalar (bs=1) or tiled (bs=2) ----------------
+  // cfg: order, bs, ranges, pre (ops applied before step 0), register, labels, selector, compact, controls, title, note
+  function Player(root, cfg) {
+    this.cfg = Object.assign({ order: 'ijk', bs: 1, labels: true, controls: true }, cfg || {});
+    this.root = root; root.classList.add('w'); if (this.cfg.compact) root.classList.add('compact');
+    this.speed = this.cfg.speed || (this.cfg.bs > 1 ? 700 : 300);
+    this.t = 0;
+    this.head = el('div', 'w-head'); root.appendChild(this.head);
+    if (this.cfg.selector) {
+      const seg = el('div', 'seg'); this.segBtns = {};
+      (this.cfg.orders || ORDERS).forEach((o) => {
+        const b = btn(this.cfg.bs > 1 ? o.split('').map((v) => BVAR[v]).join(' ') : o, 'Loop order ' + o, () => { this.stop(); this.setOrder(o); });
+        this.segBtns[o] = b; seg.appendChild(b);
+      });
+      root.appendChild(seg);
+    }
+    const body = el('div', 'w-body'); root.appendChild(body);
+    this.left = el('div', 'stack'); body.appendChild(this.left);
+    this.codeEl = el('pre', 'code'); this.left.appendChild(this.codeEl);
+    if (this.cfg.register) {
+      this.regEl = el('div', 'reg', '<span>running sum<br><small>(one register)</small></span><span class="box">·</span>');
+      this.left.appendChild(this.regEl);
+    }
+    this.tri = new Triple({ bs: this.cfg.bs, note: this.cfg.note });
+    body.appendChild(this.tri.root);
+    this.cap = el('div', 'cap'); root.appendChild(this.cap);
+    const foot = el('div', 'w-foot'); root.appendChild(foot);
+    this.cnt = el('div', 'counters'); foot.appendChild(this.cnt);
+    if (this.cfg.controls) { foot.appendChild(this.makeControls()); this.enableKeys(); }
+    this.setOrder(this.cfg.order);
+  }
+  Player.prototype.setOrder = function (order) {
+    this.order = order;
+    const mf = makeFrames(order, this.cfg.bs, this.cfg.ranges);
+    this.frames = mf.frames; this.R = mf.R; this.v = mf.v; this.n = this.frames.length;
+    this.lines = codeLines(order, this.cfg.bs, this.cfg.ranges, 4 / this.cfg.bs);
+    this.codeEl.innerHTML = '';
+    this.lineEls = this.lines.map((l) => { const d = el('div', 'ln', l.html); this.codeEl.appendChild(d); return d; });
+    this.valEls = this.lines.slice(0, 3).map((l, d) => { const s = el('span', 'val'); this.lineEls[d].appendChild(s); return s; });
+    if (this.segBtns) Object.keys(this.segBtns).forEach((o) => this.segBtns[o].setAttribute('aria-pressed', o === order ? 'true' : 'false'));
+    this.renderHead();
+    this.go(0);
+  };
+  Player.prototype.innerSize = function () { return this.R[this.v[2]].length; };
+  Player.prototype.renderHead = function () {
+    this.head.innerHTML = '';
+    if (this.cfg.title) this.head.appendChild(el('span', 'w-title', this.cfg.title));
+    const inner = this.v[2], stay = STAY[inner], bsv = this.cfg.bs > 1;
+    const vn = (x) => (bsv ? BVAR[x] : x);
+    this.head.appendChild(el('span', 'chip', 'order ' + this.v.map(vn).join(' ')));
+    if (this.cfg.labels) {
+      const sIdx = IDX[stay].map(vn);
+      this.head.appendChild(el('span', 'chip', 'innermost ' + vn(inner)));
+      this.head.appendChild(el('span', 'chip ' + stay, 'stays put: ' + stay + '[' + sIdx.join(bsv ? ',' : '][') + '] · ' + SHORT[stay]));
+      this.head.appendChild(el('span', 'chip', FORM[this.order]));
+    }
+  };
+  Player.prototype.go = function (t) {
+    this.t = Math.max(0, Math.min(this.n, t));
+    this.render();
+  };
+  Player.prototype.render = function () {
+    const s = newState(); const bs = this.cfg.bs;
+    (this.cfg.pre || []).forEach((op) => apply(s, op));
+    let last = [];
+    for (let f = 0; f < this.t; f++) { last = this.frames[f].ops.map((op) => apply(s, op)); }
+    const fi = this.t > 0 ? this.t - 1 : 0;
+    const fr = this.frames[fi];
+    const live = this.t > 0 && this.t <= this.n;
+    const clsA = {}, clsB = {}, clsC = {};
+    // region swept by the inner loop (outer two indices fixed)
+    const inner = this.v[2], stay = STAY[inner];
+    const region = (op) => {
+      const out = [];
+      const vals = IDX[op].indexOf(inner) >= 0 ? this.R[inner] : [null];
+      vals.forEach((x) => {
+        const id = Object.assign({}, fr.idx); if (x !== null) id[inner] = x;
+        const r0 = id[IDX[op][0]] * bs, c0 = id[IDX[op][1]] * bs;
+        for (let a = 0; a < bs; a++) for (let b = 0; b < bs; b++) out.push(key(r0 + a, c0 + b));
+      });
+      return out;
+    };
+    const showCtx = this.t < this.n;
+    if (showCtx) {
+      region('A').forEach((k0) => addCls(clsA, k0, 'sweep'));
+      region('B').forEach((k0) => addCls(clsB, k0, 'sweep'));
+      region('C').forEach((k0) => addCls(clsC, k0, 'sweep'));
+      const stayMap = { A: clsA, B: clsB, C: clsC }[stay];
+      region(stay).forEach((k0) => addCls(stayMap, k0, 'stay'));
+    }
+    cClass(s, clsC);
+    if (live) last.forEach((o) => { addCls(clsA, key(o.i, o.k), 'read'); addCls(clsB, key(o.k, o.j), 'read'); addCls(clsC, key(o.i, o.j), 'write'); });
+    this.tri.A.paint(clsA); this.tri.B.paint(clsB); this.tri.C.paint(clsC, cText(s));
+    // headers: current indices
+    if (showCtx) {
+      const rowsOf = (v) => rng(bs).map((a) => fr.idx[v] * bs + a);
+      this.tri.A.heads(rowsOf('i'), rowsOf('k')); this.tri.B.heads(rowsOf('k'), rowsOf('j')); this.tri.C.heads(rowsOf('i'), rowsOf('j'));
+    } else { ['A', 'B', 'C'].forEach((m) => this.tri[m].heads(null, null)); }
+    // code
+    this.lineEls.forEach((d, n) => { d.classList.toggle('on', n === 3 && live && showCtx); d.classList.toggle('inner', n === 2 && showCtx); });
+    const vn = (x) => (bs > 1 ? BVAR[x] : x);
+    this.valEls.forEach((sp, d) => { sp.textContent = showCtx && this.t > 0 ? vn(this.v[d]) + ' = ' + fr.idx[this.v[d]] : ''; });
+    // register
+    if (this.regEl) {
+      const box = this.regEl.querySelector('.box');
+      box.textContent = live && last.length ? String(last[last.length - 1].nw) : '·';
+    }
+    // caption
+    const cs = census(s.T);
+    let cap = '';
+    if (this.t === 0) cap = this.cfg.startCap || 'Press <b>Step</b> (or →) to take the first step. Row, column and cell that the inner loop will visit are tinted.';
+    else if (bs === 1) {
+      const o = last[0];
+      const name = 'C[' + o.i + '][' + o.j + ']';
+      cap = '<code><span class="tc">' + name + '</span> += <span class="ta">A[' + o.i + '][' + o.k + ']</span>·<span class="tb">B[' + o.k + '][' + o.j + ']</span></code> = ' + o.a + '·' + o.b + ' = ' + o.p + ' → ' +
+        (o.first ? name + ' = ' + o.nw + ' <small>(first term: just stored, no addition)</small>' : name + ' = ' + o.old + ' + ' + o.p + ' = <b>' + o.nw + '</b>') +
+        ' · term ' + o.terms + ' of 4 ' + (o.terms === 4 ? '<b class="tc">— finished</b>' : '<span class="tc">— partial</span>');
+    } else {
+      const id = fr.idx;
+      const done = rng(2).every((a) => rng(2).every((b) => s.T[id.i * 2 + a][id.j * 2 + b] === K));
+      cap = '<code><span class="tc">C[' + id.i + ',' + id.j + ']</span> += <span class="ta">A[' + id.i + ',' + id.k + ']</span> @ <span class="tb">B[' + id.k + ',' + id.j + ']</span></code> — one 2×2 block product = 8 multiplies. ' +
+        (done ? '<b class="tc">Block C[' + id.i + ',' + id.j + '] finished.</b>' : '<span class="tc">Block C[' + id.i + ',' + id.j + '] still partial.</span>');
+    }
+    if (this.t === this.n) {
+      const cb = this.cfg.checkBlock;
+      if (cb) {
+        const ok = rng(cb[2]).every((a) => rng(cb[2]).every((b) => s.C[cb[0] + a][cb[1] + b] === REF[cb[0] + a][cb[1] + b] && s.T[cb[0] + a][cb[1] + b] === K));
+        const vals = rng(cb[2]).map((a) => rng(cb[2]).map((b) => s.C[cb[0] + a][cb[1] + b]).join(' ')).join(' / ');
+        cap = 'Done: block C[0,0] = [' + vals + '] ' + (ok ? '<span class="ok">= the top-left block of A @ B ✓</span>' : '<span class="tsp">✗</span>') +
+          ' The other 7 block products are the same 8-multiply pattern; together they make the full 64 multiplies and the same C.';
+      } else cap = 'Done: ' + s.mul + ' multiplies, ' + s.add + ' additions. ' + checkLine(s.C);
+    }
+    this.cap.innerHTML = cap;
+    this.cnt.innerHTML = countersHTML([
+      { label: 'step', value: this.t + '/' + this.n },
+      { label: 'multiplies', value: s.mul + '/64' },
+      { label: 'additions', value: s.add + '/48' },
+      { label: 'partial', value: cs.p },
+      { label: 'finished', value: cs.f + '/16' }
+    ]);
+  };
+  mix(Player.prototype);
+
+  // ---------------- Group: several players stepped together ----------------
+  function Group(root, cfg) {
+    this.root = root;
+    root.classList.add('stack');
+    const grid = el('div', 'pgroup'); root.appendChild(grid);
+    this.players = cfg.players.map((pc) => { const d = el('div'); grid.appendChild(d); return new Player(d, Object.assign({ compact: true, controls: false }, pc)); });
+    this.n = Math.max.apply(null, this.players.map((p) => p.n));
+    this.t = 0; this.speed = cfg.speed || 300;
+    const bar = el('div', 'w-foot'); bar.appendChild(el('div', 'counters', cfg.hint || 'All panels take the same step at the same time.'));
+    bar.appendChild(this.makeControls()); root.appendChild(bar);
+    this.enableKeys();
+  }
+  Group.prototype.go = function (t) { this.t = Math.max(0, Math.min(this.n, t)); this.players.forEach((p) => p.go(this.t)); };
+  Group.prototype.innerSize = function () { return this.players[0].innerSize(); };
+  mix(Group.prototype);
+
+  // ---------------- Hardware 1: scalar × scalar (CPU core) ----------------
+  function HWScalar(root, cfg) {
+    this.root = root; root.classList.add('w'); this.speed = 260;
+    root.appendChild(el('div', 'w-head', '<span class="w-title">CPU core</span><span class="chip">one multiply per step</span>'));
+    const body = el('div', 'w-body'); root.appendChild(body);
+    this.pic = el('div', 'hw'); body.appendChild(this.pic);
+    this.mat = new Mat('C', { cls: 'compact' }); body.appendChild(this.mat.root);
+    this.cap = el('div', 'cap'); root.appendChild(this.cap);
+    const foot = el('div', 'w-foot'); root.appendChild(foot);
+    this.cnt = el('div', 'counters'); foot.appendChild(this.cnt);
+    foot.appendChild(this.makeControls({ innerLabel: 'Next C value ⏭' })); this.enableKeys();
+    this.frames = makeFrames('ijk').frames; this.n = 64; this.go(0);
+  }
+  HWScalar.prototype.innerSize = function () { return 4; };
+  HWScalar.prototype.go = function (t) {
+    this.t = Math.max(0, Math.min(this.n, t));
+    const s = newState(); let o = null;
+    for (let f = 0; f < this.t; f++) o = apply(s, this.frames[f].ops[0]);
+    const a = o ? o.a : '·', b = o ? o.b : '·', p = o ? o.p : '·';
+    this.pic.innerHTML =
+      '<span class="pill A">A ' + (o ? '[' + o.i + '][' + o.k + ']=' + a : '') + '</span><span class="node">×</span><span class="pill B">B ' + (o ? '[' + o.k + '][' + o.j + ']=' + b : '') + '</span>' +
+      '<span class="arrow">→</span><span class="pill Cp">' + p + '</span><span class="node">+</span><span class="arrow">→</span>' +
+      '<span class="pill ' + (o && o.terms === 4 ? 'C' : 'Cp') + '">C' + (o ? '[' + o.i + '][' + o.j + '] = ' + o.nw : '') + '</span>';
+    const cls = {}; cClass(s, cls); if (o) addCls(cls, key(o.i, o.j), 'write');
+    this.mat.paint(cls, cText(s));
+    this.cap.innerHTML = this.t === this.n ? 'After 64 steps: ' + checkLine(s.C) : 'One multiply and one add per step. Real size: <b>1×1</b> — so the whole 4×4 product takes 64 steps (a 512×512×512 one takes 134 million).';
+    this.cnt.innerHTML = countersHTML([{ label: 'steps', value: this.t + '/64' }, { label: 'multiplies', value: s.mul + '/64' }, { label: 'additions', value: s.add + '/48' }]);
+  };
+  mix(HWScalar.prototype);
+
+  // ---------------- Hardware 2: vector × matrix (in-memory compute array) ----------------
+  function HWIMC(root, cfg) {
+    this.root = root; root.classList.add('w'); this.speed = 900;
+    root.appendChild(el('div', 'w-head', '<span class="w-title">In-memory-compute array</span><span class="chip">one row of A in → one row of C out</span><span class="chip B">B stays in the memory cells · ws</span>'));
+    const body = el('div', 'w-body'); root.appendChild(body);
+    this.arr = el('div', 'imc'); body.appendChild(this.arr);
+    this.arr.style.gridTemplateColumns = 'auto repeat(4, var(--cell))';
+    this.arr.appendChild(el('div', 'lab', 'A[i][k] in'));
+    for (let j = 0; j < 4; j++) this.arr.appendChild(el('div', 'lab', 'col j=' + j));
+    this.drv = []; this.cells = [];
+    for (let k = 0; k < 4; k++) {
+      const d = el('div', 'pill A drv', '·'); this.drv.push(d); this.arr.appendChild(d);
+      const row = [];
+      for (let j = 0; j < 4; j++) { const c = el('div', 'cell k-B stay', String(B[k][j])); row.push(c); this.arr.appendChild(c); }
+      this.cells.push(row);
+    }
+    this.arr.appendChild(el('div', 'lab', 'C[i][j] out'));
+    this.out = [];
+    for (let j = 0; j < 4; j++) { const c = el('div', 'cell k-C', '·'); this.out.push(c); this.arr.appendChild(c); }
+    this.mat = new Mat('C', { cls: 'compact' }); body.appendChild(this.mat.root);
+    this.cap = el('div', 'cap'); root.appendChild(this.cap);
+    const foot = el('div', 'w-foot'); root.appendChild(foot);
+    this.cnt = el('div', 'counters'); foot.appendChild(this.cnt);
+    foot.appendChild(this.makeControls({ noInner: true })); this.enableKeys();
+    this.n = 4; this.go(0);
+  }
+  HWIMC.prototype.go = function (t) {
+    this.t = Math.max(0, Math.min(this.n, t));
+    const s = newState();
+    for (let i = 0; i < this.t; i++) for (let k = 0; k < 4; k++) for (let j = 0; j < 4; j++) apply(s, [i, j, k]);
+    const i = this.t - 1;
+    this.drv.forEach((d, k) => { d.textContent = i >= 0 && this.t <= this.n ? String(A[i][k]) : '·'; });
+    this.cells.forEach((row) => row.forEach((c) => { c.className = 'cell k-B stay' + (i >= 0 ? ' read' : ''); }));
+    this.out.forEach((c, j) => { c.className = 'cell k-C' + (i >= 0 ? ' fin' : ''); c.textContent = i >= 0 ? String(s.C[i][j]) : '·'; });
+    const cls = {}; cClass(s, cls); if (i >= 0) for (let j = 0; j < 4; j++) addCls(cls, key(i, j), 'write');
+    this.mat.paint(cls, cText(s));
+    this.cap.innerHTML = (this.t === 0 ? 'The 16 values of B are written <b>into</b> the memory cells once and stay there. Step to push rows of A through.' :
+      'Step ' + this.t + ': row ' + i + ' of A drives the 4 rows of cells (one per k); every cell multiplies; every column adds its 4 products → row ' + i + ' of C, finished because all of K fits in the array. ') +
+      (this.t === this.n ? checkLine(s.C) : '') +
+      '<br><small>Tiny version: 4×4 cells, 16 multiplies per step. Real (the Metis figure you gave): a 512×512 block of B, 262,144 multiplies per step. When K is larger than the array, each output row is only partial and must be added up over several steps.</small>';
+    this.cnt.innerHTML = countersHTML([{ label: 'steps', value: this.t + '/4' }, { label: 'multiplies', value: s.mul + '/64' }, { label: 'additions', value: s.add + '/48' }]);
+  };
+  mix(HWIMC.prototype);
+
+  // ---------------- Hardware 3: matrix × matrix (tensor core) ----------------
+  function HWTensor(root, cfg) {
+    this.root = root; root.classList.add('w'); this.speed = 800;
+    root.appendChild(el('div', 'w-head', '<span class="w-title">Tensor core</span><span class="chip">one block of A × one block of B per step</span>'));
+    const body = el('div', 'w-body'); root.appendChild(body);
+    this.unit = el('div', 'unit'); body.appendChild(this.unit);
+    this.mat = new Mat('C', { cls: 'compact', bs: 2 }); body.appendChild(this.mat.root);
+    this.cap = el('div', 'cap'); root.appendChild(this.cap);
+    const foot = el('div', 'w-foot'); root.appendChild(foot);
+    this.cnt = el('div', 'counters'); foot.appendChild(this.cnt);
+    foot.appendChild(this.makeControls({ noInner: true })); this.enableKeys();
+    this.frames = makeFrames('ijk', 2).frames; this.n = 8; this.go(0);
+  }
+  HWTensor.prototype.go = function (t) {
+    this.t = Math.max(0, Math.min(this.n, t));
+    const s = newState();
+    for (let f = 0; f < this.t; f++) this.frames[f].ops.forEach((op) => apply(s, op));
+    const fr = this.frames[Math.max(0, this.t - 1)].idx;
+    const on = this.t > 0;
+    const blk = (kind, r0, c0, vals) => {
+      const m = el('div', 'mini'); m.style.gridTemplateColumns = 'repeat(2, var(--cell))';
+      for (let a = 0; a < 2; a++) for (let b = 0; b < 2; b++) {
+        const c = el('div', 'cell k-' + kind + (on && kind !== 'C' ? ' read' : ''));
+        if (kind === 'C') { const tt = s.T[r0 + a][c0 + b]; c.classList.add(tt === K ? 'fin' : tt > 0 ? 'part' : 'x'); c.textContent = tt ? s.C[r0 + a][c0 + b] : '·'; }
+        else c.textContent = on ? vals[r0 + a][c0 + b] : '·';
+        m.appendChild(c);
+      }
+      return m;
+    };
+    this.unit.innerHTML = '';
+    this.unit.append(el('span', 'unit-lab', 'tensor<br>unit'), blk('A', fr.i * 2, fr.k * 2, A), el('span', 'arrow', '@'), blk('B', fr.k * 2, fr.j * 2, B), el('span', 'arrow', '→ +='), blk('C', fr.i * 2, fr.j * 2));
+    const cls = {}; cClass(s, cls);
+    if (on) for (let a = 0; a < 2; a++) for (let b = 0; b < 2; b++) addCls(cls, key(fr.i * 2 + a, fr.j * 2 + b), 'write');
+    this.mat.paint(cls, cText(s));
+    this.cap.innerHTML = (on ? 'Step ' + this.t + ': <code>C[' + fr.i + ',' + fr.j + '] += A[' + fr.i + ',' + fr.k + '] @ B[' + fr.k + ',' + fr.j + ']</code> — 8 multiplies at once. ' : 'Each step multiplies a whole block of A by a whole block of B. ') +
+      (this.t === this.n ? checkLine(s.C) : '') +
+      '<br><small>Tiny version: 2×2 @ 2×2 = 8 multiplies per step, 8 steps. Real: the 16×16 @ 16×16 operation a GPU program issues (e.g. CUDA WMMA m16n16k16) = 4,096 multiplies; the hardware finishes it over a few clock cycles.</small>';
+    this.cnt.innerHTML = countersHTML([{ label: 'steps', value: this.t + '/8' }, { label: 'multiplies', value: s.mul + '/64' }, { label: 'additions', value: s.add + '/48' }]);
+  };
+  mix(HWTensor.prototype);
+
+  // ---------------- Grid vs sweep on 4 cores (block level) ----------------
+  const GMODES = {
+    os: { grid: ['i', 'j'], sweep: 'k', owner: 'C', label: 'os · cores own C blocks' },
+    ws: { grid: ['k', 'j'], sweep: 'i', owner: 'B', label: 'ws · cores keep B blocks' },
+    is: { grid: ['i', 'k'], sweep: 'j', owner: 'A', label: 'is · cores keep A blocks' }
+  };
+  function gridSim(mode, t) {
+    const G = GMODES[mode];
+    const cores = [];
+    for (let g0 = 0; g0 < 2; g0++) for (let g1 = 0; g1 < 2; g1++) { const g = {}; g[G.grid[0]] = g0; g[G.grid[1]] = g1; cores.push({ id: cores.length, g }); }
+    const n = mode === 'os' ? 2 : 3;
+    const s = newState(); s.tadd = 0; s.sadd = 0;
+    const buf = cores.map(() => ({}));
+    const jobsAt = (st) => cores.map((c) => { const id = Object.assign({}, c.g); id[G.sweep] = st; return id; });
+    let reduced = false;
+    for (let f = 0; f < t; f++) {
+      if (f === 2) { // reduce across cores (space)
+        for (let i = 0; i < 4; i++) for (let j = 0; j < 4; j++) {
+          const parts = buf.map((b) => b[key(i, j)]).filter(Boolean);
+          s.C[i][j] = parts.reduce((x, p) => x + p.v, 0); s.T[i][j] = K; s.sadd += parts.length - 1;
+        }
+        reduced = true; continue;
+      }
+      jobsAt(f).forEach((id, ci) => {
+        for (let a = 0; a < 2; a++) for (let b = 0; b < 2; b++) for (let c = 0; c < 2; c++) {
+          const i = id.i * 2 + a, j = id.j * 2 + b, k = id.k * 2 + c, p = A[i][k] * B[k][j];
+          s.mul++;
+          const bk = key(i, j);
+          if (!buf[ci][bk]) buf[ci][bk] = { v: 0, T: 0 };
+          if (buf[ci][bk].T > 0) s.tadd++;
+          buf[ci][bk].v += p; buf[ci][bk].T++;
+          if (mode === 'os') { s.C[i][j] = buf[ci][bk].v; s.T[i][j] = buf[ci][bk].T; }
+        }
+      });
+    }
+    s.add = s.tadd + s.sadd;
+    return { G, cores, n, s, buf, jobsAt, reduced };
+  }
+  function GridSweep(root, cfg) {
+    this.root = root; root.classList.add('w'); this.speed = 1100;
+    this.mode = (cfg && cfg.mode) || 'os';
+    this.head = el('div', 'w-head'); root.appendChild(this.head);
+    if (!cfg || cfg.tabs !== false) {
+      const seg = el('div', 'seg'); this.tabs = {};
+      ((cfg && cfg.modes) || ['os', 'ws', 'is']).forEach((m) => { const b = btn(GMODES[m].label, m, () => { this.stop(); this.setMode(m); }); this.tabs[m] = b; seg.appendChild(b); });
+      root.appendChild(seg);
+    }
+    const body = el('div', 'w-body'); root.appendChild(body);
+    this.tri = new Triple({ bs: 2, note: 'block view<br>4 cores' });
+    body.appendChild(this.tri.root);
+    const right = el('div', 'stack'); right.style.flex = '1 1 18rem'; body.appendChild(right);
+    this.coresEl = el('div', 'cores'); right.appendChild(this.coresEl);
+    this.tlEl = el('div', 'tl-wrap'); right.appendChild(this.tlEl);
+    this.cap = el('div', 'cap'); root.appendChild(this.cap);
+    const foot = el('div', 'w-foot'); root.appendChild(foot);
+    this.cnt = el('div', 'counters'); foot.appendChild(this.cnt);
+    foot.appendChild(this.makeControls({ noInner: true })); this.enableKeys();
+    this.setMode(this.mode);
+  }
+  GridSweep.prototype.setMode = function (m) {
+    this.mode = m;
+    if (this.tabs) Object.keys(this.tabs).forEach((k) => this.tabs[k].setAttribute('aria-pressed', k === m ? 'true' : 'false'));
+    const G = GMODES[m];
+    this.head.innerHTML = '<span class="w-title">4 cores</span><span class="chip ' + G.owner + '">stays put in each core: ' + G.owner + ' block · ' + m + '</span><span class="chip">shared out over cores: ' + G.grid.map((v) => BVAR[v]).join(' × ') + '</span><span class="chip">in order on each core: ' + BVAR[G.sweep] + '</span>';
+    ['A', 'B', 'C'].forEach((x) => this.tri[x].clearBadges());
+    const sim = gridSim(m, 0);
+    this.n = sim.n;
+    sim.cores.forEach((c) => {
+      const r0 = c.g[IDX[G.owner][0]] * 2, c0 = c.g[IDX[G.owner][1]] * 2;
+      this.tri[G.owner].badge(r0, c0, 2, 2, 'core ' + c.id);
+    });
+    this.go(0);
+  };
+  GridSweep.prototype.go = function (t) {
+    this.t = Math.max(0, Math.min(this.n, t));
+    const sim = gridSim(this.mode, this.t); const G = sim.G, s = sim.s;
+    const clsA = {}, clsB = {}, clsC = {};
+    const stayMap = { A: clsA, B: clsB, C: clsC }[G.owner];
+    for (let r = 0; r < 4; r++) for (let c = 0; c < 4; c++) addCls(stayMap, key(r, c), 'stay');
+    const cur = this.t - 1;
+    const isRed = this.mode !== 'os' && cur === 2;
+    if (cur >= 0 && !isRed) {
+      sim.jobsAt(cur).forEach((id) => {
+        for (let a = 0; a < 2; a++) for (let b = 0; b < 2; b++) {
+          addCls(clsA, key(id.i * 2 + a, id.k * 2 + b), 'read'); addCls(clsB, key(id.k * 2 + a, id.j * 2 + b), 'read');
+          if (this.mode === 'os') addCls(clsC, key(id.i * 2 + a, id.j * 2 + b), 'write');
+        }
+      });
+    }
+    cClass(s, clsC);
+    if (isRed) for (let r = 0; r < 4; r++) for (let c = 0; c < 4; c++) addCls(clsC, key(r, c), 'spadd');
+    this.tri.A.paint(clsA); this.tri.B.paint(clsB); this.tri.C.paint(clsC, cText(s));
+    // core panels
+    this.coresEl.innerHTML = '';
+    sim.cores.forEach((c, ci) => {
+      const box = el('div', 'core' + (sim.reduced ? ' spent' : ''));
+      const own = G.owner + '[' + c.g[IDX[G.owner][0]] + ',' + c.g[IDX[G.owner][1]] + ']';
+      box.appendChild(el('h5', null, '<span>core ' + c.id + '</span><span class="t' + G.owner.toLowerCase() + '">' + own + '</span>'));
+      let op = '';
+      if (cur >= 0 && !isRed) { const id = sim.jobsAt(cur)[ci]; op = 'A[' + id.i + ',' + id.k + ']@B[' + id.k + ',' + id.j + '] → C[' + id.i + ',' + id.j + ']'; }
+      if (isRed) op = 'sends its partials →';
+      box.appendChild(el('div', 'op', op || 'waiting'));
+      // buffer extent
+      let rows, cols;
+      if (this.mode === 'os') { rows = [c.g.i * 2, c.g.i * 2 + 1]; cols = [c.g.j * 2, c.g.j * 2 + 1]; }
+      else if (this.mode === 'ws') { rows = [0, 1, 2, 3]; cols = [c.g.j * 2, c.g.j * 2 + 1]; }
+      else { rows = [c.g.i * 2, c.g.i * 2 + 1]; cols = [0, 1, 2, 3]; }
+      const mini = el('div', 'mini'); mini.style.gridTemplateColumns = 'repeat(' + cols.length + ', var(--cell))';
+      rows.forEach((r) => cols.forEach((cc) => {
+        const b = sim.buf[ci][key(r, cc)];
+        const x = el('div', 'cell k-C' + (b ? (this.mode === 'os' && b.T === K ? ' fin' : ' part') : ''), b ? String(b.v) : '·');
+        mini.appendChild(x);
+      }));
+      box.appendChild(el('div', 'op', this.mode === 'os' ? 'its C block (final home):' : 'its partial sums of C:'));
+      box.appendChild(mini);
+      this.coresEl.appendChild(box);
+    });
+    // timeline
+    const cols = this.mode === 'os' ? [0, 1] : [0, 1, 'red'];
+    let h = '<table class="tl"><tr><th></th>' + cols.map((c) => '<th>' + (c === 'red' ? 'add across cores' : 'time ' + c + ' (' + BVAR[G.sweep] + '=' + c + ')') + '</th>').join('') + '</tr>';
+    sim.cores.forEach((c, ci) => {
+      h += '<tr><th>core ' + c.id + '</th>' + cols.map((col, n) => {
+        const st = n === cur ? ' now' : n < cur ? ' done' : '';
+        if (col === 'red') return '<td class="red' + st + '">' + (this.mode === 'ws' ? (c.g.k === 0 ? '+ core ' + (ci + 2) : '↑') : (c.g.k === 0 ? '+ core ' + (ci + 1) : '←')) + '</td>';
+        const id = sim.jobsAt(col)[ci];
+        return '<td class="' + st.trim() + '">A' + id.i + id.k + '·B' + id.k + id.j + '→C' + id.i + id.j + '</td>';
+      }).join('') + '</tr>';
+    });
+    this.tlEl.innerHTML = h + '</table>';
+    // caption
+    const texts = {
+      os: ['Each core owns one block of C. At every time step all 4 cores work at the same time (the <b>grid</b>); each walks through kt in order (the <b>sweep</b>).', 'Time 0: every core adds its first block product into its own C block — partial.', 'Time 1: the second block product lands in the same place — every C block finished, no core ever talked to another. '],
+      ws: ['Each core keeps one block of B. All 4 cores run at once; each sweeps down the block rows of A (mt = 0, 1).', 'Time 0: core (kt, nt) makes the kt-th piece of C[0, nt]. The other piece of the same block is being made on a different core.', 'Time 1: same for C[1, nt]. Every C block now exists as two pieces on two cores.', '<b class="tsp">Extra step:</b> the two pieces of every C block are added across cores. These 16 additions happen in <b>space</b>. '],
+      is: ['Each core keeps one block of A. All 4 cores run at once; each sweeps along the block columns of B (nt = 0, 1).', 'Time 0: core (mt, kt) makes the kt-th piece of C[mt, 0].', 'Time 1: same for C[mt, 1]. Every C block exists as two pieces on two cores.', '<b class="tsp">Extra step:</b> the pieces are added across cores — 16 additions in <b>space</b>. ']
+    };
+    this.cap.innerHTML = texts[this.mode][this.t] + (this.t === this.n ? checkLine(s.C) : '');
+    this.cnt.innerHTML = countersHTML([
+      { label: 'time step', value: this.t + '/' + this.n },
+      { label: 'multiplies', value: s.mul + '/64' },
+      { label: 'additions over time', value: s.tadd },
+      { label: 'additions across cores', value: s.sadd, cls: 'csp' },
+      { label: 'total additions', value: s.add + '/48' }
+    ]);
+  };
+  mix(GridSweep.prototype);
+
+  // ---------------- Waves: more tiles than cores ----------------
+  function Waves(root, cfg) {
+    this.root = root; root.classList.add('w'); this.speed = 1000;
+    this.cores = (cfg && cfg.cores) || 4;
+    this.head = el('div', 'w-head'); root.appendChild(this.head);
+    const seg = el('div', 'seg'); this.cb = {};
+    [2, 3, 4, 5, 8].forEach((n) => { const b = btn(n + ' cores', n + ' cores', () => { this.stop(); this.setCores(n); }); this.cb[n] = b; seg.appendChild(b); });
+    root.appendChild(seg);
+    const body = el('div', 'w-body'); root.appendChild(body);
+    this.mat = new Mat('C', {}); body.appendChild(this.mat.root);
+    for (let i = 0; i < 4; i++) for (let jb = 0; jb < 2; jb++) this.mat.badge(i, jb * 2, 1, 2, 'T' + (i * 2 + jb), 'soft');
+    this.tlEl = el('div', 'tl-wrap'); body.appendChild(this.tlEl);
+    this.cap = el('div', 'cap'); root.appendChild(this.cap);
+    const foot = el('div', 'w-foot'); root.appendChild(foot);
+    this.cnt = el('div', 'counters'); foot.appendChild(this.cnt);
+    foot.appendChild(this.makeControls({ noInner: true })); this.enableKeys();
+    this.setCores(this.cores);
+  }
+  Waves.prototype.setCores = function (n) {
+    this.cores = n; this.n = Math.ceil(8 / n);
+    Object.keys(this.cb).forEach((k) => this.cb[k].setAttribute('aria-pressed', +k === n ? 'true' : 'false'));
+    this.head.innerHTML = '<span class="w-title">Waves</span><span class="chip">8 output tiles (1×2 each, os)</span><span class="chip">' + n + ' cores → ' + this.n + ' wave' + (this.n > 1 ? 's' : '') + '</span>';
+    this.go(0);
+  };
+  Waves.prototype.go = function (t) {
+    this.t = Math.max(0, Math.min(this.n, t));
+    const s = newState(); const n = this.cores;
+    const doneTiles = Math.min(8, this.t * n);
+    for (let tile = 0; tile < doneTiles; tile++) {
+      const i = tile >> 1, jb = tile & 1;
+      for (let j = jb * 2; j < jb * 2 + 2; j++) for (let k = 0; k < 4; k++) apply(s, [i, j, k]);
+    }
+    const cls = {}; cClass(s, cls);
+    const curStart = (this.t - 1) * n;
+    if (this.t > 0) for (let tile = curStart; tile < Math.min(8, curStart + n); tile++) { const i = tile >> 1, jb = tile & 1; addCls(cls, key(i, jb * 2), 'write'); addCls(cls, key(i, jb * 2 + 1), 'write'); }
+    this.mat.paint(cls, cText(s));
+    let h = '<table class="tl"><tr><th></th>' + rng(n).map((c) => '<th>core ' + c + '</th>').join('') + '</tr>';
+    for (let w = 0; w < this.n; w++) {
+      h += '<tr><th>wave ' + (w + 1) + '</th>' + rng(n).map((c) => {
+        const tile = w * n + c; const st = w === this.t - 1 ? 'now' : w < this.t - 1 ? 'done' : '';
+        return tile < 8 ? '<td class="' + st + '">T' + tile + '</td>' : '<td class="idle">idle</td>';
+      }).join('') + '</tr>';
+    }
+    this.tlEl.innerHTML = h + '</table>';
+    const idle = this.n * n - 8, util = Math.round(800 / (this.n * n));
+    this.cap.innerHTML = 'Each tile is a whole output tile swept over K on one core (8 multiplies). The cores take tiles in <b>waves</b>. ' +
+      (idle ? 'The last wave is only partly full: <b>' + idle + ' core' + (idle > 1 ? 's' : '') + ' idle</b>. ' : 'Every wave is full, no core waits. ') +
+      (this.t === this.n ? checkLine(s.C) : '');
+    this.cnt.innerHTML = countersHTML([{ label: 'wave', value: this.t + '/' + this.n }, { label: 'multiplies', value: s.mul + '/64' }, { label: 'additions', value: s.add + '/48' }, { label: 'core utilisation', value: util + '%' }]);
+  };
+  mix(Waves.prototype);
+
+  // ---------------- K-groups: where the K-sum happens ----------------
+  function kgPlan(g) {
+    const per = K / g; const levels = Math.log2(g);
+    return { per, levels, n: per + levels };
+  }
+  function KGroups(root, cfg) {
+    this.root = root; root.classList.add('w'); this.speed = 900;
+    this.g = (cfg && cfg.g) || 2;
+    this.head = el('div', 'w-head'); root.appendChild(this.head);
+    const seg = el('div', 'seg'); this.gb = {};
+    [[1, 'all K on one core'], [2, 'K-groups: g = 2'], [4, 'every k on its own core']].forEach(([g, lab]) => { const b = btn(lab, lab, () => { this.stop(); this.setG(g); }); this.gb[g] = b; seg.appendChild(b); });
+    root.appendChild(seg);
+    this.coresEl = el('div', 'cores'); root.appendChild(this.coresEl);
+    this.redEl = el('div', 'red-row'); root.appendChild(this.redEl);
+    this.cap = el('div', 'cap'); root.appendChild(this.cap);
+    this.tab = el('div', 'tl-wrap'); root.appendChild(this.tab);
+    const foot = el('div', 'w-foot'); root.appendChild(foot);
+    this.cnt = el('div', 'counters'); foot.appendChild(this.cnt);
+    foot.appendChild(this.makeControls({ noInner: true })); this.enableKeys();
+    this.setG(this.g);
+  }
+  KGroups.prototype.setG = function (g) {
+    this.g = g; const P = kgPlan(g); this.n = P.n;
+    Object.keys(this.gb).forEach((k) => this.gb[k].setAttribute('aria-pressed', +k === g ? 'true' : 'false'));
+    this.head.innerHTML = '<span class="w-title">One output, C[0][0] = 13</span><span class="chip">K = 4 terms</span><span class="chip">' + g + ' core' + (g > 1 ? 's' : '') + ', ' + P.per + ' term' + (P.per > 1 ? 's' : '') + ' each</span>';
+    this.go(0);
+  };
+  KGroups.prototype.go = function (t) {
+    this.t = Math.max(0, Math.min(this.n, t));
+    const g = this.g, P = kgPlan(g);
+    const terms = rng(K).map((k) => ({ k, a: A[0][k], b: B[k][0], p: A[0][k] * B[k][0] }));
+    const local = Math.min(this.t, P.per);
+    let mul = 0, tadd = 0, sadd = 0;
+    this.coresEl.innerHTML = '';
+    const sums = [];
+    for (let c = 0; c < g; c++) {
+      const box = el('div', 'core');
+      const mine = terms.slice(c * P.per, (c + 1) * P.per);
+      box.appendChild(el('h5', null, '<span>core ' + c + '</span><span class="mono">k = ' + mine.map((x) => x.k).join(',') + '</span>'));
+      const tw = el('div', 'terms');
+      let sum = 0;
+      mine.forEach((x, n) => {
+        const done = n < local; if (done) { mul++; if (n > 0) tadd++; sum += x.p; }
+        tw.appendChild(el('div', 'term' + (done ? ' done' : '') + (n === local - 1 && this.t <= P.per ? ' now' : ''), '<span class="ta">' + x.a + '</span>·<span class="tb">' + x.b + '</span> = ' + x.p));
+      });
+      box.appendChild(tw);
+      box.appendChild(el('div', 'op', 'local sum (over time): <b class="tc">' + (local ? sum : '·') + '</b>'));
+      sums.push(sum);
+      this.coresEl.appendChild(box);
+    }
+    // reduction tree
+    const lvDone = Math.max(0, this.t - P.per);
+    let row = sums.slice(); const parts = [];
+    for (let L = 0; L < P.levels; L++) {
+      const nxt = [];
+      for (let q = 0; q < row.length; q += 2) nxt.push(row[q] + row[q + 1]);
+      const done = L < lvDone;
+      if (done) sadd += nxt.length;
+      parts.push('<span class="red-node' + (done ? '' : ' todo') + '">level ' + (L + 1) + ': ' + nxt.map((x, q) => (done ? row[2 * q] + ' + ' + row[2 * q + 1] + ' = ' + x : '+')).join(' · ') + '</span>');
+      row = nxt;
+    }
+    const finished = this.t === this.n;
+    this.redEl.innerHTML = (P.levels ? '<span class="tsp">add across cores:</span> ' + parts.join('<span class="arrow">→</span>') + '<span class="arrow">→</span>' : '<span class="muted">no additions across cores needed</span><span class="arrow">→</span>') +
+      '<span class="pill ' + (finished ? 'C' : 'Cp') + '">C[0][0] = ' + (finished ? row[0] : '…') + '</span>';
+    const texts = g === 1 ? 'One core walks through all 4 terms, adding into its own register: 3 additions <b>over time</b>, nothing to send anywhere. This is one array column that holds all of K.'
+      : g === 4 ? 'Four cores each make one term at the same time. Nothing to add locally, so all 3 additions happen <b class="tsp">across cores</b>.'
+        : 'Two cores share this output. Each adds its own 2 terms over time (1 addition each), then only the 2 partial sums meet: 1 addition <b class="tsp">across cores</b>.';
+    this.cap.innerHTML = texts + (finished ? ' <span class="ok">13 = A[0,:]·B[:,0] ✓</span>' : '');
+    let tb = '<table class="mini-tab"><tr><th>whole 4×4 product</th><th>multiplies</th><th>additions over time</th><th>additions across cores</th><th>time steps</th></tr>';
+    [1, 2, 4].forEach((gg) => { const q = kgPlan(gg); tb += '<tr class="' + (gg === g ? 'cur' : '') + '"><td>' + gg + ' core' + (gg > 1 ? 's' : '') + ' per output</td><td>64</td><td>' + 16 * gg * (q.per - 1) + '</td><td class="tsp">' + 16 * (gg - 1) + '</td><td>' + q.per + ' + ' + q.levels + '</td></tr>'; });
+    this.tab.innerHTML = tb + '</table>';
+    this.cnt.innerHTML = countersHTML([{ label: 'step', value: this.t + '/' + this.n }, { label: 'multiplies', value: mul + '/4' }, { label: 'additions over time', value: tadd }, { label: 'additions across cores', value: sadd, cls: 'csp' }, { label: 'total', value: (tadd + sadd) + '/3' }]);
+  };
+  mix(KGroups.prototype);
+
+  // ---------------- Split-K ----------------
+  function SplitK(root, cfg) {
+    this.root = root; root.classList.add('w'); this.speed = 1000;
+    root.appendChild(el('div', 'w-head', '<span class="w-title">Split-K</span><span class="chip">K cut in 2 pieces: k = 0,1 and k = 2,3</span><span class="chip">each piece = a whole C, on its own core</span>'));
+    const top = el('div', 'w-body'); root.appendChild(top);
+    this.mA = new Mat('A', { vals: A, cls: 'compact' }); this.mB = new Mat('B', { vals: B, cls: 'compact' });
+    this.mA.badge(0, 0, 4, 2, 'piece 0', 'soft'); this.mA.badge(0, 2, 4, 2, 'piece 1', 'soft');
+    this.mB.badge(0, 0, 2, 4, 'piece 0', 'soft'); this.mB.badge(2, 0, 2, 4, 'piece 1', 'soft');
+    top.append(this.mA.root, this.mB.root);
+    const bot = el('div', 'w-body'); bot.style.alignItems = 'center'; root.appendChild(bot);
+    this.m0 = new Mat('C', { title: 'C⁽⁰⁾', dims: 'core 0', cls: 'compact' });
+    this.m1 = new Mat('C', { title: 'C⁽¹⁾', dims: 'core 1', cls: 'compact' });
+    this.mC = new Mat('C', { title: 'C', dims: 'final', cls: 'compact' });
+    bot.append(this.m0.root, el('span', 'node', '+'), this.m1.root, el('span', 'arrow', '='), this.mC.root);
+    this.cap = el('div', 'cap'); root.appendChild(this.cap);
+    const foot = el('div', 'w-foot'); root.appendChild(foot);
+    this.cnt = el('div', 'counters'); foot.appendChild(this.cnt);
+    foot.appendChild(this.makeControls({ noInner: true })); this.enableKeys();
+    this.n = 3; this.go(0);
+  }
+  SplitK.prototype.go = function (t) {
+    this.t = Math.max(0, Math.min(this.n, t));
+    const P = [newState(), newState()], fin = newState();
+    let mul = 0, tadd = 0, sadd = 0;
+    const steps = Math.min(this.t, 2);
+    for (let st = 0; st < steps; st++) for (let pc = 0; pc < 2; pc++) {
+      const k = pc * 2 + st;
+      for (let i = 0; i < 4; i++) for (let j = 0; j < 4; j++) apply(P[pc], [i, j, k]);
+    }
+    mul = P[0].mul + P[1].mul; tadd = P[0].add + P[1].add;
+    const reduced = this.t === 3;
+    if (reduced) for (let i = 0; i < 4; i++) for (let j = 0; j < 4; j++) { fin.C[i][j] = P[0].C[i][j] + P[1].C[i][j]; fin.T[i][j] = K; sadd++; }
+    const pieceCls = (S) => { const c = {}; for (let i = 0; i < 4; i++) for (let j = 0; j < 4; j++) if (S.T[i][j]) c[key(i, j)] = 'part'; return c; };
+    this.m0.paint(pieceCls(P[0]), cText(P[0])); this.m1.paint(pieceCls(P[1]), cText(P[1]));
+    const cf = {}; cClass(fin, cf); if (reduced) for (let i = 0; i < 4; i++) for (let j = 0; j < 4; j++) addCls(cf, key(i, j), 'spadd');
+    this.mC.paint(cf, cText(fin));
+    const ca = {}, cb = {};
+    if (this.t > 0 && this.t < 3) [0, 1].forEach((pc) => { const k = pc * 2 + this.t - 1; for (let r = 0; r < 4; r++) { addCls(ca, key(r, k), 'read'); addCls(cb, key(k, r), 'read'); } });
+    this.mA.paint(ca); this.mB.paint(cb);
+    const texts = ['Two cores each get half of K. Each builds a <b>whole</b> 4×4 output from its half — both at the same time.',
+      'Time 0: core 0 adds column 0 of A times row 0 of B; core 1 does column 2 × row 2. Both results are partial.',
+      'Time 1: columns 1 and 3. Each piece is now complete — but each is still only <b>half</b> of the sum for every C value.',
+      '<b class="tsp">Extra step:</b> the two pieces are added across cores, 16 additions in space. '];
+    this.cap.innerHTML = texts[this.t] + (reduced ? checkLine(fin.C) : '');
+    this.cnt.innerHTML = countersHTML([{ label: 'step', value: this.t + '/3' }, { label: 'multiplies', value: mul + '/64' }, { label: 'additions over time', value: tadd }, { label: 'additions across cores', value: sadd, cls: 'csp' }, { label: 'total', value: (tadd + sadd) + '/48' }]);
+  };
+  mix(SplitK.prototype);
+
+  // ---------------- static pictures ----------------
+  function StaticTriple(root, cfg) {
+    cfg = cfg || {};
+    root.classList.add('w');
+    const tri = new Triple({ bs: cfg.bs || 1, note: cfg.note });
+    root.appendChild(tri.root);
+    const s = newState();
+    if (cfg.filled) makeFrames('ijk').frames.forEach((f) => apply(s, f.ops[0]));
+    const cls = {}; cClass(s, cls);
+    if (cfg.hl) { // highlight one elementary step
+      const [i, j, k] = cfg.hl;
+      tri.A.paint({ [key(i, k)]: 'read' }); tri.B.paint({ [key(k, j)]: 'read' }); addCls(cls, key(i, j), 'write');
+      tri.A.heads([i], [k]); tri.B.heads([k], [j]); tri.C.heads([i], [j]);
+    }
+    if (cfg.blocks) {
+      for (let a = 0; a < 2; a++) for (let b = 0; b < 2; b++) {
+        tri.A.badge(a * 2, b * 2, 2, 2, 'A[' + a + ',' + b + ']', 'soft');
+        tri.B.badge(a * 2, b * 2, 2, 2, 'B[' + a + ',' + b + ']', 'soft');
+        tri.C.badge(a * 2, b * 2, 2, 2, 'C[' + a + ',' + b + ']', 'soft');
+      }
+    }
+    tri.C.paint(cls, cText(s));
+    if (cfg.caption) root.appendChild(el('div', 'cap', cfg.caption));
+    this.root = root;
+  }
+
+  const TYPES = { player: Player, group: Group, cpu: HWScalar, imc: HWIMC, tensor: HWTensor, grid: GridSweep, waves: Waves, kgroups: KGroups, splitk: SplitK, static: StaticTriple };
+  function mount(node) {
+    const cfg = JSON.parse(node.getAttribute('data-widget'));
+    const T = TYPES[cfg.type] || (global.MM2 && global.MM2.TYPES[cfg.type]);
+    if (!T) throw new Error('unknown widget ' + cfg.type);
+    const w = new T(node, cfg);
+    node._widget = w;
+    return w;
+  }
+  function mountAll(scope) { return Array.from((scope || document).querySelectorAll('[data-widget]')).map(mount); }
+
+  // ---------------- pure self-test (runs in node too) ----------------
+  function selfTest() {
+    const out = [];
+    ORDERS.forEach((o) => [1, 2].forEach((bs) => {
+      const s = newState(); makeFrames(o, bs).frames.forEach((f) => f.ops.forEach((op) => apply(s, op)));
+      out.push({ what: o + (bs > 1 ? ' (tiled)' : ''), mul: s.mul, add: s.add, ok: equalsRef(s.C) });
+    }));
+    ['os', 'ws', 'is'].forEach((m) => { const r = gridSim(m, m === 'os' ? 2 : 3); out.push({ what: 'grid ' + m, mul: r.s.mul, add: r.s.tadd + '+' + r.s.sadd, ok: equalsRef(r.s.C) && r.s.tadd + r.s.sadd === 48 }); });
+    return out;
+  }
+
+  global.MM = { A, B, REF, M, N, K, IDX, STAY, STAT, SHORT, FORM, ORDERS, makeFrames, newState, apply, census, equalsRef, gridSim, mount, mountAll, selfTest };
+})(typeof window !== 'undefined' ? window : globalThis);
+</script><script>/* General matmul simulator: any M, N, K (up to 8), any tiling, any loop order, any number of cores.
+   Used by the lab page and by the multi-core slides of the deck. Every view replays from scratch,
+   so the counters are always the real ones. */
+(function (global) {
+  'use strict';
+  const rng = (n) => Array.from({ length: n }, (_, i) => i);
+  const zeros = (r, c) => rng(r).map(() => rng(c).map(() => 0));
+  const EXA = [[1, 2, 0, 3], [0, 1, 2, 1], [3, 0, 1, 2], [2, 1, 3, 0]];
+  const EXB = [[2, 0, 1, 3], [1, 3, 0, 2], [0, 1, 2, 1], [3, 2, 1, 0]];
+  const STAY = { k: 'C', i: 'B', j: 'A' };
+  const SHORT = { C: 'os', B: 'ws', A: 'is' };
+  const STATN = { C: 'output-stationary', B: 'weight-stationary', A: 'input-stationary' };
+  const FORM = { ijk: 'inner product', jik: 'inner product', ikj: 'row-wise (Gustavson)', jki: 'column-wise', kij: 'outer product', kji: 'outer product' };
+  const BV = { i: 'mt', j: 'nt', k: 'kt' };
+  const DIM = { i: 'M', j: 'N', k: 'K' };
+  const IDX = { A: ['i', 'k'], B: ['k', 'j'], C: ['i', 'j'] };
+  const ORDERS = ['ijk', 'jik', 'ikj', 'kij', 'jki', 'kji'];
+  const key = (i, j) => i + ',' + j;
+
+  function lcg(seed) { let s = (seed * 2654435761) >>> 0 || 1; return () => ((s = (Math.imul(s, 1664525) + 1013904223) >>> 0) / 4294967296); }
+  function problem(M, N, K, seed) {
+    let A, B;
+    if (!seed && M === 4 && N === 4 && K === 4) { A = EXA.map((r) => r.slice()); B = EXB.map((r) => r.slice()); }
+    else {
+      const r = lcg(seed || 7);
+      A = rng(M).map(() => rng(K).map(() => Math.floor(r() * 4)));
+      B = rng(K).map(() => rng(N).map(() => Math.floor(r() * 4)));
+    }
+    const REF = rng(M).map((i) => rng(N).map((j) => rng(K).reduce((s, k) => s + A[i][k] * B[k][j], 0)));
+    return { M, N, K, A, B, REF, seed: seed || 0 };
+  }
+  const divisors = (n) => rng(n).map((x) => x + 1).filter((d) => n % d === 0);
+  function newAcc(P) { return { C: zeros(P.M, P.N), T: zeros(P.M, P.N), mul: 0, add: 0, part: 0, maxPart: 0 }; }
+  function apply(P, s, i, j, k) {
+    const a = P.A[i][k], b = P.B[k][j], p = a * b, old = s.C[i][j], first = s.T[i][j] === 0;
+    if (!first) s.add++;
+    s.C[i][j] = old + p; s.T[i][j]++; s.mul++;
+    if (first && P.K > 1) s.part++;
+    if (s.T[i][j] === P.K && P.K > 1) s.part--;
+    if (s.part > s.maxPart) s.maxPart = s.part;
+    return { i, j, k, a, b, p, old, nw: old + p, terms: s.T[i][j], first };
+  }
+  function eqRef(P, C) { return C.every((r, i) => r.every((x, j) => x === P.REF[i][j])); }
+
+  // ---------------- DOM helpers ----------------
+  function el(tag, cls, html) { const e = document.createElement(tag); if (cls) e.className = cls; if (html != null) e.innerHTML = html; return e; }
+  function btn(label, title, fn, pri) { const b = el('button', 'btn' + (pri ? ' pri' : ''), label); b.type = 'button'; b.title = title; b.setAttribute('aria-label', title); b.addEventListener('click', fn); return b; }
+  function addCls(map, k0, c) { map[k0] = map[k0] ? map[k0] + ' ' + c : c; }
+  function counters(items) { return items.map((x) => '<span class="' + (x.cls || '') + '">' + x.label + ' <b>' + x.value + '</b></span>').join(''); }
+
+  function Mat(kind, rows, cols, opt) {
+    opt = opt || {};
+    this.rows = rows; this.cols = cols; this.rb = opt.rb || rows; this.cb = opt.cb || cols;
+    this.root = el('div', 'mat m-' + kind + (opt.cls ? ' ' + opt.cls : ''));
+    const rv = opt.rv || IDX[kind][0], cv = opt.cv || IDX[kind][1];
+    this.root.appendChild(el('div', 'mat-title', '<b>' + (opt.title || kind) + '</b><span>' + (opt.dims || rows + '×' + cols) + '</span>'));
+    const g = el('div', 'mat-grid'); g.style.gridTemplateColumns = 'auto repeat(' + cols + ', auto)'; this.grid = g;
+    const put = (e, r, c) => { e.style.gridRow = String(r); e.style.gridColumn = String(c); g.appendChild(e); return e; };
+    put(el('div', 'mh corner', rv + '\\' + cv), 1, 1);
+    this.colH = []; this.rowH = []; this.cells = [];
+    const bl = (c) => (this.cb < this.cols && c % this.cb === 0 && c > 0 ? ' bl' : '');
+    const bt = (r) => (this.rb < this.rows && r % this.rb === 0 && r > 0 ? ' bt' : '');
+    for (let c = 0; c < cols; c++) { const h = el('div', 'mh' + bl(c), String(c)); this.colH.push(h); put(h, 1, c + 2); }
+    for (let r = 0; r < rows; r++) {
+      const h = el('div', 'mh' + bt(r), String(r)); this.rowH.push(h); put(h, r + 2, 1);
+      const row = [];
+      for (let c = 0; c < cols; c++) {
+        const x = el('div', 'cell'); x.dataset.base = 'cell k-' + kind + bl(c) + bt(r); x.className = x.dataset.base;
+        if (opt.vals) x.textContent = opt.vals[r][c];
+        row.push(x); put(x, r + 2, c + 2);
+      }
+      this.cells.push(row);
+    }
+    this.badges = []; this.root.appendChild(g);
+  }
+  Mat.prototype.paint = function (cls, text) {
+    for (let r = 0; r < this.rows; r++) for (let c = 0; c < this.cols; c++) {
+      const x = this.cells[r][c], ex = cls[key(r, c)] || '', want = x.dataset.base + (ex ? ' ' + ex : '');
+      if (x.className !== want) x.className = want;
+      if (text) { const t = text(r, c); if (x.textContent !== t) x.textContent = t; }
+    }
+  };
+  Mat.prototype.heads = function (rs, cs) {
+    this.rowH.forEach((h, r) => h.classList.toggle('on', !!rs && rs.indexOf(r) >= 0));
+    this.colH.forEach((h, c) => h.classList.toggle('on', !!cs && cs.indexOf(c) >= 0));
+  };
+  Mat.prototype.badge = function (r0, c0, rs, cs, text, cls) {
+    const b = el('div', 'badge' + (cls ? ' ' + cls : ''), text ? '<span>' + text + '</span>' : '');
+    b.style.gridRow = (2 + r0) + ' / span ' + rs; b.style.gridColumn = (2 + c0) + ' / span ' + cs;
+    this.grid.appendChild(b); this.badges.push(b); return b;
+  };
+  Mat.prototype.clearBadges = function () { this.badges.forEach((b) => b.remove()); this.badges = []; };
+
+  function Triple(P, t, note) {
+    this.root = el('div', 'triple');
+    const big = Math.max(P.M, P.N, P.K);
+    if (big > 6) this.root.classList.add('dense');
+    this.A = new Mat('A', P.M, P.K, { vals: P.A, rb: t.tm, cb: t.tk, dims: P.M + '×' + P.K + ' (M×K)' });
+    this.B = new Mat('B', P.K, P.N, { vals: P.B, rb: t.tk, cb: t.tn, dims: P.K + '×' + P.N + ' (K×N)' });
+    this.C = new Mat('C', P.M, P.N, { rb: t.tm, cb: t.tn, dims: P.M + '×' + P.N + ' (M×N)' });
+    this.root.append(el('div', 'tx', note || 'C = A @ B'), this.B.root, this.A.root, this.C.root);
+  }
+
+  // ---------------- stepping mixin ----------------
+  const Step = {
+    step() { if (this.t < this.n) { this.go(this.t + 1); return true; } return false; },
+    back() { if (this.t > 0) { this.go(this.t - 1); return true; } return false; },
+    finish() { this.stop(); if (this.t < this.n) { this.go(this.n); return true; } return false; },
+    reset() { this.stop(); this.go(0); },
+    atEnd() { return this.t >= this.n; },
+    atStart() { return this.t <= 0; },
+    play() {
+      if (this.timer) { this.stop(); return; }
+      if (this.t >= this.n) this.go(0);
+      this.timer = setInterval(() => { if (!this.step()) this.stop(); }, this.speed());
+      this.syncPlay();
+    },
+    stop() { if (this.timer) { clearInterval(this.timer); this.timer = null; } this.syncPlay(); },
+    syncPlay() { if (this.playBtn) { this.playBtn.textContent = this.timer ? 'Pause' : 'Play'; this.playBtn.setAttribute('aria-pressed', this.timer ? 'true' : 'false'); } },
+    speed() { const s = this.cfg.speed || 1; return Math.max(40, Math.round(this.baseSpeed / s)); },
+    go(t) { this.t = Math.max(0, Math.min(this.n, t)); this.render(); if (this.scrub) { this.scrub.max = this.n; this.scrub.value = this.t; } if (this.cfg.onStep) this.cfg.onStep(this); },
+    controls(innerLabel) {
+      const c = el('div', 'controls');
+      c.append(btn('Reset', 'Reset (R)', () => this.reset()), btn('◀', 'Step back (←)', () => { this.stop(); this.back(); }), btn('Step ▶', 'One step (→)', () => { this.stop(); this.step(); }, true));
+      if (innerLabel) c.append(btn(innerLabel, 'Bigger jump (↓)', () => { this.stop(); this.inner(); }));
+      this.playBtn = btn('Play', 'Play / pause (P)', () => this.play());
+      c.append(this.playBtn, btn('Finish', 'Jump to the end (E)', () => this.finish()));
+      return c;
+    },
+    scrubber() {
+      const w = el('label', 'scrub'); w.innerHTML = '<span>time</span>';
+      const r = el('input'); r.type = 'range'; r.min = 0; r.max = this.n; r.value = 0; r.id = 'scrub-' + Math.random().toString(36).slice(2, 8);
+      r.addEventListener('input', () => { this.stop(); this.go(+r.value); });
+      w.appendChild(r); this.scrub = r; return w;
+    },
+    keydown(e) {
+      const k = e.key;
+      if (k === 'ArrowRight') { this.stop(); return this.step(); }
+      if (k === 'ArrowLeft') { this.stop(); return this.back(); }
+      if (k === 'ArrowDown') { this.stop(); return this.inner(); }
+      if (k === 'p' || k === 'P') { this.play(); return true; }
+      if (k === 'e' || k === 'E') return this.finish();
+      if (k === 'r' || k === 'R') { this.reset(); return true; }
+      return false;
+    },
+    keys() { this.root.tabIndex = 0; this.root.addEventListener('keydown', (e) => { if (e.target !== this.root) return; if (this.keydown(e)) e.preventDefault(); }); },
+    destroy() { this.stop(); }
+  };
+  function mix(P) { Object.keys(Step).forEach((k) => { if (!P[k]) P[k] = Step[k]; }); }
+
+  // =====================================================================
+  // Single core
+  // cfg: P, tiled, tm, tn, tk, border ('ijk' letters for mt nt kt), inner, gran ('op'|'inner'|'block')
+  // =====================================================================
+  function singlePlan(P, cfg) {
+    const T = cfg.tiled ? { i: cfg.tm, j: cfg.tn, k: cfg.tk } : { i: P.M, j: P.N, k: P.K };
+    const nb = { i: P.M / T.i, j: P.N / T.j, k: P.K / T.k };
+    const bo = cfg.tiled ? cfg.border : 'ijk', io = cfg.inner;
+    const ops = []; let blk = 0, bgrp = 0, igrp = 0;
+    for (let a0 = 0; a0 < nb[bo[0]]; a0++) for (let a1 = 0; a1 < nb[bo[1]]; a1++) {
+      for (let a2 = 0; a2 < nb[bo[2]]; a2++) {
+        const bid = {}; bid[bo[0]] = a0; bid[bo[1]] = a1; bid[bo[2]] = a2;
+        for (let s0 = 0; s0 < T[io[0]]; s0++) for (let s1 = 0; s1 < T[io[1]]; s1++) {
+          for (let s2 = 0; s2 < T[io[2]]; s2++) {
+            const sid = {}; sid[io[0]] = s0; sid[io[1]] = s1; sid[io[2]] = s2;
+            ops.push({ i: bid.i * T.i + sid.i, j: bid.j * T.j + sid.j, k: bid.k * T.k + sid.k, bid, sid, blk, bgrp, igrp });
+          }
+          igrp++;
+        }
+        blk++;
+      }
+      bgrp++;
+    }
+    const field = cfg.gran === 'block' ? 'blk' : cfg.gran === 'inner' ? 'igrp' : null;
+    const ends = [];
+    ops.forEach((o, x) => { if (!field || x === ops.length - 1 || ops[x + 1][field] !== o[field]) ends.push(x + 1); });
+    return { T, nb, bo, io, ops, ends };
+  }
+
+  function singleCode(P, cfg, pl) {
+    const L = [];
+    const ind = (d) => '  '.repeat(d);
+    if (cfg.tiled) {
+      pl.bo.split('').forEach((v, d) => L.push({ v: 'b' + v, html: ind(d) + '<span class="kw">for</span> ' + BV[v] + ' <span class="kw">in</span> range(' + pl.nb[v] + '):' + (d === 0 ? '<span class="cm">   # block loops</span>' : '') }));
+      pl.io.split('').forEach((v, d) => L.push({ v: 's' + v, html: ind(d + 3) + '<span class="kw">for</span> ' + v + ' <span class="kw">in</span> block(' + BV[v] + '):' + (d === 0 ? '<span class="cm">   # inside one block product</span>' : '') }));
+      L.push({ v: 'body', html: ind(6) + '<span class="tc">C</span>[i][j] += <span class="ta">A</span>[i][k] * <span class="tb">B</span>[k][j]' });
+    } else {
+      pl.io.split('').forEach((v, d) => L.push({ v: 's' + v, html: ind(d) + '<span class="kw">for</span> ' + v + ' <span class="kw">in</span> range(' + DIM[v] + '):' }));
+      L.push({ v: 'body', html: ind(3) + '<span class="tc">C</span>[i][j] += <span class="ta">A</span>[i][k] * <span class="tb">B</span>[k][j]' });
+    }
+    return L;
+  }
+
+  function SingleView(root, cfg) {
+    this.cfg = cfg; this.root = root; this.P = cfg.P; root.classList.add('w');
+    this.pl = singlePlan(this.P, cfg); this.n = this.pl.ends.length; this.t = 0;
+    this.baseSpeed = cfg.gran === 'block' ? 700 : cfg.gran === 'inner' ? 500 : 260;
+    const bodyEl = el('div', 'w-body'); root.appendChild(bodyEl);
+    const left = el('div', 'stack'); bodyEl.appendChild(left);
+    this.codeEl = el('pre', 'code'); left.appendChild(this.codeEl);
+    this.lines = singleCode(this.P, cfg, this.pl);
+    this.lineEls = this.lines.map((l) => { const d = el('div', 'ln', l.html); this.codeEl.appendChild(d); return d; });
+    this.valEls = this.lines.map((l, n) => { if (l.v === 'body') return null; const s = el('span', 'val'); this.lineEls[n].appendChild(s); return s; });
+    const t = cfg.tiled ? cfg : { tm: this.P.M, tn: this.P.N, tk: this.P.K };
+    this.tri = new Triple(this.P, t); bodyEl.appendChild(this.tri.root);
+    this.cap = el('div', 'cap'); root.appendChild(this.cap);
+    const foot = el('div', 'w-foot'); root.appendChild(foot);
+    this.cnt = el('div', 'counters'); foot.appendChild(this.cnt);
+    const right = el('div', 'stack right'); right.append(this.controls(cfg.gran === 'block' ? null : 'Bigger jump ⏭'), this.scrubber()); foot.appendChild(right);
+    this.keys(); this.go(0);
+  }
+  SingleView.prototype.inner = function () {
+    if (this.t >= this.n) return false;
+    const ops = this.pl.ops, done = this.t ? this.pl.ends[this.t - 1] : 0;
+    const f = this.cfg.gran === 'op' ? 'igrp' : 'bgrp';
+    const g = ops[done][f]; let x = done; while (x < ops.length && ops[x][f] === g) x++;
+    let s = this.t; while (s < this.n && this.pl.ends[s] < x) s++;
+    this.go(Math.min(this.n, s + 1)); return true;
+  };
+  SingleView.prototype.state = function () {
+    const s = newAcc(this.P), done = this.t ? this.pl.ends[this.t - 1] : 0, from = this.t > 1 ? this.pl.ends[this.t - 2] : 0, last = [];
+    for (let x = 0; x < done; x++) { const r = apply(this.P, s, this.pl.ops[x].i, this.pl.ops[x].j, this.pl.ops[x].k); if (x >= from) last.push(r); }
+    return { s, done, last };
+  };
+  SingleView.prototype.render = function () {
+    const P = this.P, pl = this.pl, cfg = this.cfg;
+    const { s, done, last } = this.state();
+    const ctx = this.t < this.n;
+    const ref = pl.ops[this.t ? done - 1 : 0];
+    const blockLevel = cfg.gran === 'block';
+    const grpField = blockLevel ? 'bgrp' : 'igrp';
+    const stay = blockLevel ? STAY[pl.bo[2]] : STAY[pl.io[2]];
+    const cA = {}, cB = {}, cC = {};
+    const maps = { A: cA, B: cB, C: cC };
+    if (ctx) {
+      pl.ops.forEach((o) => { if (o[grpField] !== ref[grpField]) return; addCls(cA, key(o.i, o.k), 'sweep'); addCls(cB, key(o.k, o.j), 'sweep'); addCls(cC, key(o.i, o.j), 'sweep'); });
+      const T = pl.T;
+      const cellsOf = (op) => {
+        if (!blockLevel) return [op === 'A' ? key(ref.i, ref.k) : op === 'B' ? key(ref.k, ref.j) : key(ref.i, ref.j)];
+        const [rv, cv] = IDX[op]; const out = [];
+        for (let a = 0; a < T[rv]; a++) for (let b = 0; b < T[cv]; b++) out.push(key(ref.bid[rv] * T[rv] + a, ref.bid[cv] * T[cv] + b));
+        return out;
+      };
+      cellsOf(stay).forEach((k0) => addCls(maps[stay], k0, 'stay'));
+    }
+    for (let r = 0; r < P.M; r++) for (let c = 0; c < P.N; c++) { const t = s.T[r][c]; if (t) addCls(cC, key(r, c), t === P.K ? 'fin' : 'part'); }
+    if (this.t > 0) last.forEach((o) => { addCls(cA, key(o.i, o.k), 'read'); addCls(cB, key(o.k, o.j), 'read'); addCls(cC, key(o.i, o.j), 'write'); });
+    this.tri.A.paint(cA); this.tri.B.paint(cB);
+    this.tri.C.paint(cC, (r, c) => (s.T[r][c] ? String(s.C[r][c]) : '·'));
+    ['A', 'B', 'C'].forEach((m) => this.tri[m].clearBadges());
+    if (ctx && cfg.tiled && !blockLevel && (pl.nb.i * pl.nb.j * pl.nb.k > 1)) {
+      const T = pl.T, b = ref.bid;
+      this.tri.A.badge(b.i * T.i, b.k * T.k, T.i, T.k, null, 'soft');
+      this.tri.B.badge(b.k * T.k, b.j * T.j, T.k, T.j, null, 'soft');
+      this.tri.C.badge(b.i * T.i, b.j * T.j, T.i, T.j, null, 'soft');
+    }
+    if (ctx) { this.tri.A.heads([ref.i], [ref.k]); this.tri.B.heads([ref.k], [ref.j]); this.tri.C.heads([ref.i], [ref.j]); }
+    else ['A', 'B', 'C'].forEach((m) => this.tri[m].heads(null, null));
+    // code
+    this.lineEls.forEach((d, n) => {
+      const l = this.lines[n];
+      d.classList.toggle('on', l.v === 'body' && this.t > 0 && ctx);
+      d.classList.toggle('inner', ctx && ((blockLevel && l.v === 'b' + pl.bo[2]) || (!blockLevel && l.v === 's' + pl.io[2])));
+      const sp = this.valEls[n];
+      if (sp) {
+        let txt = '';
+        if (this.t > 0 && ctx) { const v = l.v[1]; txt = l.v[0] === 'b' ? BV[v] + ' = ' + ref.bid[v] : v + ' = ' + ref[v]; }
+        sp.textContent = txt;
+      }
+    });
+    // caption
+    let cap;
+    if (this.t === 0) cap = 'Press <b>Step</b> (or →). Tinted cells are the ones the current ' + (blockLevel ? 'block loop' : 'inner loop') + ' will visit; the glowing one stays put.';
+    else if (this.t === this.n) cap = 'Done: ' + s.mul + ' multiplies, ' + s.add + ' additions. ' + (eqRef(P, s.C) ? '<span class="ok">Check: C == A @ B ✓</span>' : '<span class="tsp">C differs ✗</span>');
+    else if (last.length === 1) {
+      const o = last[0], nm = 'C[' + o.i + '][' + o.j + ']';
+      cap = '<code><span class="tc">' + nm + '</span> += <span class="ta">A[' + o.i + '][' + o.k + ']</span>·<span class="tb">B[' + o.k + '][' + o.j + ']</span></code> = ' + o.a + '·' + o.b + ' = ' + o.p + ' → ' +
+        (o.first ? nm + ' = ' + o.nw + ' <small>(first term, just stored)</small>' : nm + ' = ' + o.old + ' + ' + o.p + ' = <b>' + o.nw + '</b>') + ' · term ' + o.terms + ' of ' + P.K + (o.terms === P.K ? ' <b class="tc">finished</b>' : ' <span class="tc">partial</span>');
+    } else {
+      const b = ref.bid;
+      cap = blockLevel
+        ? '<code><span class="tc">C[' + b.i + ',' + b.j + ']</span> += <span class="ta">A[' + b.i + ',' + b.k + ']</span> @ <span class="tb">B[' + b.k + ',' + b.j + ']</span></code> — one block product, ' + last.length + ' multiplies at once.'
+        : 'One whole inner loop over <b>' + pl.io[2] + '</b>: ' + last.length + ' multiplies. ' + stay + ' stayed put the whole time.';
+    }
+    this.cap.innerHTML = cap;
+    const MNK = P.M * P.N * P.K;
+    this.cnt.innerHTML = counters([
+      { label: 'step', value: this.t + '/' + this.n }, { label: 'multiplies', value: s.mul + '/' + MNK },
+      { label: 'additions', value: s.add + '/' + P.M * P.N * (P.K - 1) },
+      { label: 'partial now', value: s.part }, { label: 'most partial at once', value: s.maxPart }
+    ]);
+  };
+  SingleView.prototype.trace = function (limit) {
+    const { done } = this.state(); const s = newAcc(this.P); const out = [];
+    for (let x = 0; x < done; x++) {
+      const o = this.pl.ops[x], r = apply(this.P, s, o.i, o.j, o.k);
+      if (x >= done - (limit || 400)) {
+        out.push('step ' + String(x + 1).padStart(3) + ': C[' + o.i + '][' + o.j + '] += A[' + o.i + '][' + o.k + ']*B[' + o.k + '][' + o.j + '] = ' + r.a + '*' + r.b + ' = ' + r.p + '  ->  ' +
+          (r.first ? r.nw + ' (first term)' : r.old + ' + ' + r.p + ' = ' + r.nw) + '   term ' + r.terms + '/' + this.P.K + (r.terms === this.P.K ? ' FINISHED' : ''));
+      }
+    }
+    return out;
+  };
+  mix(SingleView.prototype);
+
+  // =====================================================================
+  // Many cores
+  // cfg: P, tm, tn, tk, cores, flow ('os'|'ws'|'is'), g (K-tiles per core, ws/is), S (split-K pieces, os)
+  // =====================================================================
+  function parallelPlan(P, cfg) {
+    const nM = P.M / cfg.tm, nN = P.N / cfg.tn, nK = P.K / cfg.tk;
+    const units = [];
+    const flow = cfg.flow;
+    if (flow === 'os') {
+      const S = cfg.S || 1, ps = nK / S;
+      for (let mt = 0; mt < nM; mt++) for (let nt = 0; nt < nN; nt++) for (let s = 0; s < S; s++) {
+        const prods = rng(ps).map((x) => ({ mt, nt, kt: s * ps + x }));
+        units.push({ prods, stay: 'C', stayBlocks: [[mt, nt]], cblocks: [[mt, nt]], label: 'C' + mt + nt + (S > 1 ? ' · piece ' + s : ''), short: 'C[' + mt + ',' + nt + ']' + (S > 1 ? ' p' + s : '') });
+      }
+    } else if (flow === 'ws') {
+      const g = cfg.g || 1, nG = nK / g;
+      for (let kg = 0; kg < nG; kg++) for (let nt = 0; nt < nN; nt++) {
+        const kts = rng(g).map((x) => kg * g + x);
+        const prods = []; rng(nM).forEach((mt) => kts.forEach((kt) => prods.push({ mt, nt, kt })));
+        units.push({ prods, stay: 'B', stayBlocks: kts.map((kt) => [kt, nt]), cblocks: rng(nM).map((mt) => [mt, nt]), label: 'B[' + kts.join('') + ',' + nt + ']', short: 'B[' + (g > 1 ? kts[0] + '–' + kts[g - 1] : kts[0]) + ',' + nt + ']' });
+      }
+    } else {
+      const g = cfg.g || 1, nG = nK / g;
+      for (let mt = 0; mt < nM; mt++) for (let kg = 0; kg < nG; kg++) {
+        const kts = rng(g).map((x) => kg * g + x);
+        const prods = []; rng(nN).forEach((nt) => kts.forEach((kt) => prods.push({ mt, nt, kt })));
+        units.push({ prods, stay: 'A', stayBlocks: kts.map((kt) => [mt, kt]), cblocks: rng(nN).map((nt) => [mt, nt]), label: 'A[' + mt + ',' + kts.join('') + ']', short: 'A[' + mt + ',' + (g > 1 ? kts[0] + '–' + kts[g - 1] : kts[0]) + ']' });
+      }
+    }
+    const C = cfg.cores, U = units.length, L = units[0].prods.length, W = Math.ceil(U / C);
+    units.forEach((u, x) => { u.id = x; u.wave = Math.floor(x / C); u.core = x % C; u.start = u.wave * L; });
+    const parts = {};
+    units.forEach((u) => u.cblocks.forEach(([a, b]) => { const k0 = key(a, b); (parts[k0] = parts[k0] || []).push(u.id); }));
+    const maxParts = Math.max.apply(null, Object.values(parts).map((x) => x.length));
+    const R = maxParts > 1 ? Math.ceil(Math.log2(maxParts)) : 0;
+    return { nM, nN, nK, units, C, U, L, W, R, parts, maxParts, compute: W * L, n: W * L + R };
+  }
+
+  function parallelState(P, cfg, pl, t) {
+    const tm = cfg.tm, tn = cfg.tn, tk = cfg.tk;
+    const comp = Math.min(t, pl.compute);
+    const bufs = pl.units.map(() => ({}));
+    let mul = 0, tadd = 0, sadd = 0;
+    pl.units.forEach((u) => {
+      const done = Math.max(0, Math.min(pl.L, comp - u.start));
+      for (let x = 0; x < done; x++) {
+        const p = u.prods[x];
+        for (let a = 0; a < tm; a++) for (let b = 0; b < tn; b++) for (let c = 0; c < tk; c++) {
+          const i = p.mt * tm + a, j = p.nt * tn + b, k = p.kt * tk + c;
+          const k0 = key(i, j), bf = bufs[u.id];
+          if (!bf[k0]) bf[k0] = { v: 0, T: 0 };
+          if (bf[k0].T > 0) tadd++;
+          bf[k0].v += P.A[i][k] * P.B[k][j]; bf[k0].T++; mul++;
+        }
+      }
+    });
+    const lv = Math.max(0, t - pl.compute);
+    const C = zeros(P.M, P.N), T = zeros(P.M, P.N), pieces = zeros(P.M, P.N);
+    for (let i = 0; i < P.M; i++) for (let j = 0; j < P.N; j++) {
+      const bk = key(Math.floor(i / tm), Math.floor(j / tn));
+      let list = pl.parts[bk].map((u) => bufs[u][key(i, j)]).filter(Boolean).map((x) => ({ v: x.v, T: x.T }));
+      if (pl.parts[bk].length === 1 || lv > 0) {
+        for (let L = 0; L < lv && list.length > 1; L++) {
+          const nx = [];
+          for (let q = 0; q < list.length; q += 2) {
+            if (q + 1 < list.length) { nx.push({ v: list[q].v + list[q + 1].v, T: list[q].T + list[q + 1].T }); sadd++; } else nx.push(list[q]);
+          }
+          list = nx;
+        }
+      }
+      pieces[i][j] = list.length;
+      if (list.length === 1) { C[i][j] = list[0].v; T[i][j] = list[0].T; }
+    }
+    return { bufs, mul, tadd, sadd, C, T, pieces, lv };
+  }
+
+  function parallelCode(cfg, pl) {
+    const g = cfg.g || 1, S = cfg.S || 1;
+    const L = [];
+    const kw = (x) => '<span class="kw">' + x + '</span>', cm = (x) => '<span class="cm">   # ' + x + '</span>';
+    if (cfg.flow === 'os') {
+      L.push({ v: 'grid', html: kw('parallel for') + ' (mt, nt' + (S > 1 ? ', piece' : '') + ') ' + kw('in') + ' grid:' + cm(pl.U + ' tiles, ' + cfg.cores + ' cores') });
+      L.push({ v: 'sweep', html: '    ' + kw('for') + ' kt ' + kw('in') + ' ' + (S > 1 ? 'piece_range(piece)' : 'range(' + pl.nK + ')') + ':' + cm('the sweep, in order') });
+      L.push({ v: 'body', html: '        ' + (S > 1 ? '<span class="tc">P</span>[piece]' : '<span class="tc">C</span>') + '[mt,nt] += <span class="ta">A</span>[mt,kt] @ <span class="tb">B</span>[kt,nt]' });
+      if (S > 1) L.push({ v: 'red', html: '<span class="tc">C</span>[mt,nt] = ' + kw('sum') + ' of <span class="tc">P</span>[piece][mt,nt]' + cm('across cores') });
+    } else {
+      const ws = cfg.flow === 'ws';
+      L.push({ v: 'grid', html: kw('parallel for') + ' (' + (ws ? 'kgroup, nt' : 'mt, kgroup') + ') ' + kw('in') + ' grid:' + cm(pl.U + ' tiles, ' + cfg.cores + ' cores') });
+      L.push({ v: 'sweep', html: '    ' + kw('for') + ' ' + (ws ? 'mt' : 'nt') + ' ' + kw('in') + ' range(' + (ws ? pl.nM : pl.nN) + '):' + cm('the sweep, in order') });
+      L.push({ v: 'kg', html: '        ' + kw('for') + ' kt ' + kw('in') + ' kgroup:' + cm(g + ' K-tile' + (g > 1 ? 's' : '') + ' per core, summed over time') });
+      L.push({ v: 'body', html: '            <span class="tc">P</span>[kgroup][mt,nt] += <span class="ta">A</span>[mt,kt] @ <span class="tb">B</span>[kt,nt]' });
+      if (pl.maxParts > 1) L.push({ v: 'red', html: '<span class="tc">C</span>[mt,nt] = ' + kw('sum') + ' of <span class="tc">P</span>[kgroup][mt,nt]' + cm('across cores') });
+      else L.push({ v: 'red', html: '<span class="tc">C</span>[mt,nt] = <span class="tc">P</span>[0][mt,nt]' + cm('one group holds all of K: nothing to combine') });
+    }
+    return L;
+  }
+
+  function ParallelView(root, cfg) {
+    this.cfg = cfg; this.root = root; this.P = cfg.P; root.classList.add('w', 'pv');
+    this.baseSpeed = 1000; this.t = 0;
+    this.pl = parallelPlan(this.P, cfg); this.n = this.pl.n;
+    if (cfg.title !== false) {
+      const head = el('div', 'w-head'); root.appendChild(head);
+      const f = cfg.flow, st = { os: 'C', ws: 'B', is: 'A' }[f];
+      head.innerHTML = '<span class="chip ' + st + '">each core keeps a ' + st + ' block · ' + f + '</span>' +
+        '<span class="chip">' + this.pl.U + ' tile' + (this.pl.U > 1 ? 's' : '') + ' → ' + cfg.cores + ' core' + (cfg.cores > 1 ? 's' : '') + ' → ' + this.pl.W + ' wave' + (this.pl.W > 1 ? 's' : '') + '</span>' +
+        '<span class="chip">' + this.pl.L + ' block product' + (this.pl.L > 1 ? 's' : '') + ' per tile, in order</span>' +
+        (this.pl.maxParts > 1 ? '<span class="chip sp">each C block in ' + this.pl.maxParts + ' pieces → combine</span>' : '<span class="chip">each C block made in one place</span>');
+    }
+    const top = el('div', 'pv-top'); root.appendChild(top);
+    this.tri = new Triple(this.P, cfg, 'tiles: ' + cfg.tm + '×' + cfg.tn + '×' + cfg.tk); top.appendChild(this.tri.root);
+    const codeWrap = el('div', 'stack'); top.appendChild(codeWrap);
+    this.codeEl = el('pre', 'code'); codeWrap.appendChild(this.codeEl);
+    this.lines = parallelCode(cfg, this.pl);
+    this.lineEls = this.lines.map((l) => { const d = el('div', 'ln', l.html); this.codeEl.appendChild(d); return d; });
+    this.legend = el('div', 'legend', '<span><i class="lg read"></i>block being read now (tag = which core)</span><span><i class="lg stay"></i>kept inside a core</span><span><i class="lg part"></i>partial</span><span><i class="lg scat"></i>exists as pieces on several cores</span><span><i class="lg fin"></i>finished</span>');
+    codeWrap.appendChild(this.legend);
+    root.appendChild(el('div', 'pv-lab', 'The chip: what every core is doing right now'));
+    this.floor = el('div', 'floor'); root.appendChild(this.floor);
+    this.coreEls = rng(cfg.cores).map((c) => { const b = el('div', 'corebox'); this.floor.appendChild(b); return b; });
+    root.appendChild(el('div', 'pv-lab', 'Timeline: one row per core, one column per step'));
+    this.ganttWrap = el('div', 'gantt-wrap'); root.appendChild(this.ganttWrap);
+    this.buildGantt();
+    this.cap = el('div', 'cap'); root.appendChild(this.cap);
+    const foot = el('div', 'w-foot'); root.appendChild(foot);
+    this.cnt = el('div', 'counters'); foot.appendChild(this.cnt);
+    const right = el('div', 'stack right'); right.append(this.controls(null), this.scrubber()); foot.appendChild(right);
+    this.keys(); this.go(0);
+  }
+  ParallelView.prototype.inner = function () { return this.step(); };
+  ParallelView.prototype.buildGantt = function () {
+    const pl = this.pl, cfg = this.cfg;
+    const g = el('div', 'gantt'); this.gantt = g;
+    const cols = pl.n;
+    g.style.gridTemplateColumns = '4.2rem repeat(' + cols + ', minmax(' + (cols > 24 ? '1.6rem' : '2.6rem') + ', 1fr))';
+    const rows = cfg.cores + 2 + (pl.R ? 1 : 0);
+    // header: waves
+    g.appendChild(Object.assign(el('div', 'g-h'), { style: 'grid-row:1;grid-column:1' }));
+    for (let w = 0; w < pl.W; w++) {
+      const h = el('div', 'g-wave', 'wave ' + (w + 1));
+      h.style.gridRow = '1'; h.style.gridColumn = (2 + w * pl.L) + ' / span ' + pl.L; g.appendChild(h);
+    }
+    if (pl.R) { const h = el('div', 'g-wave sp', 'combine'); h.style.gridRow = '1'; h.style.gridColumn = (2 + pl.compute) + ' / span ' + pl.R; g.appendChild(h); }
+    // step numbers
+    const sl = el('div', 'g-lab', 'step'); sl.style.gridRow = '2'; sl.style.gridColumn = '1'; g.appendChild(sl);
+    for (let c = 0; c < cols; c++) { const x = el('div', 'g-num', String(c + 1)); x.style.gridRow = '2'; x.style.gridColumn = String(2 + c); g.appendChild(x); }
+    // wave bands
+    for (let w = 0; w < pl.W; w++) {
+      const band = el('div', 'g-band' + (w % 2 ? ' alt' : ''));
+      band.style.gridRow = '3 / span ' + cfg.cores; band.style.gridColumn = (2 + w * pl.L) + ' / span ' + pl.L; g.appendChild(band);
+    }
+    // core rows
+    this.bars = [];
+    for (let c = 0; c < cfg.cores; c++) {
+      const lab = el('div', 'g-lab', 'core ' + c); lab.style.gridRow = String(3 + c); lab.style.gridColumn = '1'; g.appendChild(lab);
+      for (let w = 0; w < pl.W; w++) {
+        const u = pl.units.find((x) => x.wave === w && x.core === c);
+        const b = el('div', u ? 'bar f-' + cfg.flow : 'bar idle', u ? '<span class="fill"></span><span class="bt">' + u.short + '</span>' : '<span class="bt">idle</span>');
+        b.style.gridRow = String(3 + c); b.style.gridColumn = (2 + w * pl.L) + ' / span ' + pl.L;
+        if (u) {
+          b.title = 'tile ' + u.id + ' on core ' + c + ', wave ' + (w + 1) + ': keeps ' + u.label + ', makes ' + u.cblocks.map(([a, bb]) => 'C[' + a + ',' + bb + ']').join(' ');
+          b.dataset.u = u.id;
+          b.addEventListener('mouseenter', () => this.hover(u)); b.addEventListener('mouseleave', () => this.hover(null));
+          b.addEventListener('focus', () => this.hover(u)); b.addEventListener('blur', () => this.hover(null));
+          b.tabIndex = 0;
+          this.bars.push({ el: b, u });
+        }
+        g.appendChild(b);
+      }
+    }
+    if (pl.R) {
+      const lab = el('div', 'g-lab sp', 'across cores'); lab.style.gridRow = String(3 + cfg.cores); lab.style.gridColumn = '1'; g.appendChild(lab);
+      this.redBars = rng(pl.R).map((r) => {
+        const b = el('div', 'bar red', '<span class="fill"></span><span class="bt">+ level ' + (r + 1) + '</span>');
+        b.style.gridRow = String(3 + cfg.cores); b.style.gridColumn = String(2 + pl.compute + r); g.appendChild(b); return b;
+      });
+    }
+    this.cursor = el('div', 'g-cursor'); this.cursor.style.gridRow = '2 / span ' + (rows - 1); g.appendChild(this.cursor);
+    this.ganttWrap.appendChild(g);
+  };
+  ParallelView.prototype.hover = function (u) { this.hov = u; this.render(); };
+  ParallelView.prototype.render = function () {
+    const P = this.P, cfg = this.cfg, pl = this.pl, tm = cfg.tm, tn = cfg.tn, tk = cfg.tk;
+    const st = parallelState(P, cfg, pl, this.t);
+    const slot = this.t - 1; const inCompute = slot >= 0 && slot < pl.compute; const inRed = slot >= pl.compute;
+    const wave = inCompute ? Math.floor(slot / pl.L) : -1, pos = inCompute ? slot % pl.L : -1;
+    const active = inCompute ? pl.units.filter((u) => u.wave === wave) : [];
+    const cA = {}, cB = {}, cC = {}, maps = { A: cA, B: cB, C: cC };
+    const bdim = { A: [tm, tk], B: [tk, tn], C: [tm, tn] };
+    const blockCells = (op, r0, c0) => { const [R, Cc] = bdim[op]; const out = []; for (let a = 0; a < R; a++) for (let b = 0; b < Cc; b++) out.push(key(r0 * R + a, c0 * Cc + b)); return out; };
+    // blocks kept by active cores glow; blocks read now are lit
+    const tags = { A: {}, B: {}, C: {} };
+    active.forEach((u) => {
+      const p = u.prods[pos];
+      u.stayBlocks.forEach(([a, b]) => blockCells(u.stay, a, b).forEach((k0) => addCls(maps[u.stay], k0, 'stay')));
+      blockCells('A', p.mt, p.kt).forEach((k0) => addCls(cA, k0, 'read'));
+      blockCells('B', p.kt, p.nt).forEach((k0) => addCls(cB, k0, 'read'));
+      blockCells('C', p.mt, p.nt).forEach((k0) => addCls(cC, k0, 'write'));
+      [['A', p.mt, p.kt], ['B', p.kt, p.nt], ['C', p.mt, p.nt]].forEach(([op, a, b]) => { const k0 = key(a, b); (tags[op][k0] = tags[op][k0] || []).push(u.core); });
+    });
+    for (let i = 0; i < P.M; i++) for (let j = 0; j < P.N; j++) {
+      const k0 = key(i, j);
+      if (st.pieces[i][j] > 1) addCls(cC, k0, 'scat');
+      else if (st.T[i][j]) addCls(cC, k0, st.T[i][j] === P.K ? 'fin' : 'part');
+      if (inRed && pl.parts[key(Math.floor(i / tm), Math.floor(j / tn))].length > 1) addCls(cC, k0, 'spadd');
+    }
+    if (this.hov) {
+      const u = this.hov;
+      u.stayBlocks.forEach(([a, b]) => blockCells(u.stay, a, b).forEach((k0) => addCls(maps[u.stay], k0, 'hov')));
+      u.cblocks.forEach(([a, b]) => blockCells('C', a, b).forEach((k0) => addCls(cC, k0, 'hov')));
+    }
+    this.tri.A.paint(cA); this.tri.B.paint(cB);
+    this.tri.C.paint(cC, (i, j) => (st.pieces[i][j] > 1 ? st.pieces[i][j] + '×' : st.T[i][j] ? String(st.C[i][j]) : '·'));
+    ['A', 'B', 'C'].forEach((m) => {
+      this.tri[m].clearBadges();
+      const [R, Cc] = m === 'A' ? [tm, tk] : m === 'B' ? [tk, tn] : [tm, tn];
+      Object.keys(tags[m]).forEach((k0) => { const [a, b] = k0.split(',').map(Number); this.tri[m].badge(a * R, b * Cc, R, Cc, tags[m][k0].map((c) => 'c' + c).join(' '), 'tag'); });
+    });
+    // cores
+    this.coreEls.forEach((box, c) => {
+      const u = active.find((x) => x.core === c);
+      box.className = 'corebox' + (u ? '' : ' idle');
+      if (!u) {
+        const lastU = pl.units.filter((x) => x.core === c && x.start < Math.max(0, this.t)).pop();
+        let msg = this.t === 0 ? 'waiting to start' : inRed ? 'done — its partial sums are being combined across cores' : slot >= pl.compute ? 'done' : 'idle: no tile left for this core in wave ' + (wave + 1);
+        if (!inRed && this.t >= pl.n) msg = 'done';
+        box.innerHTML = '<h5><span>core ' + c + '</span><span class="muted">' + (lastU ? 'last: ' + lastU.short : '') + '</span></h5><div class="op">' + msg + '</div>';
+        return;
+      }
+      const p = u.prods[pos];
+      const blk = (op, r0, c0, R, Cc, vals, cls, label) => {
+        const w = el('div', 'cb-blk'); w.appendChild(el('div', 'cb-l', label));
+        const m = el('div', 'mini'); m.style.gridTemplateColumns = 'repeat(' + Cc + ', var(--cell))';
+        for (let a = 0; a < R; a++) for (let b = 0; b < Cc; b++) {
+          const i = r0 * R + a, j = c0 * Cc + b;
+          let txt = '', extra = cls;
+          if (op === 'C') { const bf = st.bufs[u.id][key(i, j)]; txt = bf ? String(bf.v) : '·'; extra += bf ? (bf.T === P.K ? ' fin' : ' part') : ''; }
+          else txt = String(vals[i][j]);
+          m.appendChild(el('div', 'cell k-' + op + ' ' + extra, txt));
+        }
+        w.appendChild(m); return w;
+      };
+      box.innerHTML = '';
+      box.appendChild(el('h5', null, '<span>core ' + c + '</span><span class="muted">tile ' + u.id + ' · ' + (pos + 1) + '/' + pl.L + '</span>'));
+      if (u.stayBlocks.length > 1) box.appendChild(el('div', 'op', 'in its slots: ' + u.stayBlocks.map(([a, b]) => { const nm = u.stay + '[' + a + ',' + b + ']'; const isCur = (u.stay === 'B' ? a === p.kt && b === p.nt : a === p.mt && b === p.kt); return isCur ? '<b>' + nm + '</b>' : nm; }).join(' · ')));
+      const row = el('div', 'cb-row');
+      row.append(
+        blk('A', p.mt, p.kt, tm, tk, P.A, u.stay === 'A' ? 'stay' : 'read', (u.stay === 'A' ? 'keeps' : 'gets') + ' A[' + p.mt + ',' + p.kt + ']'),
+        el('span', 'arrow', '@'),
+        blk('B', p.kt, p.nt, tk, tn, P.B, u.stay === 'B' ? 'stay' : 'read', (u.stay === 'B' ? 'keeps' : 'gets') + ' B[' + p.kt + ',' + p.nt + ']'),
+        el('span', 'arrow', '→'),
+        blk('C', p.mt, p.nt, tm, tn, null, u.stay === 'C' ? 'stay' : '', (u.stay === 'C' ? 'keeps ' : 'adds into ') + (pl.parts[key(p.mt, p.nt)].length > 1 ? 'its piece of ' : '') + 'C[' + p.mt + ',' + p.nt + ']'));
+      box.appendChild(row);
+    });
+    // gantt progress
+    this.bars.forEach(({ el: b, u }) => {
+      const done = Math.max(0, Math.min(pl.L, Math.min(this.t, pl.compute) - u.start));
+      b.querySelector('.fill').style.width = (100 * done / pl.L) + '%';
+      b.classList.toggle('now', u.wave === wave);
+      const sib = this.hov && this.hov !== u && u.cblocks.some(([a, c]) => this.hov.cblocks.some(([x, y]) => x === a && y === c));
+      b.classList.toggle('hovme', this.hov === u); b.classList.toggle('sib', !!sib);
+    });
+    if (this.redBars) this.redBars.forEach((b, r) => { b.querySelector('.fill').style.width = (st.lv > r ? 100 : 0) + '%'; b.classList.toggle('now', inRed && slot - pl.compute === r); });
+    this.cursor.style.gridColumn = String(2 + Math.max(0, slot));
+    this.cursor.hidden = this.t === 0 || this.t > pl.n;
+    // code
+    this.lineEls.forEach((d, n) => { const v = this.lines[n].v; d.classList.toggle('on', (inCompute && v === 'body') || (inRed && v === 'red')); });
+    // caption
+    const busy = active.length, idle = cfg.cores - busy;
+    let cap;
+    if (this.t === 0) cap = 'Press <b>Step</b>. In every step each busy core does <b>one block product</b>, and all busy cores do it <b>at the same time</b>.';
+    else if (inCompute) cap = '<b>Step ' + this.t + '</b> · wave ' + (wave + 1) + ' of ' + pl.W + ', sweep position ' + (pos + 1) + ' of ' + pl.L + ': ' + busy + ' core' + (busy > 1 ? 's' : '') + ' busy' + (idle ? ', <b>' + idle + ' idle</b> (no tile left for them)' : '') + '. ' +
+      (pl.maxParts > 1 ? 'Each core only makes a <b>piece</b> of its C blocks (shown as “2×” = still in 2 pieces).' : 'Each core adds straight into its own C block, over time.');
+    else if (inRed) cap = '<b class="tsp">Combine level ' + (slot - pl.compute + 1) + ':</b> pieces of the same C block, made on different cores, are added together. These additions happen <b>across cores</b> (in space).';
+    if (this.t === pl.n) cap = 'Done in ' + pl.n + ' steps. ' + (eqRef(P, st.C) ? '<span class="ok">Check: C == A @ B ✓</span>' : '<span class="tsp">C differs ✗</span>');
+    this.cap.innerHTML = cap;
+    const util = Math.round(100 * pl.U * pl.L / (pl.W * pl.L * cfg.cores));
+    this.cnt.innerHTML = counters([
+      { label: 'step', value: this.t + '/' + pl.n }, { label: 'multiplies', value: st.mul + '/' + P.M * P.N * P.K },
+      { label: 'additions over time', value: st.tadd }, { label: 'additions across cores', value: st.sadd, cls: 'csp' },
+      { label: 'total', value: (st.tadd + st.sadd) + '/' + P.M * P.N * (P.K - 1) }, { label: 'core use', value: util + '%' }
+    ]);
+  };
+  ParallelView.prototype.trace = function () {
+    const pl = this.pl, out = [];
+    for (let s = 0; s < Math.min(this.t, pl.n); s++) {
+      if (s < pl.compute) {
+        const w = Math.floor(s / pl.L), pos = s % pl.L;
+        const act = pl.units.filter((u) => u.wave === w);
+        out.push('step ' + String(s + 1).padStart(2) + ' (wave ' + (w + 1) + '): ' + act.map((u) => { const p = u.prods[pos]; return 'core' + u.core + ' A[' + p.mt + ',' + p.kt + ']@B[' + p.kt + ',' + p.nt + ']→C[' + p.mt + ',' + p.nt + ']'; }).join(' | ') + (act.length < this.cfg.cores ? ' | ' + (this.cfg.cores - act.length) + ' idle' : ''));
+      } else out.push('step ' + String(s + 1).padStart(2) + ' (combine level ' + (s - pl.compute + 1) + '): pieces added across cores');
+    }
+    return out;
+  };
+  mix(ParallelView.prototype);
+
+  // ---------------- deck mount ----------------
+  function PV(root, cfg) {
+    // deck widget: fixed problem, optional in-slide knobs
+    const P = problem(cfg.M || 4, cfg.N || 4, cfg.K || 4, 0);
+    const st = Object.assign({}, cfg);
+    root.classList.add('stack');
+    const knobs = el('div', 'pv-knobs'); root.appendChild(knobs);
+    const host = el('div'); root.appendChild(host);
+    const make = () => {
+      if (this.view) this.view.destroy();
+      host.innerHTML = ''; const d = el('div'); host.appendChild(d);
+      this.view = new ParallelView(d, Object.assign({}, st, { P }));
+      knobs.querySelectorAll('button').forEach((b) => b.setAttribute('aria-pressed', String(st[b.dataset.k]) === b.dataset.v ? 'true' : 'false'));
+    };
+    const LAB = { flow: { os: 'os · cores own C blocks', ws: 'ws · cores keep B blocks', is: 'is · cores keep A blocks' } };
+    (cfg.knobs || []).forEach((kn) => {
+      const grp = el('div', 'seg'); grp.appendChild(el('span', 'seg-l', { flow: 'flow', cores: 'cores', g: 'K-tiles per core', S: 'split-K pieces' }[kn.k]));
+      kn.v.forEach((v) => { const b = btn(LAB[kn.k] ? LAB[kn.k][v] : String(v), kn.k + ' ' + v, () => { st[kn.k] = v; make(); }); b.dataset.k = kn.k; b.dataset.v = String(v); grp.appendChild(b); });
+      knobs.appendChild(grp);
+    });
+    if (!(cfg.knobs || []).length) knobs.hidden = true;
+    make();
+    this.root = root;
+  }
+  ['step', 'back', 'inner', 'finish', 'reset', 'atEnd', 'atStart', 'play', 'stop'].forEach((m) => { PV.prototype[m] = function () { return this.view[m].apply(this.view, arguments); }; });
+
+  global.MM2 = { problem, divisors, singlePlan, parallelPlan, parallelState, SingleView, ParallelView, newAcc, apply, eqRef, STAY, SHORT, STATN, FORM, BV, ORDERS, TYPES: { pv: PV }, _: { el, btn, addCls, counters, Mat, Triple, mix, key, rng, zeros } };
+})(typeof window !== 'undefined' ? window : globalThis);
+
+/* Point 9 (split-K through memory) and point 10 (weight sets). Built on MM2's helpers. */
+(function (global) {
+  'use strict';
+  const X = global.MM2, H = X._;
+  const { el, btn, addCls, counters, Mat, Triple, mix, key, rng, zeros } = H;
+  const bname = (kt, nt) => 'B[' + kt + ',' + nt + ']';
+  const pct = (a, b) => Math.round(100 * a / b) + '%';
+
+  // =====================================================================
+  // 9 · Split-K through memory
+  // cfg: P, tm, tn, pieces, cores
+  // =====================================================================
+  function splitkPlan(P, cfg) {
+    const nM = P.M / cfg.tm, nN = P.N / cfg.tn, Pp = cfg.pieces, kp = P.K / Pp;
+    const tiles = [];
+    for (let p = 0; p < Pp; p++) for (let mt = 0; mt < nM; mt++) for (let nt = 0; nt < nN; nt++) tiles.push({ mt, nt, p, k0: p * kp, k1: (p + 1) * kp });
+    const W = Math.ceil(tiles.length / cfg.cores);
+    tiles.forEach((t, x) => { t.id = x; t.core = x % cfg.cores; t.wave = Math.floor(x / cfg.cores); });
+    const pass2 = Pp > 1 ? Pp : 0;
+    return { nM, nN, Pp, kp, tiles, W, pass2, n: 2 * W + pass2 };
+  }
+  function splitkState(P, cfg, pl, t) {
+    const tm = cfg.tm, tn = cfg.tn;
+    const q = Math.max(0, t - 2 * pl.W);
+    const mem = rng(pl.Pp).map(() => ({ v: zeros(P.M, P.N), w: zeros(P.M, P.N) }));
+    const C = zeros(P.M, P.N), T = zeros(P.M, P.N);
+    let mul = 0, add1 = 0, written = 0, read = 0, add2 = 0;
+    const local = {};
+    pl.tiles.forEach((tile) => {
+      if (2 * tile.wave + 1 > t) return;
+      const vals = rng(tm).map((a) => rng(tn).map((b) => { let s = 0; for (let k = tile.k0; k < tile.k1; k++) s += P.A[tile.mt * tm + a][k] * P.B[k][tile.nt * tn + b]; return s; }));
+      mul += tm * tn * pl.kp; add1 += tm * tn * (pl.kp - 1);
+      const wr = 2 * tile.wave + 2 <= t;
+      local[tile.id] = { vals, wr };
+      if (!wr) return;
+      for (let a = 0; a < tm; a++) for (let b = 0; b < tn; b++) {
+        const i = tile.mt * tm + a, j = tile.nt * tn + b;
+        if (pl.Pp === 1) { C[i][j] = vals[a][b]; T[i][j] = 1; }
+        else { mem[tile.p].v[i][j] = vals[a][b]; mem[tile.p].w[i][j] = 1; written++; }
+      }
+    });
+    if (pl.Pp > 1) for (let p = 0; p < q; p++) for (let i = 0; i < P.M; i++) for (let j = 0; j < P.N; j++) {
+      C[i][j] += mem[p].v[i][j]; T[i][j]++; read++; if (p > 0) add2++;
+    }
+    return { mem, C, T, mul, add1, add2, written, read, local, q, done: pl.Pp > 1 ? pl.Pp : 1 };
+  }
+
+  function gantt(cols, minw) {
+    const g = el('div', 'gantt');
+    g.style.gridTemplateColumns = '4.6rem repeat(' + cols + ', minmax(' + (minw || '2.4rem') + ', 1fr))';
+    return g;
+  }
+  function put(g, node, r, c, span) { node.style.gridRow = String(r); node.style.gridColumn = c + (span && span > 1 ? ' / span ' + span : ''); g.appendChild(node); return node; }
+
+  function SplitKView(root, cfg) {
+    this.cfg = cfg; this.root = root; this.P = cfg.P; root.classList.add('w', 'pv');
+    this.baseSpeed = 1100; this.t = 0;
+    const P = this.P, pl = this.pl = splitkPlan(P, cfg); this.n = pl.n;
+    const blocks = pl.nM * pl.nN;
+    const head = el('div', 'w-head'); root.appendChild(head);
+    head.innerHTML = '<span class="chip C">each core keeps one C block · os</span>' +
+      '<span class="chip">' + pl.tiles.length + ' tiles = ' + blocks + ' output block' + (blocks > 1 ? 's' : '') + ' × ' + pl.Pp + ' piece' + (pl.Pp > 1 ? 's' : '') + ' of K</span>' +
+      '<span class="chip">' + cfg.cores + ' core' + (cfg.cores > 1 ? 's' : '') + ' → ' + pl.W + ' wave' + (pl.W > 1 ? 's' : '') + '</span>' +
+      (pl.Pp > 1 ? '<span class="chip mem">partials go through memory</span>' : '<span class="chip">no partials: blocks go straight to C</span>');
+    const top = el('div', 'pv-top'); root.appendChild(top);
+    this.tri = new Triple(P, { tm: cfg.tm, tn: cfg.tn, tk: pl.kp }, pl.Pp > 1 ? 'K cut into ' + pl.Pp + ' pieces<br>of ' + pl.kp : 'K in one piece');
+    top.appendChild(this.tri.root);
+    const side = el('div', 'stack'); top.appendChild(side);
+    this.codeEl = el('pre', 'code'); side.appendChild(this.codeEl);
+    const kw = (x) => '<span class="kw">' + x + '</span>', cm = (x) => '<span class="cm">   # ' + x + '</span>';
+    this.lines = pl.Pp > 1 ? [
+      { v: 'grid', html: kw('parallel for') + ' (mt, nt, piece) ' + kw('in') + ' tiles:' + cm('pass 1, ' + pl.tiles.length + ' tiles') },
+      { v: 'sweep', html: '    ' + kw('for') + ' k ' + kw('in') + ' piece:' + cm(pl.kp + ' values of k, in order') },
+      { v: 'body', html: '        acc += <span class="ta">A</span>[mt,k] ⊗ <span class="tb">B</span>[k,nt]' },
+      { v: 'write', html: '    <span class="tm">memory</span>[piece][mt,nt] = acc' + cm('pale partial block out') },
+      { v: 'p2', html: kw('for') + ' piece ' + kw('in') + ' range(' + pl.Pp + '):' + cm('pass 2') },
+      { v: 'p2b', html: '    <span class="tc">C</span> += <span class="tm">memory</span>[piece]' + cm('read back, add') }
+    ] : [
+      { v: 'grid', html: kw('parallel for') + ' (mt, nt) ' + kw('in') + ' tiles:' + cm(pl.tiles.length + ' tiles only') },
+      { v: 'sweep', html: '    ' + kw('for') + ' k ' + kw('in') + ' range(' + P.K + '):' + cm('all of K on one core') },
+      { v: 'body', html: '        acc += <span class="ta">A</span>[mt,k] ⊗ <span class="tb">B</span>[k,nt]' },
+      { v: 'write', html: '    <span class="tc">C</span>[mt,nt] = acc' + cm('finished: straight to C') }
+    ];
+    this.lineEls = this.lines.map((l) => { const d = el('div', 'ln', l.html); this.codeEl.appendChild(d); return d; });
+    side.appendChild(el('div', 'legend', '<span><i class="lg read"></i>read now</span><span><i class="lg part"></i>partial</span><span><i class="lg fin"></i>finished</span><span><i class="lg memw"></i>written to memory</span><span><i class="lg memr"></i>read back (pass 2)</span>'));
+    if (pl.Pp > 1) for (let p = 0; p < pl.Pp; p++) { this.tri.A.badge(0, p * pl.kp, P.M, pl.kp, 'piece ' + p, 'soft'); this.tri.B.badge(p * pl.kp, 0, pl.kp, P.N, 'piece ' + p, 'soft'); }
+    root.appendChild(el('div', 'pv-lab', 'The chip: what every core is doing right now'));
+    this.floor = el('div', 'floor'); root.appendChild(this.floor);
+    this.coreEls = rng(cfg.cores).map(() => { const b = el('div', 'corebox'); this.floor.appendChild(b); return b; });
+    root.appendChild(el('div', 'pv-lab', 'Memory'));
+    this.memEl = el('div', 'membox'); root.appendChild(this.memEl);
+    this.memMats = [];
+    if (pl.Pp > 1) for (let p = 0; p < pl.Pp; p++) { const m = new Mat('C', P.M, P.N, { title: 'piece ' + p, dims: 'k ' + (p * pl.kp) + '–' + ((p + 1) * pl.kp - 1), rb: cfg.tm, cb: cfg.tn, cls: 'compact' }); this.memMats.push(m); this.memEl.appendChild(m.root); }
+    else this.memEl.appendChild(el('div', 'op', 'With one piece nothing partial ever leaves a core: each finished block is written once, into C.'));
+    root.appendChild(el('div', 'pv-lab', 'Timeline'));
+    this.gw = el('div', 'gantt-wrap'); root.appendChild(this.gw);
+    this.buildGantt();
+    this.cap = el('div', 'cap'); root.appendChild(this.cap);
+    const foot = el('div', 'w-foot'); root.appendChild(foot);
+    this.cnt = el('div', 'counters'); foot.appendChild(this.cnt);
+    const right = el('div', 'stack right'); right.append(this.controls(null), this.scrubber()); foot.appendChild(right);
+    this.keys(); this.go(0);
+  }
+  SplitKView.prototype.inner = function () { return this.step(); };
+  SplitKView.prototype.buildGantt = function () {
+    const pl = this.pl, cfg = this.cfg, g = gantt(pl.n);
+    put(g, el('div', 'g-h'), 1, 1);
+    for (let w = 0; w < pl.W; w++) put(g, el('div', 'g-wave', 'pass 1 · wave ' + (w + 1)), 1, 2 + 2 * w, 2);
+    if (pl.pass2) put(g, el('div', 'g-wave mem', 'pass 2'), 1, 2 + 2 * pl.W, pl.pass2);
+    put(g, el('div', 'g-lab', 'step'), 2, 1);
+    for (let c = 0; c < pl.n; c++) put(g, el('div', 'g-num', String(c + 1)), 2, 2 + c);
+    this.bars = [];
+    const bar = (cls, txt, r, c, span, s0, s1) => { const b = put(g, el('div', 'bar ' + cls, '<span class="fill"></span><span class="bt">' + txt + '</span>'), r, c, span); this.bars.push({ b, s0, s1 }); return b; };
+    for (let c = 0; c < cfg.cores; c++) {
+      put(g, el('div', 'g-lab', 'core ' + c), 3 + c, 1);
+      for (let w = 0; w < pl.W; w++) {
+        const t = pl.tiles.find((x) => x.wave === w && x.core === c);
+        if (!t) { put(g, el('div', 'bar idle', '<span class="bt">idle</span>'), 3 + c, 2 + 2 * w, 2); continue; }
+        bar('f-os', 'C' + t.mt + t.nt + (pl.Pp > 1 ? ' k' + t.k0 + '–' + (t.k1 - 1) : ''), 3 + c, 2 + 2 * w, 1, 2 * w, 2 * w + 1);
+        bar(pl.Pp > 1 ? 'mem' : 'f-os', pl.Pp > 1 ? '→ mem' : '→ C', 3 + c, 3 + 2 * w, 1, 2 * w + 1, 2 * w + 2);
+      }
+    }
+    if (pl.pass2) {
+      put(g, el('div', 'g-lab mem', 'pass 2'), 3 + cfg.cores, 1);
+      for (let p = 0; p < pl.Pp; p++) bar('mem2', '+ piece ' + p, 3 + cfg.cores, 2 + 2 * pl.W + p, 1, 2 * pl.W + p, 2 * pl.W + p + 1);
+    }
+    this.cursor = el('div', 'g-cursor'); this.cursor.style.gridRow = '2 / span ' + (cfg.cores + (pl.pass2 ? 2 : 1)); g.appendChild(this.cursor);
+    this.gw.appendChild(g);
+  };
+  SplitKView.prototype.render = function () {
+    const P = this.P, cfg = this.cfg, pl = this.pl, tm = cfg.tm, tn = cfg.tn;
+    const st = splitkState(P, cfg, pl, this.t);
+    const s = this.t - 1, inP1 = s >= 0 && s < 2 * pl.W, w = inP1 ? Math.floor(s / 2) : -1, ph = inP1 ? s % 2 : -1;
+    const p2 = s >= 2 * pl.W ? s - 2 * pl.W : -1;
+    const active = inP1 ? pl.tiles.filter((x) => x.wave === w) : [];
+    const cA = {}, cB = {}, cC = {};
+    if (ph === 0) active.forEach((t) => {
+      for (let a = 0; a < tm; a++) for (let k = t.k0; k < t.k1; k++) addCls(cA, key(t.mt * tm + a, k), 'read');
+      for (let k = t.k0; k < t.k1; k++) for (let b = 0; b < tn; b++) addCls(cB, key(k, t.nt * tn + b), 'read');
+    });
+    for (let i = 0; i < P.M; i++) for (let j = 0; j < P.N; j++) {
+      if (st.T[i][j]) addCls(cC, key(i, j), st.T[i][j] === st.done ? 'fin' : 'part');
+      if (p2 >= 0) addCls(cC, key(i, j), 'memr');
+      if (ph === 1 && pl.Pp === 1 && active.some((t) => Math.floor(i / tm) === t.mt && Math.floor(j / tn) === t.nt)) addCls(cC, key(i, j), 'write');
+    }
+    this.tri.A.paint(cA); this.tri.B.paint(cB);
+    this.tri.C.paint(cC, (i, j) => (st.T[i][j] ? String(st.C[i][j]) : '·'));
+    // memory
+    this.memMats.forEach((m, p) => {
+      const cl = {};
+      for (let i = 0; i < P.M; i++) for (let j = 0; j < P.N; j++) {
+        if (!st.mem[p].w[i][j]) continue;
+        let c = 'part';
+        if (ph === 1 && active.some((t) => t.p === p && Math.floor(i / tm) === t.mt && Math.floor(j / tn) === t.nt)) c += ' memw';
+        if (p === p2) c += ' memr';
+        else if (p < st.q) c += ' dim';
+        addCls(cl, key(i, j), c);
+      }
+      m.paint(cl, (i, j) => (st.mem[p].w[i][j] ? String(st.mem[p].v[i][j]) : '·'));
+    });
+    // cores
+    this.coreEls.forEach((box, c) => {
+      const t = active.find((x) => x.core === c);
+      if (!t) {
+        box.className = 'corebox idle';
+        const msg = this.t === 0 ? 'waiting to start' : p2 >= 0 || this.t >= pl.n ? 'done with pass 1' : 'idle: no tile left for this core in wave ' + (w + 1);
+        box.innerHTML = '<h5><span>core ' + c + '</span></h5><div class="op">' + msg + '</div>';
+        return;
+      }
+      box.className = 'corebox';
+      const loc = st.local[t.id];
+      box.innerHTML = '';
+      box.appendChild(el('h5', null, '<span>core ' + c + '</span><span class="muted">tile ' + t.id + '</span>'));
+      box.appendChild(el('div', 'op', 'C[' + t.mt + ',' + t.nt + '] from k ' + t.k0 + '–' + (t.k1 - 1) + (pl.Pp > 1 ? ' (piece ' + t.p + ')' : ' (all of K)')));
+      const row = el('div', 'cb-row');
+      const m = el('div', 'mini'); m.style.gridTemplateColumns = 'repeat(' + tn + ', var(--cell))';
+      for (let a = 0; a < tm; a++) for (let b = 0; b < tn; b++) m.appendChild(el('div', 'cell k-C ' + (pl.Pp > 1 ? 'part' : 'fin') + (ph === 1 ? (pl.Pp > 1 ? ' memw' : ' write') : ''), String(loc.vals[a][b])));
+      row.append(el('span', 'cb-l', ph === 0 ? 'sums ' + pl.kp + ' term' + (pl.kp > 1 ? 's' : '') + ':' : pl.Pp > 1 ? 'writes →' : 'writes to C →'), m, el('span', 'op', ph === 1 ? (pl.Pp > 1 ? '→ memory, piece ' + t.p : '→ C, finished') : pl.Pp > 1 ? 'partial (pale)' : 'finished'));
+      box.appendChild(row);
+    });
+    // gantt
+    this.bars.forEach(({ b, s0, s1 }) => {
+      const f = Math.max(0, Math.min(1, (this.t - s0) / (s1 - s0)));
+      b.querySelector('.fill').style.width = (100 * f) + '%';
+      b.classList.toggle('now', s >= s0 && s < s1);
+    });
+    this.cursor.style.gridColumn = String(2 + Math.max(0, s)); this.cursor.hidden = this.t === 0;
+    this.lineEls.forEach((d, n) => { const v = this.lines[n].v; d.classList.toggle('on', (ph === 0 && v === 'body') || (ph === 1 && v === 'write') || (p2 >= 0 && v === 'p2b')); });
+    // caption
+    const busy = active.length, idle = cfg.cores - busy, MN = P.M * P.N;
+    let cap;
+    if (this.t === 0) cap = pl.Pp === 1
+      ? 'One piece = plain os. The unit of work is one output block, so there are only <b>' + pl.tiles.length + ' tiles</b> for ' + cfg.cores + ' cores' + (pl.tiles.length < cfg.cores ? ': <b>' + (cfg.cores - pl.tiles.length) + ' cores will sit idle</b> however long the sweep is.' : '.')
+      : 'The unit of work is now <b>(output block, piece of K)</b>: ' + pl.nM * pl.nN + ' blocks × ' + pl.Pp + ' pieces = <b>' + pl.tiles.length + ' tiles</b> for ' + cfg.cores + ' cores. Step to run pass 1.';
+    else if (ph === 0) cap = '<b>Pass 1, wave ' + (w + 1) + ':</b> ' + busy + ' core' + (busy > 1 ? 's' : '') + ' at once' + (idle ? ', <b>' + idle + ' idle</b>' : '') + '. Each sweeps only its piece of K for its output block' + (pl.Pp > 1 ? ', so its block is <b>partial</b> (pale): ' + pl.kp + ' of the ' + P.K + ' terms.' : ': all ' + P.K + ' terms, finished.');
+    else if (ph === 1) cap = pl.Pp > 1 ? '<b class="tm">Write:</b> every core sends its pale partial block out to memory (' + busy * cfg.tm * cfg.tn + ' values).' : 'Every core writes its finished block into C.';
+    else cap = '<b class="tm">Pass 2, piece ' + p2 + ':</b> read ' + MN + ' values back from memory and ' + (p2 === 0 ? 'copy them into C (first piece: nothing to add yet)' : 'add them into C (' + MN + ' additions)') + '. ' + (p2 === pl.Pp - 1 ? 'C is finished.' : 'C is still partial.');
+    if (this.t === pl.n) cap = 'Done in ' + pl.n + ' steps. ' + (X.eqRef(P, st.C) ? '<span class="ok">Check: C == A @ B ✓</span>' : '<span class="tsp">C differs ✗</span>');
+    this.cap.innerHTML = cap;
+    const use = pct(pl.tiles.length, pl.W * cfg.cores);
+    this.cnt.innerHTML = counters([
+      { label: 'step', value: this.t + '/' + pl.n }, { label: 'multiplies', value: st.mul + '/' + P.M * P.N * P.K },
+      { label: 'additions pass 1', value: st.add1 }, { label: 'additions pass 2', value: st.add2, cls: 'cmem' },
+      { label: 'total', value: (st.add1 + st.add2) + '/' + MN * (P.K - 1) },
+      { label: 'to memory', value: pl.Pp > 1 ? st.written + '/' + pl.Pp * MN : '–', cls: 'cmem' }, { label: 'back from memory', value: pl.Pp > 1 ? st.read + '/' + pl.Pp * MN : '–', cls: 'cmem' },
+      { label: 'core use (pass 1)', value: use }
+    ]);
+  };
+  SplitKView.prototype.trace = function () {
+    const pl = this.pl, out = [];
+    for (let s = 0; s < Math.min(this.t, pl.n); s++) {
+      if (s < 2 * pl.W) {
+        const w = Math.floor(s / 2), act = pl.tiles.filter((x) => x.wave === w);
+        out.push('step ' + String(s + 1).padStart(2) + (s % 2 === 0 ? ' pass 1 compute: ' + act.map((t) => 'core' + t.core + ' C[' + t.mt + ',' + t.nt + '] k' + t.k0 + '-' + (t.k1 - 1)).join(' | ') : ' write: ' + act.length + ' blocks → ' + (pl.Pp > 1 ? 'memory' : 'C')) + (act.length < this.cfg.cores ? ' | ' + (this.cfg.cores - act.length) + ' idle' : ''));
+      } else { const p = s - 2 * pl.W; out.push('step ' + String(s + 1).padStart(2) + ' pass 2: C ' + (p ? '+=' : '=') + ' memory[piece ' + p + ']'); }
+    }
+    return out;
+  };
+  mix(SplitKView.prototype);
+
+  // =====================================================================
+  // 10 · Weight sets: one weight-stationary core with S slots
+  // cfg: P, tn, tk, slots, load (steps to write one block), sched ('seq'|'overlap'), group ('block'|'row'), both
+  // =====================================================================
+  function wsTasks(P, cfg) {
+    const nN = P.N / cfg.tn, nK = P.K / cfg.tk;
+    const g = cfg.group === 'row' ? Math.min(cfg.slots, nK) : 1;
+    const tasks = [];
+    for (let nt = 0; nt < nN; nt++) for (let k0 = 0; k0 < nK; k0 += g) {
+      const kts = rng(Math.min(g, nK - k0)).map((x) => k0 + x);
+      for (let i = 0; i < P.M; i++) kts.forEach((kt) => tasks.push({ i, kt, nt, b: kt + ',' + nt, lastK: kt === nK - 1 }));
+    }
+    return { tasks, nN, nK, g };
+  }
+  function wsSchedule(P, cfg, sched) {
+    const { tasks, g } = wsTasks(P, cfg);
+    const blocks = [], last = {};
+    tasks.forEach((t, x) => { if (!(t.b in last)) blocks.push(t.b); last[t.b] = x; });
+    const S = cfg.slots, L = cfg.load;
+    const slot = rng(S).map(() => null);
+    const loads = [], comps = [];
+    let lIdx = 0, lBusy = 0, ti = 0, t = 0;
+    while (ti < tasks.length && t < 5000) {
+      const need = tasks[ti].b;
+      const resident = slot.findIndex((q) => q && q.b === need);
+      if (t >= lBusy && lIdx < blocks.length) {
+        const b = blocks[lIdx];
+        const free = slot.findIndex((q) => !q || last[q.b] < ti);
+        const ok = sched === 'overlap' || (resident < 0 && b === need);
+        if (free >= 0 && ok) { slot[free] = { b, ready: t + L }; loads.push({ b, s: free, start: t, end: t + L }); lBusy = t + L; lIdx++; }
+      }
+      const s = slot.findIndex((q) => q && q.b === need && q.ready <= t);
+      if (s >= 0) { comps.push({ task: tasks[ti], t, s }); ti++; }
+      t++;
+    }
+    return { tasks, blocks, loads, comps, T: t, g, last };
+  }
+  function applyTask(P, s, cfg, task) {
+    for (let k = task.kt * cfg.tk; k < (task.kt + 1) * cfg.tk; k++) for (let j = task.nt * cfg.tn; j < (task.nt + 1) * cfg.tn; j++) X.apply(P, s, task.i, j, k);
+  }
+
+  function WSView(root, cfg) {
+    this.cfg = cfg; this.root = root; this.P = cfg.P; root.classList.add('w', 'pv', 'wsv');
+    this.baseSpeed = 650; this.t = 0;
+    const P = this.P;
+    this.sch = wsSchedule(P, cfg, cfg.sched); this.n = this.sch.T;
+    this.other = cfg.both ? wsSchedule(P, cfg, cfg.sched === 'seq' ? 'overlap' : 'seq') : null;
+    const nK = P.K / cfg.tk;
+    const head = el('div', 'w-head'); root.appendChild(head);
+    head.innerHTML = '<span class="chip B">1 core · ' + cfg.slots + ' weight set' + (cfg.slots > 1 ? 's' : '') + ' (slots) of ' + cfg.tk + '×' + cfg.tn + ' B · ws</span>' +
+      '<span class="chip">computes with one slot at a time</span><span class="chip">writing one block into a slot: ' + cfg.load + ' step' + (cfg.load > 1 ? 's' : '') + '</span>' +
+      '<span class="chip">' + (cfg.sched === 'seq' ? 'load, then compute' : 'loading overlapped with compute') + '</span>' +
+      (cfg.group === 'row' ? '<span class="chip">each row of A goes through ' + this.sch.g + ' slot' + (this.sch.g > 1 ? 's' : '') + ' in turn</span>' : '<span class="chip">all rows of A through one block, then the next</span>');
+    const top = el('div', 'pv-top'); root.appendChild(top);
+    this.tri = new Triple(P, { tm: P.M, tn: cfg.tn, tk: cfg.tk }, 'B blocks<br>' + cfg.tk + '×' + cfg.tn);
+    top.appendChild(this.tri.root);
+    const side = el('div', 'stack'); top.appendChild(side);
+    this.coreEl = el('div', 'wscore'); side.appendChild(this.coreEl);
+    this.portEl = el('div', 'ws-port'); side.appendChild(this.portEl);
+    side.appendChild(el('div', 'legend', '<span><i class="lg read"></i>read now</span><span><i class="lg stay"></i>slot computing</span><span><i class="lg load"></i>slot being written</span><span><i class="lg part"></i>partial</span><span><i class="lg fin"></i>finished</span>'));
+    root.appendChild(el('div', 'pv-lab', cfg.both ? 'Timeline, both ways (same scale)' : 'Timeline'));
+    this.tlEl = el('div', 'stack'); root.appendChild(this.tlEl);
+    const draw = (sch, anim) => {
+      const cols = Math.max(this.sch.T, this.other ? this.other.T : 0);
+      const lab = sch === this.sch ? (cfg.sched === 'seq' ? 'Load, then compute' : 'Overlapped') : (cfg.sched === 'seq' ? 'Overlapped' : 'Load, then compute');
+      const box = el('div', 'tl-box' + (anim ? ' anim' : ''));
+      box.appendChild(el('div', 'tl-title', '<b>' + lab + '</b> — done after <b>' + sch.T + '</b> steps' + (anim ? ' <span class="muted">(animated)</span>' : '')));
+      const wrap = el('div', 'gantt-wrap'); box.appendChild(wrap);
+      const g = gantt(cols, cols > 30 ? '1.4rem' : '1.9rem'); wrap.appendChild(g);
+      put(g, el('div', 'g-lab', 'step'), 1, 1);
+      for (let c = 0; c < cols; c++) put(g, el('div', 'g-num', String(c + 1)), 1, 2 + c);
+      put(g, el('div', 'g-lab', 'write port'), 2, 1); put(g, el('div', 'g-lab', 'compute'), 3, 1);
+      const bars = [];
+      sch.loads.forEach((l) => { const [kt, nt] = l.b.split(','); bars.push({ b: put(g, el('div', 'bar wld', '<span class="fill"></span><span class="bt">B' + kt + nt + '→s' + l.s + '</span>'), 2, 2 + l.start, l.end - l.start), s0: l.start, s1: l.end }); });
+      let x = 0;
+      while (x < sch.T) {
+        const c = sch.comps.find((q) => q.t === x);
+        if (!c) { let y = x; while (y < sch.T && !sch.comps.some((q) => q.t === y)) y++; bars.push({ b: put(g, el('div', 'bar wait', '<span class="fill"></span><span class="bt">wait</span>'), 3, 2 + x, y - x), s0: x, s1: y }); x = y; continue; }
+        let y = x, i1 = c.task.i;
+        while (y + 1 < sch.T) { const d = sch.comps.find((q) => q.t === y + 1); if (!d || d.task.b !== c.task.b) break; y++; i1 = d.task.i; }
+        const [kt, nt] = c.task.b.split(',');
+        bars.push({ b: put(g, el('div', 'bar wcp', '<span class="fill"></span><span class="bt">B' + kt + nt + ' r' + c.task.i + (i1 !== c.task.i ? '–' + i1 : '') + '</span>'), 3, 2 + x, y - x + 1), s0: x, s1: y + 1 });
+        x = y + 1;
+      }
+      if (sch.T < cols) put(g, el('div', 'g-end', '✓ ' + sch.T), 3, 2 + sch.T, cols - sch.T);
+      if (anim) { this.bars = bars; this.cursor = el('div', 'g-cursor'); this.cursor.style.gridRow = '1 / span 3'; g.appendChild(this.cursor); }
+      this.tlEl.appendChild(box);
+    };
+    const order = this.other ? (cfg.sched === 'seq' ? [[this.sch, true], [this.other, false]] : [[this.other, false], [this.sch, true]]) : [[this.sch, true]];
+    order.forEach(([s, a]) => draw(s, a));
+    this.cap = el('div', 'cap'); root.appendChild(this.cap);
+    const foot = el('div', 'w-foot'); root.appendChild(foot);
+    this.cnt = el('div', 'counters'); foot.appendChild(this.cnt);
+    const right = el('div', 'stack right'); right.append(this.controls(null), this.scrubber()); foot.appendChild(right);
+    this.keys(); this.go(0);
+  }
+  WSView.prototype.inner = function () { return this.step(); };
+  WSView.prototype.render = function () {
+    const P = this.P, cfg = this.cfg, sch = this.sch, now = this.t - 1;
+    const s = X.newAcc(P); let cur = null, done = 0;
+    sch.comps.forEach((c) => { if (c.t <= now) { applyTask(P, s, cfg, c.task); done++; if (c.t === now) cur = c; } });
+    const loadNow = sch.loads.find((l) => l.start <= now && now < l.end);
+    const slotSt = rng(cfg.slots).map((q) => {
+      const ls = sch.loads.filter((l) => l.s === q && l.start <= now); const ld = ls[ls.length - 1];
+      if (!ld) return { st: 'empty' };
+      if (now < ld.end) return { st: 'loading', ld, prog: (now - ld.start + 1) / (ld.end - ld.start) };
+      if (cur && cur.s === q) return { st: 'on', ld };
+      return { st: sch.last[ld.b] < done ? 'used' : 'ready', ld };
+    });
+    // matrices
+    const cA = {}, cB = {}, cC = {};
+    this.tri.B.clearBadges();
+    slotSt.forEach((q, n) => {
+      if (!q.ld) return;
+      const [kt, nt] = q.ld.b.split(',').map(Number);
+      if (q.st === 'used') return;
+      for (let a = 0; a < cfg.tk; a++) for (let b = 0; b < cfg.tn; b++) addCls(cB, key(kt * cfg.tk + a, nt * cfg.tn + b), q.st === 'on' ? 'read stay' : q.st === 'loading' ? 'sweep' : 'stayq');
+      this.tri.B.badge(kt * cfg.tk, nt * cfg.tn, cfg.tk, cfg.tn, 'slot ' + n + (q.st === 'loading' ? ' ←' : ''), 'tag' + (q.st === 'loading' ? ' ld' : ''));
+    });
+    if (cur) for (let k = cur.task.kt * cfg.tk; k < (cur.task.kt + 1) * cfg.tk; k++) addCls(cA, key(cur.task.i, k), 'read');
+    for (let i = 0; i < P.M; i++) for (let j = 0; j < P.N; j++) if (s.T[i][j]) addCls(cC, key(i, j), s.T[i][j] === P.K ? 'fin' : 'part');
+    if (cur) for (let j = cur.task.nt * cfg.tn; j < (cur.task.nt + 1) * cfg.tn; j++) addCls(cC, key(cur.task.i, j), 'write');
+    this.tri.A.paint(cA); this.tri.B.paint(cB); this.tri.C.paint(cC, (i, j) => (s.T[i][j] ? String(s.C[i][j]) : '·'));
+    this.tri.A.heads(cur ? [cur.task.i] : null, null);
+    // core diagram
+    const mini = (cells, cols) => { const m = el('div', 'mini'); m.style.gridTemplateColumns = 'repeat(' + cols + ', var(--cell))'; cells.forEach((c) => m.appendChild(c)); return m; };
+    const ce = this.coreEl; ce.innerHTML = '';
+    const inBox = el('div', 'ws-io'); inBox.appendChild(el('div', 'cb-l', cur ? 'row ' + cur.task.i + ' of A, k ' + cur.task.kt * cfg.tk + '–' + ((cur.task.kt + 1) * cfg.tk - 1) : 'row of A in'));
+    inBox.appendChild(mini(rng(cfg.tk).map((a) => el('div', 'cell k-A' + (cur ? ' read' : ''), cur ? String(P.A[cur.task.i][cur.task.kt * cfg.tk + a]) : '·')), cfg.tk));
+    const slotsBox = el('div', 'ws-slots');
+    slotSt.forEach((q, n) => {
+      const box = el('div', 'slot ' + q.st);
+      const [kt, nt] = q.ld ? q.ld.b.split(',').map(Number) : [0, 0];
+      const label = { empty: 'empty', loading: 'being written ' + Math.round(q.prog * 100) + '%', on: 'computing', ready: 'loaded, waiting', used: 'used up' }[q.st];
+      box.appendChild(el('div', 'slot-h', '<b>slot ' + n + '</b><span>' + (q.ld ? bname(kt, nt) : '') + '</span>'));
+      const rows = q.st === 'loading' ? Math.ceil(q.prog * cfg.tk) : cfg.tk;
+      box.appendChild(mini(rng(cfg.tk * cfg.tn).map((x) => { const a = Math.floor(x / cfg.tn), b = x % cfg.tn; const show = q.ld && q.st !== 'empty' && a < rows; return el('div', 'cell k-B' + (q.st === 'on' ? ' stay' : '') + (show ? '' : ' ghost'), show ? String(P.B[kt * cfg.tk + a][nt * cfg.tn + b]) : '·'); }), cfg.tn));
+      box.appendChild(el('div', 'slot-s', label));
+      slotsBox.appendChild(box);
+    });
+    const accBox = el('div', 'ws-io');
+    const accRow = cur ? cur.task.i : null, accCols = cur ? rng(cfg.tn).map((b) => cur.task.nt * cfg.tn + b) : [];
+    accBox.appendChild(el('div', 'cb-l', cur ? 'accumulator → C[' + accRow + ', ' + accCols[0] + '–' + accCols[accCols.length - 1] + ']' : 'accumulator'));
+    accBox.appendChild(mini(rng(cfg.tn).map((b) => { if (!cur) return el('div', 'cell k-C', '·'); const j = accCols[b]; return el('div', 'cell k-C ' + (s.T[accRow][j] === P.K ? 'fin' : 'part'), String(s.C[accRow][j])); }), cfg.tn));
+    ce.append(inBox, el('span', 'arrow', '→'), slotsBox, el('span', 'arrow', '→'), accBox);
+    this.portEl.innerHTML = loadNow ? '<span class="tb">write port:</span> memory → <b>' + bname.apply(null, loadNow.b.split(',')) + '</b> → slot ' + loadNow.s + ' <span class="muted">(' + (now - loadNow.start + 1) + '/' + (loadNow.end - loadNow.start) + ')</span>' : '<span class="muted">write port idle</span>';
+    // timeline
+    this.bars.forEach(({ b, s0, s1 }) => { const f = Math.max(0, Math.min(1, (this.t - s0) / (s1 - s0))); b.querySelector('.fill').style.width = (100 * f) + '%'; b.classList.toggle('now', now >= s0 && now < s1); });
+    this.cursor.style.gridColumn = String(2 + Math.max(0, now)); this.cursor.hidden = this.t === 0;
+    // caption
+    let cap;
+    if (this.t === 0) cap = cfg.group === 'row'
+      ? 'The slots will hold successive K-pieces of the <b>same</b> column of B. Each row of A goes through slot 0, then slot 1, adding into <b>one accumulator</b>: that row of C finishes right here.'
+      : 'The core can <b>store</b> ' + cfg.slots + ' block' + (cfg.slots > 1 ? 's' : '') + ' of B but computes with only one. Step to watch the write port (top timeline row) and the compute (bottom row).';
+    else if (cur) {
+      const b = bname(cur.task.kt, cur.task.nt);
+      cap = 'Row ' + cur.task.i + ' of A goes through <b>slot ' + cur.s + '</b> (' + b + '): ' + cfg.tk * cfg.tn + ' multiplies, ' + cfg.tn + ' results added into the accumulator.';
+      if (loadNow) cap += ' <b>At the same time</b> the write port fills slot ' + loadNow.s + ' with ' + bname.apply(null, loadNow.b.split(',')) + ': the loading is hidden.';
+      if (cfg.group === 'row' && cur.task.lastK) cap += ' That was the last K-piece: <b class="tc">C[' + cur.task.i + ', ' + accCols[0] + '–' + accCols[accCols.length - 1] + '] is finished</b>, with no additions between cores.';
+    } else if (loadNow) cap = (cfg.sched === 'seq' ? 'Load, then compute: ' : '') + '<b>Compute waits</b> — the block it needs is still being written into slot ' + loadNow.s + '.';
+    if (this.t === this.n) cap = 'Done after ' + this.n + ' steps' + (this.other ? ' (the other schedule takes ' + this.other.T + ')' : '') + '. ' + (X.eqRef(P, s.C) ? '<span class="ok">Check: C == A @ B ✓</span>' : '<span class="tsp">C differs ✗</span>');
+    this.cap.innerHTML = cap;
+    const loaded = sch.loads.filter((l) => l.end <= this.t).length;
+    this.cnt.innerHTML = counters([
+      { label: 'time step', value: this.t + '/' + this.n }, { label: 'multiplies', value: s.mul + '/' + P.M * P.N * P.K },
+      { label: 'additions over time', value: s.add + '/' + P.M * P.N * (P.K - 1) }, { label: 'additions across cores', value: 0, cls: 'csp' },
+      { label: 'partial now', value: s.part }, { label: 'most partial at once', value: s.maxPart },
+      { label: 'blocks written into slots', value: loaded + '/' + sch.blocks.length }, { label: 'compute busy', value: pct(sch.comps.filter((c) => c.t <= now).length, Math.max(1, this.t)) }
+    ]);
+  };
+  WSView.prototype.trace = function () {
+    const out = [], sch = this.sch;
+    for (let t = 0; t < Math.min(this.t, sch.T); t++) {
+      const c = sch.comps.find((q) => q.t === t), l = sch.loads.find((q) => q.start <= t && t < q.end);
+      out.push('t=' + String(t + 1).padStart(2) + ': ' + (c ? 'compute row ' + c.task.i + ' through slot ' + c.s + ' (' + bname.apply(null, c.task.b.split(',')) + ')' : 'compute WAITS') + (l ? ' | write port: ' + bname.apply(null, l.b.split(',')) + ' -> slot ' + l.s + ' (' + (t - l.start + 1) + '/' + (l.end - l.start) + ')' : ''));
+    }
+    return out;
+  };
+  mix(WSView.prototype);
+
+  // ---------------- deck wrapper with in-slide knobs ----------------
+  const KLAB = {
+    pieces: ['P (pieces of K)', null], cores: ['cores', null], load: ['steps to write a block', null], slots: ['weight sets (slots)', null],
+    sched: ['schedule', { seq: 'load, then compute', overlap: 'overlapped' }], group: ['order', { block: 'block by block', row: 'row through all slots' }]
+  };
+  function knobbed(View) {
+    function W(root, cfg) {
+      const P = X.problem(cfg.M || 4, cfg.N || 4, cfg.K || 4, 0);
+      const st = Object.assign({}, cfg);
+      root.classList.add('stack');
+      const knobs = el('div', 'pv-knobs'); root.appendChild(knobs);
+      const host = el('div'); root.appendChild(host);
+      const make = () => {
+        if (this.view) this.view.destroy();
+        host.innerHTML = ''; const d = el('div'); host.appendChild(d);
+        this.view = new View(d, Object.assign({}, st, { P }));
+        knobs.querySelectorAll('button').forEach((b) => b.setAttribute('aria-pressed', String(st[b.dataset.k]) === b.dataset.v ? 'true' : 'false'));
+      };
+      (cfg.knobs || []).forEach((kn) => {
+        const grp = el('div', 'seg'); grp.appendChild(el('span', 'seg-l', KLAB[kn.k][0]));
+        kn.v.forEach((v) => { const b = btn(KLAB[kn.k][1] ? KLAB[kn.k][1][v] : String(v), kn.k + ' ' + v, () => { st[kn.k] = v; make(); }); b.dataset.k = kn.k; b.dataset.v = String(v); grp.appendChild(b); });
+        knobs.appendChild(grp);
+      });
+      if (!(cfg.knobs || []).length) knobs.hidden = true;
+      make(); this.root = root;
+    }
+    ['step', 'back', 'inner', 'finish', 'reset', 'atEnd', 'atStart', 'play', 'stop'].forEach((m) => { W.prototype[m] = function () { return this.view[m].apply(this.view, arguments); }; });
+    return W;
+  }
+  X.TYPES.skm = knobbed(SplitKView);
+  X.TYPES.wsets = knobbed(WSView);
+  Object.assign(X, { splitkPlan, splitkState, SplitKView, wsSchedule, wsTasks, applyTask, WSView });
+})(typeof window !== 'undefined' ? window : globalThis);
+</script><script>
+(function () {
+  const slides = Array.from(document.querySelectorAll('.slide'));
+  MM.mountAll();
+  const secEl = document.getElementById('sec'), cntEl = document.getElementById('cnt'), prog = document.getElementById('prog');
+  slides.forEach((s, i) => { const d = document.createElement('i'); d.title = (i + 1) + ' · ' + s.dataset.sec; d.addEventListener('click', () => show(i)); prog.appendChild(d); });
+  let cur = 0;
+  const builds = (s) => Array.from(s.querySelectorAll('.b'));
+  const widget = (s) => { const n = s.querySelector('[data-widget]'); return n && n._widget && n._widget.step ? n._widget : null; };
+  function show(n, revealAll) {
+    n = Math.max(0, Math.min(slides.length - 1, n));
+    const w0 = widget(slides[cur]); if (w0) w0.stop();
+    cur = n;
+    slides.forEach((s, i) => s.classList.toggle('on', i === cur));
+    if (revealAll) builds(slides[cur]).forEach((b) => b.classList.add('shown'));
+    secEl.textContent = slides[cur].dataset.sec;
+    cntEl.textContent = (cur + 1) + ' / ' + slides.length;
+    Array.from(prog.children).forEach((d, i) => { d.className = i === cur ? 'cur' : i < cur ? 'done' : ''; });
+    document.querySelector('.stage').scrollTop = 0;
+    try { history.replaceState(null, '', '#s' + (cur + 1)); } catch (e) {}
+  }
+  function next() {
+    const s = slides[cur];
+    const hid = builds(s).find((b) => !b.classList.contains('shown'));
+    if (hid) { hid.classList.add('shown'); return; }
+    const w = widget(s);
+    if (w && !w.atEnd()) { w.stop(); w.step(); return; }
+    show(cur + 1);
+  }
+  function prev() {
+    const s = slides[cur];
+    const w = widget(s);
+    if (w && !w.atStart()) { w.stop(); w.back(); return; }
+    const shown = builds(s).filter((b) => b.classList.contains('shown'));
+    if (shown.length) { shown[shown.length - 1].classList.remove('shown'); return; }
+    show(cur - 1, true);
+  }
+  function inner() { const w = widget(slides[cur]); if (w && !w.atEnd()) { w.stop(); builds(slides[cur]).forEach((b) => b.classList.add('shown')); w.inner(); } else next(); }
+  document.getElementById('bprev').addEventListener('click', prev);
+  document.getElementById('bnext').addEventListener('click', next);
+  document.getElementById('bskip').addEventListener('click', () => show(cur + 1));
+  document.addEventListener('keydown', (e) => {
+    if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey) return;
+    const k = e.key, w = widget(slides[cur]);
+    let done = true;
+    if (k === 'ArrowRight' || k === ' ') next();
+    else if (k === 'ArrowLeft') prev();
+    else if (k === 'ArrowDown') inner();
+    else if (k === 'ArrowUp') { if (w) { w.stop(); w.reset(); } }
+    else if (k === 'PageDown' || k === 'n' || k === 'N') show(cur + 1);
+    else if (k === 'PageUp' || k === 'b' || k === 'B') show(cur - 1, true);
+    else if (k === 'Home') show(0);
+    else if (k === 'End') show(slides.length - 1, true);
+    else if ((k === 'p' || k === 'P') && w) w.play();
+    else if ((k === 'e' || k === 'E') && w) w.finish();
+    else if ((k === 'r' || k === 'R') && w) w.reset();
+    else done = false;
+    if (done) e.preventDefault();
+  });
+  const m = /^#s(\d+)$/.exec(location.hash);
+  show(m ? +m[1] - 1 : 0, !!m);
+})();
+</script>
+</body>
+</html>
