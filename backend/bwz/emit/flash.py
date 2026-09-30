@@ -169,6 +169,10 @@ def _docstring(
         "Rescaling O by exp(m - m') whenever the max moves is the whole trick: it makes",
         "the softmax exact without seeing a row's scores all at once.",
         "",
+        *_loop_map(plan, chosen),
+        "",
+        *_glossary(plan, chosen),
+        "",
         "Why this plan and not another: bwz costed every block size the chip can hold,",
         "each inner matmul under every dataflow the unit declares, with the same",
         "formula `bwz matmul` uses, and kept the fastest. What it beat:",
@@ -229,6 +233,107 @@ def _docstring(
     return out
 
 
+def _loop_map(plan: FlashPlan, chosen: FlashCandidate) -> list[str]:
+    """The whole kernel as one loop nest, each level named by the constant it runs to."""
+    qk = chosen.qk.chosen.stationarity.value
+    pv = chosen.pv.chosen.stationarity.value
+    return [
+        "The map — every loop below, and the constant that bounds it:",
+        "",
+        "    for wave in range(WAVES):                      walk(): lockstep, all units at once",
+        "      for core_id in range(USED_CORES):            one thread per modelled unit",
+        "        program = wave * USED_CORES + core_id      round-robin deal (D30)",
+        "        head, block = divmod(program, Q_BLOCKS)    which (batch, head), which Q rows",
+        "        Q_i = Q[block*BR : (block+1)*BR]           run_program(): Q_i stays on the unit",
+        "        for j in range(KV_BLOCKS):                 stream K_j, V_j: BC rows at a time",
+        f"          S  = Q_i · K_jᵀ                          matmul_{qk}(): [BR, HEAD_DIM] x "
+        "[HEAD_DIM, BC]",
+        "          online softmax on S                      vector unit: max, exp, sum, rescale",
+        f"          O += P · V_j                             matmul_{pv}(): [BR, BC] x "
+        "[BC, HEAD_DIM]",
+        "        O = O / l ; write O_i                      once per program",
+        "",
+        "  and inside each matmul_*() the array's own tile loops — ROWS x COLS instruction",
+        "  tiles, ordered by that function's stationarity (see its docstring).",
+    ]
+
+
+def _glossary(plan: FlashPlan, chosen: FlashCandidate) -> list[str]:
+    """Every parameter: its constant, the flag that sets it, what it means, this run's value."""
+    shape = plan.shape
+    qk = chosen.qk.chosen.stationarity.value
+    pv = chosen.pv.chosen.stationarity.value
+    formula = "chosen by the formula"
+    rows = [
+        ("BATCH", "-b/--batch", "independent sequences", f"{shape.batch}"),
+        ("HEADS", "--heads", "attention heads per sequence", f"{shape.heads}"),
+        ("Q_LEN", "-S/--seq", "query rows per head: the sequence length", f"{shape.q_len}"),
+        ("KV_LEN", "--kv-len", "key/value rows per head (default: Q_LEN)", f"{shape.kv_len}"),
+        (
+            "HEAD_DIM",
+            "--head-dim",
+            "d: one head's width, the contraction of Q·Kᵀ",
+            f"{shape.head_dim}",
+        ),
+        ("DTYPE", "-d/--dtype", "width of Q, K, V and O in DRAM", shape.dtype.value),
+        (
+            "BR",
+            "--br",
+            "Q rows one program owns on one unit",
+            f"{chosen.br} ({'pinned' if plan.requested_br is not None else formula})",
+        ),
+        (
+            "BC",
+            "--bc",
+            "K/V rows streamed past a program per step",
+            f"{chosen.bc} ({'pinned' if plan.requested_bc is not None else formula})",
+        ),
+        (
+            "QK_STATIONARITY",
+            "--stationarity",
+            "dataflow of S = Q·Kᵀ: which operand stays put",
+            f"{qk} ({'pinned' if chosen.qk.forced else formula})",
+        ),
+        (
+            "PV_STATIONARITY",
+            "--stationarity",
+            "dataflow of O += P·V",
+            f"{pv} ({'pinned' if chosen.pv.forced else formula})",
+        ),
+        (
+            "ROWS, COLS",
+            "the chip profile",
+            "one instruction tile of the array",
+            f"{plan.array_rows} x {plan.array_cols}",
+        ),
+        ("AVAILABLE_CORES", "the chip profile", "matrix units on the chip", f"{plan.units}"),
+        ("Q_BLOCKS", "derived", "ceil(Q_LEN / BR): programs per head", f"{chosen.q_blocks}"),
+        ("KV_BLOCKS", "derived", "ceil(KV_LEN / BC): steps per program", f"{chosen.kv_blocks}"),
+        ("PROGRAMS", "derived", "BATCH x HEADS x Q_BLOCKS", f"{chosen.programs}"),
+        ("USED_CORES", "derived", "min(AVAILABLE_CORES, PROGRAMS)", f"{chosen.used_cores}"),
+        ("WAVES", "derived", "ceil(PROGRAMS / USED_CORES)", f"{chosen.waves}"),
+    ]
+    out = [
+        "The parameters — the constant, the flag that sets it, what it means, this run:",
+        "",
+    ]
+    for name, flag, meaning, value in rows:
+        out.append(f"  {name:<16} {flag:<17} {meaning}")
+        out.append(f"  {'':<16} {'':<17} = {value}")
+    out += [
+        "",
+        "  Stationarity, for one [M,K] x [K,N] matmul on a ROWS x COLS array (D53):",
+        "    os  output-stationary: a block of the RESULT stays in the accumulator and all",
+        "        of K is swept through it — nothing is partial, nothing to sum afterwards",
+        "    ws  weight-stationary: a tile of the SECOND operand (Kᵀ, or V) stays put and",
+        "        the rows of the first stream past; K is cut into slices whose partials",
+        "        must be added — free in a periphery accumulator, else on the vector unit",
+        "    is  input-stationary: a tile of the FIRST operand (Q, or P) stays put and the",
+        "        columns of the second stream past; K is cut the same way",
+    ]
+    return out
+
+
 # ------------------------------------------------------------------------- constants
 
 
@@ -254,18 +359,26 @@ def _constants(
     pv = chosen.pv.chosen
     chip_unit = plan.unit_name
     out = [_rule("1. the shape")]
-    out += _constant(f"BATCH, HEADS = {shape.batch}, {shape.heads}", "from the command line")
+    out += _constant(f"BATCH, HEADS = {shape.batch}, {shape.heads}", "-b/--batch, --heads")
     out += _constant("HEADS_TOTAL = BATCH * HEADS", "every (batch, head) is independent")
-    out += _constant(f"Q_LEN, KV_LEN = {shape.q_len}, {shape.kv_len}", "query and key rows")
-    out += _constant(f"HEAD_DIM = {shape.head_dim}", "d: the contraction of Q·Kᵀ")
+    out += _constant(
+        f"Q_LEN, KV_LEN = {shape.q_len}, {shape.kv_len}",
+        "-S/--seq, --kv-len: query rows and key/value",
+        "rows per head",
+    )
+    out += _constant(
+        f"HEAD_DIM = {shape.head_dim}",
+        "--head-dim: d, one head's width — the",
+        "contraction of Q·Kᵀ",
+    )
     out += _constant("SCALE = 1.0 / math.sqrt(HEAD_DIM)", "softmax(Q·Kᵀ / sqrt(d))")
-    out += _constant(f'DTYPE = "{dtype.value}"', "Q, K, V and O in DRAM")
+    out += _constant(f'DTYPE = "{dtype.value}"', "-d/--dtype: Q, K, V and O in DRAM")
     out += _constant(
         f"DTYPE_BYTES = {bytes_per_element(dtype):g}", "what every DRAM byte count charges"
     )
     out += _constant(f'S_ACC_DTYPE = "{acc.value}"', "what Q·Kᵀ accumulates into")
     out += _constant('SOFTMAX_DTYPE = "fp32"', "S, P and O on the unit (see the header)")
-    out += _constant(f"SEED = {seed}")
+    out += _constant(f"SEED = {seed}", "fixes the random Q, K and V, so runs repeat")
     out += [""]
     out += [_rule("2. the chip")]
     out += _constant(
@@ -277,17 +390,27 @@ def _constants(
     out += _constant(f"AVAILABLE_CORES = {plan.units}", f"{chip_unit}: count")
     out += [""]
     out += [_rule("3. the plan bwz chose")]
-    out += _constant(f"BR = {chosen.br}", "query rows per program" + _pinned(plan.requested_br))
     out += _constant(
-        f"BC = {chosen.bc}", "key rows per streamed block" + _pinned(plan.requested_bc)
+        f"BR = {chosen.br}", "--br: Q rows one program owns on one unit", _pinned(plan.requested_br)
+    )
+    out += _constant(
+        f"BC = {chosen.bc}",
+        "--bc: K/V rows streamed past a program per step",
+        _pinned(plan.requested_bc),
     )
     out += _constant(
         f'QK_STATIONARITY = "{qk.stationarity.value}"',
         f"{QK}: {_TITLE.get(qk.stationarity, qk.stationarity.value)}",
+        "pinned with --stationarity"
+        if chosen.qk.forced
+        else "chosen by the formula; --stationarity pins it",
     )
     out += _constant(
         f'PV_STATIONARITY = "{pv.stationarity.value}"',
         f"{PV}: {_TITLE.get(pv.stationarity, pv.stationarity.value)}",
+        "pinned with --stationarity"
+        if chosen.pv.forced
+        else "chosen by the formula; --stationarity pins it",
     )
     out += _constant(
         f"QK_GROUP_SLICES = {groups[0]}",
@@ -300,7 +423,7 @@ def _constants(
     )
     out += _constant("Q_BLOCKS = math.ceil(Q_LEN / BR)", "programs per head")
     out += _constant("KV_BLOCKS = math.ceil(KV_LEN / BC)", "blocks each program streams")
-    out += _constant("PROGRAMS = HEADS_TOTAL * Q_BLOCKS")
+    out += _constant("PROGRAMS = HEADS_TOTAL * Q_BLOCKS", "one per (batch, head, Q block)")
     out += _constant(f"USED_CORES = {chosen.used_cores}", "min(AVAILABLE_CORES, PROGRAMS)")
     out += _constant(f"WAVES = {chosen.waves}", "ceil(PROGRAMS / USED_CORES), lockstep (D30)")
     out += _constant(f"TOLERANCE = {TOLERANCE:g}", "fp32 softmax against a float64 reference")
@@ -310,13 +433,34 @@ def _constants(
     out += ["PREDICTED = {"]
     for key, value in predicted.items():
         literal = f"{int(value)}" if float(value).is_integer() else repr(float(value))
-        out.append(f'    "{key}": {literal},')
+        out += _constant(f'    "{key}": {literal},', _MEANING[key])
     out += ["}"]
     return out
 
 
+_MEANING = {
+    "programs": "BATCH x HEADS x Q_BLOCKS, each run once",
+    "waves": "lockstep rounds of one program per unit",
+    "used_cores": "units that ever get a program",
+    "available_cores": "units the chip has",
+    "idle_core_waves": "unit-rounds with no program: WAVES x AVAILABLE - PROGRAMS",
+    "macs": "useful multiply-adds: 2 x heads x Q_LEN x KV_LEN x d",
+    "mac_slots": "MAC positions issued, tile padding included",
+    "staging_events": "K and V block fetches, one per (wave, head, block)",
+    "q_dram_bytes": "Q read once",
+    "k_dram_bytes": "K read once per wave its head spans",
+    "v_dram_bytes": "V, the same",
+    "o_dram_bytes": "O written once",
+    "scores": "entries of S computed: heads x Q_LEN x KV_LEN",
+    "rescaled": "O elements scaled by exp(m - m'), blocks 2 onward",
+    "normalised": "O elements divided by l at the end",
+    "inner_vector_adds": "k-slice partials summed on the vector unit",
+}
+"""What each prediction counts, written beside it in the emitted file."""
+
+
 def _pinned(requested: int | None) -> str:
-    return " — pinned with a flag" if requested is not None else " — chosen by the formula"
+    return "pinned with the flag" if requested is not None else "chosen by the formula"
 
 
 # ------------------------------------------------------------------------ the inner matmuls

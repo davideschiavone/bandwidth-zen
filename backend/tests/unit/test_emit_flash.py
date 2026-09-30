@@ -85,3 +85,23 @@ def test_an_infeasible_plan_has_nothing_to_emit() -> None:
     shape = FlashShape(batch=1, heads=1, q_len=512, kv_len=512, head_dim=64, dtype=DType.INT8)
     with pytest.raises(ValueError, match="no decomposition to emit"):
         emit_flash(chip, plan_flash(chip, shape), command="x", version="x")
+
+
+def test_the_header_maps_the_loops_and_names_every_flag() -> None:
+    """The file is read on its own, so it must say what every parameter means and
+    which flag sets it — not leave that to the command's --help."""
+    source = _program().source
+    header = source[: source.index("from __future__")]
+    assert "The map" in header
+    assert "for j in range(KV_BLOCKS)" in header
+    for flag in ("-S/--seq", "--kv-len", "--head-dim", "--heads", "-b/--batch", "--br", "--bc"):
+        assert flag in header, flag
+    for dataflow in ("os  output-stationary", "ws  weight-stationary", "is  input-stationary"):
+        assert dataflow in header
+
+
+def test_every_prediction_says_what_it_counts() -> None:
+    source = _program().source
+    block = source[source.index("PREDICTED = {") : source.index("\n}", source.index("PREDICTED"))]
+    for line in block.splitlines()[1:]:
+        assert "#" in line, line
