@@ -171,8 +171,8 @@ def test_split_k_emits_the_second_kernel() -> None:
     """Split-K is two kernels, and the emitted file has two (D53)."""
     plain, *_ = _emit("a100_80gb")
     split, *_ = _emit("a100_80gb", split_k=4)
-    assert "KERNEL 2" not in plain.source
-    assert "KERNEL 2" in split.source
+    assert "after the last wave: KERNEL 2" not in plain.source
+    assert "after the last wave: KERNEL 2" in split.source
     assert "dram.write_partial(part, m0, n0, acc)" in split.source
     assert split.predicted["partial_dram_bytes"] > 0
     assert plain.predicted["partial_dram_bytes"] == 0

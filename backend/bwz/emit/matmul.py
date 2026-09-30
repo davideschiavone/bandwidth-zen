@@ -523,6 +523,7 @@ def _constants(
         *_constant(
             f'STATIONARITY = "{grid.stationarity.value}"', *_stationarity_note(grid, dataflow, unit)
         ),
+        *_split_k_explained(grid),
         *_constant(f"SPLIT_K = {grid.k_partitions}", *_split_k_note(grid)),
         *_constant(f'A_STRATEGY = "{dataflow.a_strategy.value}"', *_a_strategy_note(dataflow)),
         *_constant(f"A_RESIDENCY_TILES = {dataflow.residency_tiles}", *_residency_note(dataflow)),
@@ -745,6 +746,47 @@ def _stationarity_note(
         f"{unit.name} declares it, or the run would have been",
         "refused rather than quietly given the chip's own (D53)",
     )
+
+
+def _split_k_explained(grid: TileGrid) -> list[str]:
+    """What split-K is, with this run's numbers — above the constant, not after it.
+
+    A trailing comment said "the contraction is cut that many ways", which is
+    true and teaches nothing: why anyone would, and what it costs, are the part
+    a reader forgets. So: the problem it solves, how, and the price (D53).
+    """
+    if grid.swept_dim is not Dim.K:
+        return [
+            f"# SPLIT_K: an output-stationary knob, and moot under {grid.stationarity.value},",
+            "# which already puts K on the tile grid (cutting it again is refused, D53).",
+        ]
+    blocks = grid.rows * grid.cols
+    p = grid.k_partitions
+    lines = [
+        "# SPLIT_K — cut each output block's K sweep into SPLIT_K pieces (os only, D53).",
+        "#   The problem: under os ONE core owns one output block of C and sweeps ALL of",
+        f"#   K inside it, so at most {blocks} cores (GRID_ROWS x GRID_COLS output blocks) can",
+        "#   ever work, however long K is. With few blocks, most of the chip idles.",
+        "#   The trick: make (output block, piece of K) the unit of work. Each piece",
+        "#   sweeps only its share of K (K_TILE_BOUNDS[part]), so there are SPLIT_K",
+        "#   times as many tiles to spread over the cores. Same MACs, just cut up.",
+        "#   The price: a piece ends with a PARTIAL block of C, not the answer. Every",
+        "#   piece writes its partial to DRAM (kernel 1); after the last wave a second",
+        "#   pass reads them back and adds them on the vector unit (KERNEL 2 in walk()):",
+        "#   (SPLIT_K - 1) x M x N additions and 2 x SPLIT_K x M x N values through DRAM.",
+        "#   So it buys occupancy with DRAM traffic and vector adds — CUTLASS's",
+        '#   "partitionedK GEMM, and batched reduction".',
+    ]
+    if p > 1:
+        lines.append(
+            f"#   Here: {blocks} blocks x {p} pieces = {grid.tiles:,} tiles, and"
+            f" {(p - 1) * grid.m * grid.n:,} additions afterwards."
+        )
+    else:
+        lines.append(
+            f"#   Here it is off (1): {blocks} tiles, K swept whole inside each, no reduction."
+        )
+    return lines
 
 
 def _split_k_note(grid: TileGrid) -> tuple[str, ...]:
