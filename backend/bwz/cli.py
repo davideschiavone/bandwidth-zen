@@ -1789,7 +1789,11 @@ def _attention_table(plan: FlashPlan, chosen: FlashCandidate) -> Table:
     table.add_row(
         "inner matmuls",
         f"{chosen.qk.chosen.stationarity.value} / {chosen.pv.chosen.stationarity.value}",
-        f"{QK} and {PV}, each the cheapest on one {plan.unit_name} (tables below)",
+        (
+            f"{QK} and {PV}, pinned by --stationarity (tables below)"
+            if chosen.qk.forced
+            else f"{QK} and {PV}, each the cheapest on one {plan.unit_name} (tables below)"
+        ),
     )
     table.add_row("Q read", format_bytes(chosen.q_bytes), "once")
     table.add_row(
