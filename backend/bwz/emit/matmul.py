@@ -622,25 +622,40 @@ def _deal_constants(
                 "grid row, so each core keeps its column",
             ),
         ]
+    g, chunks = dealt.k_groups, dealt.rounds
+    items = g * grid.cols
+    blocks = math.ceil(grid.rows / g)
     return [
+        "# How the split column is dealt (D69). Walk the grid in BLOCKS of K_GROUPS",
+        "# consecutive k-slices. One block holds one work item per (K-group, column)",
+        f"# pair: K_GROUPS x GRID_COLS = {g} x {grid.cols} = {items} item(s), and each item",
+        "# is one tile for one core. A wave gives each of the USED_CORES cores one",
+        "# item, so a block takes CHUNKS waves to get through. Item v always lands on",
+        "# core v % USED_CORES, which is what keeps a core on the SAME (group, column)",
+        "# in every block — the k-slices it sums locally.",
+        f"# Here: {grid.rows} k-slices / {g} per block = {blocks} block(s), and each block's",
+        f"# {items} item(s) on {used} core(s) = {chunks} wave(s) per block.",
         *_constant(
-            f"K_GROUPS = {dealt.k_groups}",
-            "cores sharing ONE output column's K (D69): each",
-            "sums its own group of k-slices in its periphery,",
-            f"so {dealt.k_groups} partials per output meet off-core",
+            f"K_GROUPS = {g}",
+            "cores sharing ONE output column's K: each sums",
+            "its own group of k-slices in its periphery, so",
+            f"{g} partials per output meet off-core (D69)",
         ),
         *_constant(
             f"USED_CORES = {used}",
-            "min(AVAILABLE_CORES, K_GROUPS * GRID_COLS)",
+            "min(AVAILABLE_CORES, K_GROUPS * GRID_COLS): cores",
+            "that ever get an item",
         ),
         *_constant(
-            f"CHUNKS = {dealt.rounds}",
-            "ceil(K_GROUPS * GRID_COLS / USED_CORES): waves per",
-            "block of K_GROUPS k-slices",
+            f"CHUNKS = {chunks}",
+            "waves one block needs: its K_GROUPS * GRID_COLS",
+            "items, USED_CORES at a time. 1 = every item of",
+            "the block runs in the same wave",
         ),
         *_constant(
             f"WAVES = {waves}",
-            "blocks x CHUNKS; the last block may be short",
+            "blocks x CHUNKS; a last, shorter block (fewer",
+            "k-slices left than K_GROUPS) may need fewer",
         ),
     ]
 
