@@ -196,9 +196,10 @@ These are known-good behaviours. If a change breaks one, the change is wrong.
   to `os` (D53) cut M=1 chip utilization on A100 from 6.24% to 4.52%, because the parallelism `ws`
   claimed only existed as 390 625 partial sums nothing was reducing. Lower is not automatically a
   regression — check what the tiles *were*.
-- FlashAttention changes bytes, never FLOPs. So does GQA, and so does a matmul's result width: an
-  `int8 x int8 -> int32` matmul does the same `2*M*N*K` as `int8 x int8 -> int8` and writes four
-  times the bytes.
+- FlashAttention changes bytes, never matrix FLOPs. So does GQA, and so does a matmul's result
+  width: an `int8 x int8 -> int32` matmul does the same `2*M*N*K` as `int8 x int8 -> int8` and
+  writes four times the bytes. (Flash's online softmax does add *vector* work — the rescale of `O`
+  on every kv block after the first — and `bwz attention` charges it, D70.)
 - A mixed-width matmul runs at the **wider** operand — both enter the array through one datapath.
   `fp16 x int8` is 312 TOP/s on A100, not 624. (The transformer path still uses the older
   weight-dtype rule and is wrong for W8A16; see `docs/CORRECTIONS.md` D18.)

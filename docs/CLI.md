@@ -872,6 +872,139 @@ never a placeholder.
 
 ---
 
+## 3a. `bwz attention` — the encoder's attention as FlashAttention-2
+
+One attention call, `O = softmax(Q Kᵀ / √d) V` for every (batch, head), bidirectional. The formula
+chooses the plan: every block size the chip can hold is costed, each inner matmul under every
+dataflow its unit declares, by the same formula `bwz matmul` uses (`docs/MODEL.md` §6.9, D70).
+
+| Flag | Meaning |
+|---|---|
+| `-c`, `--chip` | chip profile id or path (required) |
+| `-S`, `--seq` | query rows per head (required) |
+| `--kv-len` | key/value rows per head (default `--seq`) |
+| `--head-dim` | `d`, one head's width (required) |
+| `--heads`, `-b`/`--batch` | default 1 each |
+| `-d`, `--dtype` | width of Q, K, V and O (default `fp16`) |
+| `--br`, `--bc` | pin a block size instead of letting the formula choose; a multiple of the array tile |
+| `--stationarity` | pin both inner matmuls to one dataflow; refused, not clamped, if the unit lacks it |
+| `--top` | candidates listed beside the chosen one (default 8) |
+| `--emit`, `--emit-stdout`, `--out` | as for `matmul` (§2.6) |
+| `--ideal`, `--quiet` | as for `matmul` |
+
+### 3a.1 A shape small enough to count by hand
+
+```bash
+uv run bwz attention -c a100_80gb -S 64 --head-dim 16 --heads 2 --br 16 --bc 32 --ideal
+```
+
+```
+  quantity                value   derivation
+ ────────────────────────────────────────────────────────────────────────────────────────────
+  operations            524 kOP   4 x 2 heads x 64 x 64 x 16 — Q·Kᵀ and P·V
+  programs                    8   2 heads x ceil(64 / Br=16) — one per unit
+  waves                       1   ceil(8 / 8 units), lockstep; occupancy 1.9% of 432 tensor_core
+  kv blocks                   2   ceil(64 / Bc=32) streamed past every program
+  inner matmuls         os / os   S = Q·Kᵀ and O += P·V, each the cheapest on one tensor_core (tables below)
+  Q read                 4.1 kB   once
+  K and V read          8.19 kB   2 head-streams for 2 heads — once per wave a head's programs span
+  O written              4.1 kB   once
+  on chip               37.9 kB   worst wave, K/V double buffered, of 60.7 MB
+  vector work          45.1 kOP   8,192 scores x 5 + 2,048 rescaled + 2,048 normalised
+  t_matrix              90.8 ns   sum over waves of one program's inner matmuls on one tensor_core
+  t_vector               125 ns   softmax + rescale + normalise at cuda_core's share, 45.1 GOP/s per program
+  t_compute              216 ns   t_matrix + t_vector — serial (FA2)
+  t_dram                8.04 ns   16.4 kB / 2.04 TB/s
+  t_fixed                   0 s   one kernel dispatch
+  latency                216 ns   max(t_dram, t_compute) + t_fixed
+  verdict         COMPUTE_BOUND
+  utilisation             0.78%   2.43 TOP/s of 312 TOP/s effective
+```
+
+Every line is checkable: each inner matmul is `2·16·32·16 = 16 384` OP at `256 x 1.41 GHz x 2 =
+722 GOP/s` per tensor core, 22.7 ns, two per block, two blocks: 90.8 ns. The vector work per program
+is `5·16·64 + 16·16 + 16·16 = 5632` OP at the CUDA cores' share, `6912 x 1.41 GHz x 2 / 432 = 45.1
+GOP/s`: 125 ns. `tests/unit/test_flash.py` pins every one of these.
+
+### 3a.2 The formula's choice, and what it beat
+
+```bash
+uv run bwz attention -c a100_80gb -S 4096 --head-dim 128 --heads 32 --ideal --top 5
+```
+
+```
+                         S = Q·Kᵀ: [16,128] x [128,1024] on one tensor_core
+
+  dataflow     grid   shape util   t_matrix   reduction                                           t
+ ───────────────────────────────────────────────────────────────────────────────────────────────────
+  os ←       1 x 64       100.0%    5.81 µs   none — K swept inside the tile                5.81 µs
+  ws         8 x 64       100.0%    5.81 µs   8 partials/output, 114,688 adds, overlapped   5.81 µs
+  is          1 x 8       100.0%    5.81 µs   8 partials/output, 114,688 adds, overlapped   5.81 µs
+
+                            Every block size costed, fastest first
+
+  Br     Bc   waves   occup.   K+V read   t_compute    t_dram   latency   vs chosen   on chip
+ ─────────────────────────────────────────────────────────────────────────────────────────────
+  16   1024      19    99.8%     103 MB     1.02 ms   83.3 µs   1.02 ms      chosen   36.8 MB
+  16    512      19    99.8%     103 MB     1.03 ms   83.3 µs   1.03 ms       +0.3%   21.1 MB
+  16    256      19    99.8%     103 MB     1.03 ms   83.3 µs   1.03 ms       +1.0%   13.2 MB
+  16    128      19    99.8%     103 MB     1.05 ms   83.3 µs   1.05 ms       +2.4%    9.3 MB
+  16     64      19    99.8%     103 MB     1.08 ms   83.3 µs   1.08 ms       +5.1%   7.33 MB
+```
+
+`ws` and `is` tie `os` on time — their partial adds hide under the matrix work (D62) — and the tie
+goes to `os`, the tensor core's own. What separates the block sizes is the vector unit: a bigger
+`Bc` means fewer blocks and so fewer rescales of `O`. The on-chip column is why `Bc` stops
+growing — and it is generous, because it counts every level above DRAM (the drawer says a real
+kernel's registers cap `Bc` far lower).
+
+The same command on Metis (`-c metis_aipu -d int8`) picks `Br=512, Bc=4096, ws/ws` and lands at
+**11.1%** against A100's **86.0%**: `d = 128` fills a quarter of the 512-deep crossbar, and
+`t_vector` (6.59 ms, the DPU's softmax) exceeds `t_matrix` (5.25 ms). `-c chip_a` is refused — it
+has no unit that can run an exp.
+
+### 3a.3 `--emit` — the plan as a program
+
+```bash
+uv run bwz attention -c a100_80gb -S 50 --head-dim 32 --heads 2 --br 16 --bc 16 \
+    --stationarity ws --emit-stdout | python -
+```
+
+```
+quantity                      predicted              measured  status
+-----------------------------------------------------------------------
+programs                              8                     8  OK
+waves                                 1                     1  OK
+used_cores                            8                     8  OK
+available_cores                     432                   432  OK
+idle_core_waves                     424                   424  OK
+macs                            320,000               320,000  OK
+mac_slots                       524,288               524,288  OK
+staging_events                       16                    16  OK
+q_dram_bytes                      6,400                 6,400  OK
+k_dram_bytes                      6,400                 6,400  OK
+v_dram_bytes                      6,400                 6,400  OK
+o_dram_bytes                      6,400                 6,400  OK
+scores                            5,000                 5,000  OK
+rescaled                          9,600                 9,600  OK
+normalised                        3,200                 3,200  OK
+inner_vector_adds                 5,000                 5,000  OK
+
+periphery adds   0   summed where they were made: free, and not charged
+numerics: max |O - softmax(QKᵀ/√d)V| = 3.55655e-08   (tolerance 0.001)
+
+every count matches the plan, and O == softmax(Q Kᵀ / sqrt(d)) V.
+```
+
+The file's header lists what the plan beat and every inner dataflow it weighed; `run_program()` is
+the online softmax written out, rescale included; `matmul_ws()` walks `S = Q·Kᵀ` and `O += P·V` with
+the K tile resident, and every k-slice beyond the first is an `inner_vector_adds` count. 5 000 here
+is one per score: `d = 32` is two k-slices of 16 in `S = Q·Kᵀ`, so each score owes one add (D62),
+while `P·V`'s contraction is `Bc = 16`, one slice, and owes none. `--emit` writes the
+same file to `--out` as `flash-<chip>-<dtype>-br<Br>-bc<Bc>-<qk>-<pv>.py`.
+
+---
+
 ## 4. `bwz run` — a network on a chip
 
 | Flag | Meaning |
@@ -1167,4 +1300,6 @@ cd backend && uv run pytest tests/unit/test_pipeline.py::test_double_buffering_h
 | split-K trades DRAM traffic for wave occupancy | §2.5.1 | `docs/MODEL.md` §6.1, `docs/CORRECTIONS.md` D53 |
 | 436/186 TOP/s achieved, 2.34x inverted | §6.1 | `docs/CORRECTIONS.md` D35, D37 |
 | the emitted program's tier-1 counts | §2.6 | `docs/MODEL.md` §6.8, `docs/CORRECTIONS.md` D54 |
+| FlashAttention's plan is the formula's argmin, and what it beat | §3a.2 | `docs/MODEL.md` §6.9, `docs/CORRECTIONS.md` D70 |
+| identical attention: 86.0% on A100, 11.1% on Metis | §3a.2 | `docs/MODEL.md` §6.9 |
 | B fetched 756 MB against 12 MB compulsory and 0 charged | §2.6 | `docs/MODEL.md` §6.2, `docs/CORRECTIONS.md` D54 |

@@ -25,6 +25,16 @@ from bwz.analysis import (
 )
 from bwz.analysis.compare import head_to_head, prefill_crossover
 from bwz.analysis.dataflow import plan_dataflow
+from bwz.analysis.flash import (
+    PV,
+    QK,
+    FlashCandidate,
+    FlashPlan,
+    FlashShape,
+    InnerChoice,
+    plan_flash,
+    versus_chosen,
+)
 from bwz.analysis.pipeline import Lane, PipelineTrace, Stage, build_trace, grid_of
 from bwz.analysis.roofline import MachineModel, compute_dtype
 from bwz.analysis.stationarity import (
@@ -37,6 +47,8 @@ from bwz.analysis.stationarity import (
 )
 from bwz.emit import check as emit_check
 from bwz.emit import decomposition_suffix, emit_matmul
+from bwz.emit.flash import check as emit_flash_check
+from bwz.emit.flash import emit_flash
 from bwz.figures import (
     Panel,
     build_matmul,
@@ -1585,6 +1597,342 @@ def _shape_table(spec: TransformerSpec, deployment: DeploymentSpec) -> Table:
     )
     table.add_row("final norm", f"{p.norm_params_per_layer() // 2:,}", "")
     table.add_row("[bold]total[/bold]", f"[bold]{spec.parameter_count():,}[/bold]", "")
+    return table
+
+
+@app.command()
+def attention(
+    chip: str = typer.Option(
+        ..., "--chip", "-c", help="Chip profile id or path", rich_help_panel=PANEL_SHAPE
+    ),
+    seq: int = typer.Option(
+        ...,
+        "--seq",
+        "-S",
+        help="Query rows per head (the sequence length)",
+        rich_help_panel=PANEL_SHAPE,
+    ),
+    kv_len: int | None = typer.Option(
+        None,
+        "--kv-len",
+        help="Key/value rows per head (default: --seq)",
+        rich_help_panel=PANEL_SHAPE,
+    ),
+    head_dim: int = typer.Option(
+        ..., "--head-dim", help="d: the width of one head", rich_help_panel=PANEL_SHAPE
+    ),
+    heads: int = typer.Option(1, "--heads", help="Heads", rich_help_panel=PANEL_SHAPE),
+    batch: int = typer.Option(1, "--batch", "-b", rich_help_panel=PANEL_SHAPE),
+    dtype: DType = typer.Option(
+        DType.FP16, "--dtype", "-d", help="Width of Q, K, V and O", rich_help_panel=PANEL_PRECISION
+    ),
+    br: int | None = typer.Option(
+        None,
+        "--br",
+        help="Pin the query block (rows per program) instead of letting the formula choose. "
+        "A multiple of the array's tile",
+        rich_help_panel=PANEL_DATAFLOW,
+    ),
+    bc: int | None = typer.Option(
+        None,
+        "--bc",
+        help="Pin the key/value block (rows per streamed block). A multiple of the array's tile",
+        rich_help_panel=PANEL_DATAFLOW,
+    ),
+    stationarity: Dataflow | None = typer.Option(
+        None,
+        "--stationarity",
+        help="Pin BOTH inner matmuls to one dataflow instead of letting the formula choose "
+        "each. Refused, not clamped, if the unit does not declare it (D53)",
+        rich_help_panel=PANEL_DATAFLOW,
+    ),
+    ideal: bool = typer.Option(
+        False,
+        "--ideal",
+        help="Zero every unfitted calibration constant — both efficiencies and the "
+        "per-dispatch overhead: a hardware ceiling, not a prediction",
+        rich_help_panel=PANEL_OUTPUT,
+    ),
+    top: int = typer.Option(
+        8, "--top", help="Candidates to list beside the chosen one", rich_help_panel=PANEL_OUTPUT
+    ),
+    quiet: bool = typer.Option(
+        False,
+        "--quiet",
+        "-q",
+        help="Suppress the report; the `wrote …` lines still print",
+        rich_help_panel=PANEL_OUTPUT,
+    ),
+    emit: bool = typer.Option(
+        False,
+        "--emit",
+        help="Write the chosen plan out as a RUNNABLE Python program: same blocks, same "
+        "waves, each inner matmul walked under its chosen stationarity, the online softmax "
+        "written out — counting what it moves and asserting it against this report (D70)",
+        rich_help_panel=PANEL_OUTPUT,
+    ),
+    emit_stdout: bool = typer.Option(
+        False,
+        "--emit-stdout",
+        help="Print that program to stdout instead, and nothing else — so "
+        "`bwz attention ... --emit-stdout | python -` runs it",
+        rich_help_panel=PANEL_OUTPUT,
+    ),
+    out: Path = typer.Option(
+        Path("."), "--out", help="Directory --emit writes to", rich_help_panel=PANEL_OUTPUT
+    ),
+) -> None:
+    """One attention call as FlashAttention-2: the formula picks the blocks and each
+    inner matmul's dataflow, and says what it beat.
+
+    O = softmax(Q Kᵀ / sqrt(d)) V for every (batch, head), bidirectional. Every
+    block size the chip can hold is costed — each inner matmul under every
+    dataflow the unit declares, by the same formula `bwz matmul` uses — and the
+    fastest is kept (docs/MODEL.md §6.9, D70).
+    """
+    console.quiet = quiet or emit_stdout
+    try:
+        hardware = load_chip(chip)
+    except SpecLoadError as exc:
+        console.quiet = False
+        console.print(f"[red]bwz:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+    shape = FlashShape(
+        batch=batch,
+        heads=heads,
+        q_len=seq,
+        kv_len=kv_len if kv_len is not None else seq,
+        head_dim=head_dim,
+        dtype=dtype,
+    )
+    plan = plan_flash(hardware, shape, br=br, bc=bc, stationarity=stationarity, ideal=ideal)
+    chosen = plan.chosen
+    if chosen is None:
+        console.quiet = False
+        console.print("[red]Infeasible.[/red]")
+        for reason in plan.infeasibility:
+            console.print(f"  • {reason}")
+        raise typer.Exit(code=2)
+
+    if emit_stdout:
+        program = emit_flash(
+            idealised(hardware) if ideal else hardware,
+            plan,
+            command=_command(),
+            version=bwz.__version__,
+        )
+        emit_flash_check(program)
+        print(program.source, end="")
+        return
+
+    console.print(_attention_table(plan, chosen))
+    for choice in (chosen.qk, chosen.pv):
+        console.print(_inner_table(plan, choice))
+    console.print(_candidates_table(plan, chosen, top))
+
+    console.print(f"\n[bold]Assumptions[/bold] ({len(plan.assumptions)})")
+    for assumption in plan.assumptions:
+        console.print(f"  • {assumption}", highlight=False)
+
+    if emit:
+        program = emit_flash(
+            idealised(hardware) if ideal else hardware,
+            plan,
+            command=_command(),
+            version=bwz.__version__,
+        )
+        emit_flash_check(program)
+        destination = out / program.filename
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(program.source, encoding="utf-8")
+        _wrote(destination)
+        print(f"  run it: python {destination}")
+
+
+def _attention_table(plan: FlashPlan, chosen: FlashCandidate) -> Table:
+    """The chosen plan as the formula's own terms, each with its derivation."""
+    shape = plan.shape
+    d = shape.head_dim
+    table = Table(
+        title=(
+            f"O = softmax(Q Kᵀ / √{d}) V   batch {shape.batch} x {shape.heads} heads, "
+            f"Q {shape.q_len}x{d}, K/V {shape.kv_len}x{d}, {shape.dtype.value}"
+            f"\non {plan.chip_name} — FlashAttention-2, Br={chosen.br}, Bc={chosen.bc}"
+        ),
+        box=box.SIMPLE,
+    )
+    table.add_column("quantity")
+    table.add_column("value", justify="right")
+    table.add_column("derivation")
+    operations = 2.0 * shape.macs
+    table.add_row(
+        "operations",
+        format_quantity(operations, "OP"),
+        f"4 x {shape.heads_total} heads x {shape.q_len} x {shape.kv_len} x {d} — Q·Kᵀ and P·V",
+    )
+    table.add_row(
+        "programs",
+        f"{chosen.programs:,}",
+        f"{shape.heads_total} heads x ceil({shape.q_len} / Br={chosen.br}) — one per unit",
+    )
+    table.add_row(
+        "waves",
+        f"{chosen.waves:,}",
+        f"ceil({chosen.programs:,} / {chosen.used_cores:,} units), lockstep; occupancy "
+        f"{chosen.occupancy:.1%} of {plan.units:,} {plan.unit_name}",
+    )
+    table.add_row(
+        "kv blocks",
+        f"{chosen.kv_blocks:,}",
+        f"ceil({shape.kv_len} / Bc={chosen.bc}) streamed past every program",
+    )
+    table.add_row(
+        "inner matmuls",
+        f"{chosen.qk.chosen.stationarity.value} / {chosen.pv.chosen.stationarity.value}",
+        f"{QK} and {PV}, each the cheapest on one {plan.unit_name} (tables below)",
+    )
+    table.add_row("Q read", format_bytes(chosen.q_bytes), "once")
+    table.add_row(
+        "K and V read",
+        format_bytes(chosen.k_bytes + chosen.v_bytes),
+        f"{chosen.kv_streams:,} head-streams for {shape.heads_total} heads — once per wave "
+        f"a head's programs span",
+    )
+    table.add_row("O written", format_bytes(chosen.o_bytes), "once")
+    table.add_row(
+        "on chip",
+        format_bytes(chosen.working_set_bytes),
+        f"worst wave, K/V {'double' if chosen.double_buffered else 'single'} buffered, of "
+        f"{format_bytes(plan.on_chip_capacity_bytes)}",
+    )
+    table.add_row(
+        "vector work",
+        format_quantity(chosen.vector_ops, "OP"),
+        f"{chosen.scores:,} scores x 5 + {chosen.rescaled:,} rescaled + {chosen.normalised:,} "
+        f"normalised"
+        + (f" + {chosen.inner_vector_adds:,} partial adds" if chosen.inner_vector_adds else ""),
+    )
+    table.add_row(
+        "t_matrix",
+        format_time(chosen.t_matrix_s),
+        f"sum over waves of one program's inner matmuls on one {plan.unit_name}",
+    )
+    table.add_row(
+        "t_vector",
+        format_time(chosen.t_vector_s),
+        f"softmax + rescale + normalise at {plan.vector_unit_name}'s share, "
+        f"{format_quantity(plan.per_unit_vector_flops_per_s, 'OP/s')} per program",
+    )
+    table.add_row(
+        "t_compute", format_time(chosen.t_compute_s), "t_matrix + t_vector — serial (FA2)"
+    )
+    table.add_row(
+        "t_dram",
+        format_time(chosen.t_dram_s),
+        f"{format_bytes(chosen.dram_bytes)} / {format_bandwidth(plan.bandwidth_bytes_per_s)}",
+    )
+    table.add_row("t_fixed", format_time(chosen.t_fixed_s), "one kernel dispatch")
+    table.add_row(
+        "[bold]latency[/bold]",
+        f"[bold]{format_time(chosen.latency_s)}[/bold]",
+        "max(t_dram, t_compute) + t_fixed"
+        if chosen.double_buffered
+        else "t_dram + t_compute + t_fixed — no room to double buffer",
+    )
+    table.add_row("[bold]verdict[/bold]", _colour_bound(chosen.bound), "")
+    peak = plan.per_unit_matrix_flops_per_s * plan.units
+    achieved = operations / chosen.latency_s if chosen.latency_s > 0 else 0.0
+    table.add_row(
+        "utilisation",
+        f"{achieved / peak:.2%}" if peak > 0 else "—",
+        f"{format_quantity(achieved, 'OP/s')} of {format_quantity(peak, 'OP/s')} effective",
+    )
+    return table
+
+
+def _inner_table(plan: FlashPlan, choice: InnerChoice) -> Table:
+    """Why an inner matmul runs the dataflow it does: every alternative, costed."""
+    first = choice.chosen
+    table = Table(
+        title=(
+            f"{choice.name}: [{first.m},{first.k}] x [{first.k},{first.n}] on one "
+            f"{plan.unit_name}" + (" — pinned by --stationarity" if choice.forced else "")
+        ),
+        box=box.SIMPLE,
+    )
+    for column in ("dataflow", "grid", "shape util", "t_matrix", "reduction", "t"):
+        table.add_column(column, justify="left" if column in ("dataflow", "reduction") else "right")
+    table.caption = (
+        f"t = max(t_matrix, reduction) — the adds overlap the matrix work (D62). "
+        f"Ties go to {plan.unit_name}'s own dataflow, then to the one that cuts K least"
+    )
+    for cost in choice.alternatives:
+        reduction = (
+            f"{cost.partials} partials/output, {cost.vector_adds:,} adds, overlapped"
+            if cost.vector_adds
+            else (
+                f"{cost.k_slices} slices, summed in the periphery — free"
+                if cost.placement is ReductionPlacement.LOCAL
+                else (
+                    "none — K swept inside the tile"
+                    if cost.stationarity is Dataflow.OUTPUT_STATIONARY
+                    else "none — K is a single slice"
+                )
+            )
+        )
+        mark = " ←" if cost is first else ""
+        table.add_row(
+            f"{cost.stationarity.value}{mark}",
+            f"{cost.grid_rows} x {cost.grid_cols}",
+            f"{cost.utilisation:.1%}",
+            format_time(cost.t_matrix_s),
+            reduction,
+            format_time(cost.t_s),
+        )
+    return table
+
+
+def _candidates_table(plan: FlashPlan, chosen: FlashCandidate, top: int) -> Table:
+    """What the chosen block size beat, and what did not fit."""
+    table = Table(title="Every block size costed, fastest first", box=box.SIMPLE)
+    for column in (
+        "Br",
+        "Bc",
+        "waves",
+        "occup.",
+        "K+V read",
+        "t_compute",
+        "t_dram",
+        "latency",
+        "vs chosen",
+        "on chip",
+    ):
+        table.add_column(column, justify="right")
+    shown = list(plan.candidates[: max(1, top)])
+    if chosen not in shown:
+        shown.append(chosen)
+    for candidate in shown:
+        versus = (
+            "chosen"
+            if candidate is chosen
+            else ("does not fit" if not candidate.fits else versus_chosen(candidate, chosen))
+        )
+        table.add_row(
+            str(candidate.br),
+            str(candidate.bc),
+            f"{candidate.waves:,}",
+            f"{candidate.occupancy:.1%}",
+            format_bytes(candidate.k_bytes + candidate.v_bytes),
+            format_time(candidate.t_compute_s),
+            format_time(candidate.t_dram_s),
+            format_time(candidate.latency_s),
+            versus,
+            format_bytes(candidate.working_set_bytes),
+        )
+    hidden = len(plan.candidates) - len(shown)
+    table.caption = "ties go to less DRAM traffic, then less vector work, then the bigger block" + (
+        f"; {hidden} more not shown, --top N lists more" if hidden > 0 else ""
+    )
     return table
 
 

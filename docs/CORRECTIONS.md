@@ -3411,3 +3411,58 @@ model's mapping, and the drawer says so. A convolution spread across MMA units (
 charged no reduction: a gap older than D69, recorded here rather than closed, since closing it moves
 every GPU CNN figure.
 
+
+## D70 — FlashAttention as a decomposition the formula chooses, and a program that runs it (2026-09-30)
+
+### What was missing
+
+`bwz matmul` shows how one GEMM maps onto a chip — the grid, the deal, the reduction — and `--emit`
+makes that mapping a program that checks itself (D54). Attention had nothing comparable. The
+operator (`operators/attention.py`) prices FlashAttention as the score matrix *not* crossing DRAM,
+and that is all: no blocks, no programs, no inner dataflow, no online softmax, and so nothing to
+learn about why the same attention runs at 86% of peak on one chip and 11% on another.
+
+### The change
+
+`analysis/flash.py` models FlashAttention-2 as programs — one `(batch, head, Br-row block)` each,
+pinned to one matrix unit, dealt round-robin in lockstep waves (D30) — whose two inner matmuls,
+`S = Q·Kᵀ` and `O += P·V`, are costed by the lone-matmul formula on one unit: shape padding (D52)
+and the reduction their stationarity owes (D62), with no occupancy term. The online softmax is
+charged to the vector unit's per-unit share. K and V are staged chip-wide per wave, D33's rule, so a
+head straddling a wave boundary is read once per wave it touches.
+
+**The formula chooses the plan.** `Br`, `Bc` and each inner matmul's dataflow are searched, every
+candidate is costed, and the fastest that fits on chip is kept — all candidates are returned, so
+`bwz attention` shows what the choice beat and by how much, and each inner matmul's table shows
+every dataflow the unit declares with its reduction. `--br`, `--bc` and `--stationarity` pin
+instead of search; an undeclared stationarity is refused (D53), as is a chip with no vector unit to
+run the exp (D62's rule — chip_a).
+
+`emit/flash.py` writes the chosen plan as a runnable program on the same `_harness.py` runtime,
+extended with generic tile primitives (transpose, row max/sum, a shifted exp, row scaling), a named
+`Ledger` and a counted `DramTensor`. It asserts sixteen counts against the plan and checks `O`
+against the textbook softmax in float64.
+
+### A rule refined, not broken
+
+CLAUDE.md says FlashAttention changes bytes, never FLOPs. That holds for the matrix engine — every
+plan issues exactly `2·Sq·Skv·d` MACs per head, and the tests pin it. It does not hold for the
+vector unit: each kv block after a program's first rescales `O` by `exp(m − m')`, `Br·d` more
+operations per block, and the divide moves from the scores onto `O`. This is small on A100 and not
+small on Metis, whose DPU is already the bottleneck, so it is charged and the rule is reworded.
+
+### What it does not do
+
+- It is a probe, like `bwz matmul`: `encoder-layer` and `run` still cost attention through the
+  operator. Wiring the planned cost into the graph (a Report change: schema, TS types, snapshots)
+  is the next step.
+- No causal mask, no vanilla-attention comparison, no flash-decoding (split over `kv_len`, the
+  attention form of K-groups, D69). All three are named follow-ups.
+- Capacity is judged against every on-chip level together, as residency is everywhere in v1. A real
+  kernel's `S` and `O` live in registers and shared memory, which caps `Bc` far below what this
+  allows; the drawer says so.
+- Softmax within a program is serial with the matmuls (FA2). FlashAttention-3's overlap is not
+  modelled.
+- On an in-memory array (Metis) every K and V block must be written into the banks as the
+  stationary operand. That write is capacity-modelled only — it needs the on-chip bandwidth term v1
+  lacks (D5a, D30) — and the drawer says so.

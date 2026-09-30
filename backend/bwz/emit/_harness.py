@@ -129,6 +129,7 @@ HOST_DTYPE: dict[str, str] = {
     "int8": "int8",
     "int4": "int8",
     "int32": "int32",
+    "fp64": "float64",
 }
 """How a modelled dtype is *held on the host*. **Not** the modelled width: every
 byte count in an emitted program comes from the width constants at the top of
@@ -213,6 +214,97 @@ def add_into(acc: Tile, block: Tile) -> None:
     for acc_row, block_row in zip(acc, block, strict=True):
         for index, value in enumerate(block_row):
             acc_row[index] += value
+
+
+def transpose(tile: Tile) -> Tile:
+    """``tile`` with rows and columns swapped. A view, not a copy, and no bytes move:
+    which way an array reads an operand is a layout choice, not an operation."""
+    if NUMPY is not None:
+        return tile.T
+    return [list(column) for column in zip(*tile, strict=True)] if tile else []
+
+
+def as_dtype(tile: Tile, dtype: str) -> Tile:
+    """A copy of *tile* held at *dtype*'s host representation."""
+    if NUMPY is not None:
+        return tile.astype(HOST_DTYPE[dtype])
+    cast: Callable[[Any], Any] = int if is_integer_dtype(dtype) else float
+    return [[cast(value) for value in row] for row in tile]
+
+
+def put_block(target: Tile, r0: int, c0: int, block: Tile) -> None:
+    """``target[r0:, c0:] = block``, in place — a block written back where it came from."""
+    rows, cols = shape_of(block)
+    if NUMPY is not None:
+        target[r0 : r0 + rows, c0 : c0 + cols] = block
+        return
+    for i in range(rows):
+        target[r0 + i][c0 : c0 + cols] = list(block[i])
+
+
+def add_block(target: Tile, r0: int, c0: int, block: Tile) -> None:
+    """``target[r0:, c0:] += block``, in place — one partial meeting its accumulator."""
+    rows, cols = shape_of(block)
+    if NUMPY is not None:
+        target[r0 : r0 + rows, c0 : c0 + cols] += block
+        return
+    for i in range(rows):
+        row = target[r0 + i]
+        for j in range(cols):
+            row[c0 + j] += block[i][j]
+
+
+def row_max(tile: Tile) -> list[float]:
+    """The largest element of every row."""
+    if NUMPY is not None:
+        return [float(value) for value in tile.max(axis=1)]
+    return [float(max(row)) for row in tile]
+
+
+def row_sum(tile: Tile) -> list[float]:
+    """The sum of every row."""
+    if NUMPY is not None:
+        return [float(value) for value in tile.sum(axis=1, dtype="float64")]
+    return [float(sum(row)) for row in tile]
+
+
+def exp_shifted(tile: Tile, shift: Sequence[float], dtype: str) -> Tile:
+    """``exp(tile[i, j] - shift[i])``, held at *dtype*. Subtracting each row's own
+    shift before the exponential is what keeps a softmax from overflowing."""
+    if NUMPY is not None:
+        column = NUMPY.asarray(shift, dtype="float64")[:, None]
+        return NUMPY.exp(tile.astype("float64") - column).astype(HOST_DTYPE[dtype])
+    return [[math.exp(value - s) for value in row] for row, s in zip(tile, shift, strict=True)]
+
+
+def scale_all(tile: Tile, factor: float) -> None:
+    """``tile *= factor``, in place."""
+    if NUMPY is not None:
+        tile *= factor
+        return
+    for row in tile:
+        for j, value in enumerate(row):
+            row[j] = value * factor
+
+
+def scale_rows(tile: Tile, factors: Sequence[float]) -> None:
+    """``tile[i, :] *= factors[i]``, in place."""
+    if NUMPY is not None:
+        tile *= NUMPY.asarray(factors, dtype=tile.dtype)[:, None]
+        return
+    for row, factor in zip(tile, factors, strict=True):
+        for j, value in enumerate(row):
+            row[j] = value * factor
+
+
+def divide_rows(tile: Tile, divisors: Sequence[float]) -> None:
+    """``tile[i, :] /= divisors[i]``, in place."""
+    if NUMPY is not None:
+        tile /= NUMPY.asarray(divisors, dtype=tile.dtype)[:, None]
+        return
+    for row, divisor in zip(tile, divisors, strict=True):
+        for j, value in enumerate(row):
+            row[j] = value / divisor
 
 
 def mma(acc: Tile, a: Tile, b: Tile, counters: Counters, slots: int) -> None:
@@ -523,7 +615,7 @@ class Scratchpad:
                 self._bands[key] = band
                 self._counters.count_staging_event()
                 if DEBUG:
-                    log(f"  stage A for key {key} -- crosses DRAM, once per key (D33)")
+                    log(f"  stage {key} -- crosses DRAM, once per key (D33)")
             return band
 
 
@@ -615,6 +707,53 @@ class Partials:
             for c0 in range(0, n, self.tile_cols):
                 r1, c1 = min(r0 + self.tile_rows, m), min(c0 + self.tile_cols, n)
                 dram.write_c(r0, c0, sub(self.acc, r0, r1, c0, c1))
+
+
+class Ledger:
+    """Named counts beyond :class:`Counters`' fixed fields — bytes per tensor, vector
+    operations by kind. Measured, never copied from the prediction, like every
+    count here."""
+
+    def __init__(self) -> None:
+        self._counts: dict[str, float] = {}
+        self._lock = threading.Lock()
+
+    def add(self, name: str, amount: float) -> None:
+        with self._lock:
+            self._counts[name] = self._counts.get(name, 0) + amount
+
+    def __getitem__(self, name: str) -> float:
+        return self._counts.get(name, 0)
+
+
+class DramTensor:
+    """A tensor in off-chip memory, one 2-D block per index, every access counted.
+
+    The generalisation of :class:`Dram` to any number of named tensors: a
+    program with more operands than A, B and C (attention has Q, K, V and O)
+    counts each under ``"<name>_dram_bytes"`` in a :class:`Ledger`, at the
+    width the model charges rather than the host's.
+    """
+
+    def __init__(
+        self, name: str, blocks: list[Tile], bytes_per_element: float, ledger: Ledger
+    ) -> None:
+        self.name = name
+        self.blocks = blocks
+        self.bytes_per_element = bytes_per_element
+        self.ledger = ledger
+
+    def read(self, index: int, r0: int, r1: int, c0: int, c1: int) -> Tile:
+        """``blocks[index][r0:r1, c0:c1]``, charged at this tensor's width."""
+        elements = max(0, r1 - r0) * max(0, c1 - c0)
+        self.ledger.add(f"{self.name}_dram_bytes", elements * self.bytes_per_element)
+        return sub(self.blocks[index], r0, r1, c0, c1)
+
+    def write(self, index: int, r0: int, c0: int, block: Tile) -> None:
+        """Store *block* at ``blocks[index][r0:, c0:]``, charged at this tensor's width."""
+        rows, cols = shape_of(block)
+        self.ledger.add(f"{self.name}_dram_bytes", rows * cols * self.bytes_per_element)
+        put_block(self.blocks[index], r0, c0, block)
 
 
 def run_cores(

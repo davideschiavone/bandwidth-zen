@@ -863,3 +863,74 @@ rate. It validates counts, not time; its wall clock has no relationship to the p
 carries the same animated stage tags — `load_a`, `load_b`, `exec`, `store`, `reduce` — so the
 `--animate` code pane highlights *statements that perform the transfer* rather than a paraphrase of
 one. `deploy.py` keeps only the sequence listing a graph gets, where there is no tile grid to walk.
+
+### 6.9 FlashAttention as a decomposition (`analysis/flash.py`, D70)
+
+The attention operator (§3) prices FlashAttention as a byte count: the score matrix is not
+materialised, and that is the whole difference it models. `bwz attention` prices it the way
+`bwz matmul` prices a GEMM — as work dealt to the chip's units — and **chooses** the plan by
+running that formula over every plan the chip can hold.
+
+**The decomposition.** Per `(batch, head)`, the query rows are cut into `Br`-row blocks. Each block
+is one **program**, pinned to one matrix unit: it keeps `Q_i` and its `O` accumulator there and
+streams every `Bc`-row block of K and V past them (Dao 2023, FlashAttention-2, Algorithm 1):
+
+```
+for j in kv blocks:
+    S  = Q_i K_jᵀ / √d          inner matmul 1   M=Br  N=Bc  K=d
+    m' = max(m, rowmax S)
+    P  = exp(S − m')
+    l  = exp(m − m')·l + rowsum P
+    O  = exp(m − m')·O + P V_j   inner matmul 2   M=Br  N=d   K=Bc
+    m  = m'
+O = O / l
+```
+
+**The cost.** Each inner matmul is the lone-matmul formula (§6.1, §6.3) on **one** unit — shape
+padding against the array (D52) and the reduction its stationarity owes if it cuts K (D62), with no
+occupancy term, because the program owns its unit:
+
+```
+t_inner   = max( 2·M·N·K / (rate/units · U_shape) ,  (p − 1)·M·N / (vector_rate/units) )
+t_program = Σ_j [ t_inner(QK) + 5·Br·Bc / (vector_rate/units) + t_inner(PV) ]
+            + (kv_blocks − 1)·Br·d / (vector_rate/units)          the rescale
+            + Br·d / (vector_rate/units)                            the normalise
+programs  = B·H·ceil(Sq/Br),   waves = ceil(programs / units)     round-robin, lockstep (D30)
+t_compute = Σ_waves  t_program(slowest in the wave)
+t_dram    = [ 2·B·H·Sq·d  +  2·kv_streams·Skv·d ] · bytes / bw
+kv_streams = Σ_heads (waves that head's programs span)
+latency   = max(t_dram, t_compute) + t_fixed                     K/V double buffered
+```
+
+`5` per score is `calibration.SOFTMAX_FLOPS_PER_SCORE` — scale, max, subtract, exp, sum; the divide
+moves off the scores onto `O`. **The matrix work is exactly `2·Sq·Skv·d` MACs per head under every
+plan; the rescale is the vector work FlashAttention adds.** CLAUDE.md's "FlashAttention changes
+bytes, never FLOPs" holds for the matrix engine and not for the vector unit — D70.
+
+`kv_streams` is D33's staging applied to K and V: programs of one head that run in the same wave
+share one fetch of each block. A head whose programs straddle a wave boundary is read once per wave
+it touches — on A100's 432 units a 4096-token head fits one wave and is read once; on Metis's 4
+cores, 3 heads of 3 programs each read K and V 5 times, not 3.
+
+**The choice.** `Br` and `Bc` range over `tile · 2^i` up to the first that covers the sequence;
+each inner matmul takes every dataflow the unit declares. Each inner matmul's dataflow is the
+cheapest on its own (ties to the unit's native one, then the one that cuts K least); each `(Br, Bc)`
+is then costed whole, and the fastest that fits on chip wins — ties, at 6 significant figures, going
+to less DRAM traffic. Every candidate is returned, so the report can show what the choice beat.
+
+| case (`--ideal`) | chosen | t_matrix | t_vector | t_dram | util |
+|---|---|---|---|---|---|
+| A100 fp16, 32 heads, S=4096, d=128 | Br=16, Bc=1024, `os`/`os` | 883 µs | 141 µs | 83.3 µs | **86.0%** |
+| Metis int8, the same shape | Br=512, Bc=4096, `ws`/`ws` | 5.25 ms | **6.59 ms** | 2.95 ms | **11.1%** |
+
+Identical arithmetic, opposite stories. On A100 the tensor cores bind and the softmax is 14% on top.
+On Metis `d = 128` fills a quarter of the 512-deep crossbar, and the DPU's softmax outweighs the
+matrix work: the lever there is the vector unit, not the array. `chip_a`, with no vector unit at
+all, is refused — the exp and max would land on an array that only multiplies (D62).
+
+**The emitted program.** `bwz attention --emit` writes the chosen plan as a runnable file
+(`emit/flash.py`): the programs dealt in waves, each inner matmul walked tile by tile under its
+chosen stationarity, the online softmax written out in `run_program()`. It asserts programs, waves,
+idle unit-waves, MACs, MAC slots, K/V staging events, the bytes of Q, K, V and O, scores, rescales,
+normalisations and inner partial adds against the plan, and checks `O` against the textbook
+`softmax(Q Kᵀ/√d) V` computed all at once in float64.
