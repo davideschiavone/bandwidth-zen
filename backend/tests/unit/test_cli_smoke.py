@@ -426,3 +426,54 @@ def test_emit_stdout_prints_the_program_and_nothing_else() -> None:
     assert result.exit_code == 0, result.output
     assert result.output.startswith("#!/usr/bin/env python3")
     assert result.output.rstrip().endswith("raise SystemExit(main())")
+
+
+def test_attention_draws_its_timeline(tmp_path: Path) -> None:
+    """``bwz attention --timeline`` writes the page named for the plan (D71)."""
+    result = runner.invoke(
+        app,
+        [
+            "attention",
+            "-c",
+            "a100_80gb",
+            "-S",
+            "64",
+            "--head-dim",
+            "16",
+            "--heads",
+            "2",
+            "--br",
+            "16",
+            "--bc",
+            "16",
+            "--timeline",
+            "--out",
+            str(tmp_path),
+            "-q",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert (tmp_path / "timeline-a100_80gb-flash-S64-d16-h2-br16-bc16-fp16.html").exists()
+
+
+def test_attention_compares_two_chips_on_one_page(tmp_path: Path) -> None:
+    result = runner.invoke(
+        app,
+        [
+            "attention",
+            "-c",
+            "a100_80gb",
+            "-S",
+            "64",
+            "--head-dim",
+            "16",
+            "--timeline",
+            "--compare-with",
+            "h100_sxm",
+            "--out",
+            str(tmp_path),
+            "-q",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert (tmp_path / "timeline-compare-a100_80gb-vs-h100_sxm-flash-S64-d16-h1-fp16.html").exists()

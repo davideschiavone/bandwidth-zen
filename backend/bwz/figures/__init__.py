@@ -24,6 +24,7 @@ from __future__ import annotations
 from bwz.figures.timeline import (
     Panel,
     Workload,
+    build_flash,
     build_matmul,
     build_phases,
     shared_dtype,
@@ -34,6 +35,7 @@ from bwz.figures.timeline import (
 __all__ = [
     "Panel",
     "Workload",
+    "build_flash",
     "build_matmul",
     "build_phases",
     "shared_dtype",

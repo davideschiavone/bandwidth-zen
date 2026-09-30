@@ -53,6 +53,7 @@ from pathlib import Path
 import bwz
 from bwz.analysis import idealised, machine_model
 from bwz.analysis.dataflow import DataflowPlan, plan_dataflow
+from bwz.analysis.flash import FlashPlan, flash_trace
 from bwz.analysis.pipeline import Lane, PipelineTrace, Span, Stage, build_trace, grid_of
 from bwz.analysis.roofline import MATRIX_OP_TYPES, MachineModel, compute_dtype
 from bwz.analysis.stationarity import Dim, TileGrid, residency_phrase
@@ -61,6 +62,7 @@ from bwz.deploy import check as check_deployment
 from bwz.deploy import deployment_of
 from bwz.emit import EmittedProgram, emit_matmul
 from bwz.emit import check as check_program
+from bwz.emit.flash import FlashProgram
 from bwz.explain import Explanation, explain_graph
 from bwz.figures.dataflow_html import render as render_animation
 from bwz.figures.timeline_html import Box, render
@@ -117,6 +119,41 @@ class Workload:
     ``Report``, grid and ``DataflowPlan`` the timeline is drawn from — a program
     walking a different decomposition than the picture beside it would be worse
     than no program at all."""
+    flash_program: FlashProgram | None = None
+    """The runnable FlashAttention program for this plan (D70/D71), shown in the
+    page's program section the way a matmul's is."""
+    operand_names: tuple[str, str, str] = ("B", "A", "C")
+    """What the DRAM row calls the operand staged with ``Stage.LOAD``, the one
+    with ``Stage.LOAD_A``, and the result. A matmul's B, A and C; attention's
+    K/V, Q and O (D71)."""
+    banner: str = ""
+    """The decomposition sentence above the rows, when it is not a tile grid the
+    page can describe itself — FlashAttention's blocks and waves (D71)."""
+    legend: str = ""
+    """The DRAM-row legend, when the matmul one (operand B, operand A, tile
+    addresses) would describe operands this workload does not have."""
+    program_intro: str = ""
+    """What the program section says about the program, likewise."""
+    unit_noun: str = "tile"
+    """What one piece of work handed to a matrix unit is called — a tile of a
+    matmul's grid, or a FlashAttention program."""
+    vector_units_used: int | None = None
+    """Vector lanes this workload engages, when it is not the whole unit: a
+    FlashAttention program gets its unit's share of the vector unit, so eight
+    programs on A100 engage 8 x 6912/432 = 128 CUDA cores, not 6912 (D70)."""
+
+    @property
+    def achieved_flops_per_s(self) -> float:
+        """From the REPORTED latency, never the drawn span (D35)."""
+        if self.phase is not None:
+            return self.phase.achieved_flops_per_s
+        return self.flops / self.latency_s if self.latency_s > 0 else 0.0
+
+    def utilization(self, peak_flops_per_s: float) -> float:
+        """Achieved over the effective peak; the phase's own figure when there is one."""
+        if self.phase is not None:
+            return self.phase.utilization
+        return self.achieved_flops_per_s / peak_flops_per_s if peak_flops_per_s > 0 else 0.0
 
 
 @dataclass(frozen=True)
@@ -221,8 +258,9 @@ def rows_for(panel: Panel) -> list[Row]:
             # same 0.5% whether one array worked or all 432 half-worked (D30).
             used = min(panel.work.units_used or unit.count, unit.count)
             idle = unit.count - used
+            noun = panel.work.unit_noun
             why = (
-                f" · the grid has {used} tile{'s' if used != 1 else ''} at its widest, so "
+                f" · the grid has {used} {noun}{'s' if used != 1 else ''} at its widest, so "
                 f"{idle} of these arrays never start (D30)"
                 if idle > 0
                 else " · every array gets a tile"
@@ -241,16 +279,21 @@ def rows_for(panel: Panel) -> list[Row]:
             # on their own silicon (D27/D28/D62). How much of that unit runs them
             # is not modelled: the cost is charged at the whole unit's rate, so
             # the row says all of it is engaged and says that it assumed so.
+            share = panel.work.vector_units_used
+            engaged = unit.count if share is None else min(share, unit.count)
             rows.append(
                 Row(
                     unit.name,
-                    _used_of(unit.count if vector_busy else 0, unit.count, geometry),
+                    _used_of(engaged if vector_busy else 0, unit.count, geometry),
                     Lane.VECTOR,
-                    f"norms, activations, reductions — {rate}"
+                    f"softmax, norms, activations, reductions — {rate}"
                     + (
-                        " · charged at the whole unit's rate, so all of it is assumed engaged"
-                        if vector_busy
-                        else " · no vector work in this graph"
+                        " · no vector work in this graph"
+                        if not vector_busy
+                        else " · charged at the whole unit's rate, so all of it is assumed engaged"
+                        if share is None
+                        else f" · each program gets 1/{machine.unit.count} of it, so "
+                        f"{engaged:,} are engaged (D70)"
                     ),
                 )
             )
@@ -300,8 +343,6 @@ def panel_rows(panels: list[Panel]) -> list[Row]:
     for index, panel in enumerate(panels):
         if banded:
             machine = machine_model(panel.chip, panel.dtype)
-            phase = panel.work.phase
-            assert phase is not None, "every workload this script builds carries its phase"
             rows.append(
                 Row(
                     panel.chip.name,
@@ -331,8 +372,8 @@ def panel_rows(panels: list[Panel]) -> list[Row]:
                         # apart so the two are never read as the same claim).
                         f"{format_time(panel.work.trace.reported_latency_s)} · "
                         f"{panel.work.bound.value.replace('_', ' ').lower()}\n"
-                        f"{format_quantity(phase.achieved_flops_per_s, 'OP/s')} achieved · "
-                        f"{phase.utilization:.0%} of peak"
+                        f"{format_quantity(panel.work.achieved_flops_per_s, 'OP/s')} achieved · "
+                        f"{panel.work.utilization(machine.effective_flops_per_s):.0%} of peak"
                     ),
                     colour=CHIP_COLOURS[index % len(CHIP_COLOURS)],
                 )
@@ -374,8 +415,7 @@ def _boxes(panels: list[Panel]) -> list[Box]:
     out: list[Box] = []
     for panel in panels:
         trace, chip, dtype = panel.work.trace, panel.chip, panel.dtype
-        phase = panel.work.phase
-        assert phase is not None, "every workload this script builds carries its phase"
+        loaded, streamed, result = panel.work.operand_names
         totals, busy, concurrency = trace.totals, trace.busy_s, trace.concurrency
         span = trace.total_s or 1.0
         machine = machine_model(chip, dtype)
@@ -405,9 +445,9 @@ def _boxes(panels: list[Panel]) -> list[Box]:
                 # the same letter, so "LOAD B 0 B · A 512 B" read as an imperative
                 # ("load B") followed by an unparseable "0 B · A". The equals sign
                 # is what makes it a label.
-                f"LOAD B={format_bytes(trace.operand_bytes[0])} · "
-                f"A={format_bytes(trace.operand_bytes[1])}\n"
-                f"STORE C={format_bytes(trace.direction_bytes[1])} · {rate} while active\n"
+                f"LOAD {loaded}={format_bytes(trace.operand_bytes[0])} · "
+                f"{streamed}={format_bytes(trace.operand_bytes[1])}\n"
+                f"STORE {result}={format_bytes(trace.direction_bytes[1])} · {rate} while active\n"
                 f"{format_time(busy[Lane.DRAM])} — {busy[Lane.DRAM] / span:.0%} of the span",
                 band=band,
             ),
@@ -432,8 +472,8 @@ def _boxes(panels: list[Panel]) -> list[Box]:
                 # / busy` — the rate while the array specifically was busy, which
                 # can exceed the achieved figure whenever the array is not the
                 # whole critical path. Keeping both, labelled apart, is the point.
-                f"{format_quantity(phase.achieved_flops_per_s, 'OP/s')} achieved · "
-                f"{phase.utilization:.0%} of peak\n"
+                f"{format_quantity(panel.work.achieved_flops_per_s, 'OP/s')} achieved · "
+                f"{panel.work.utilization(machine.effective_flops_per_s):.0%} of peak\n"
                 f"array {format_quantity(totals[Lane.CORE], 'OP')} @ "
                 f"{format_quantity(core_rate, 'OP/s')} while busy, of "
                 f"{format_quantity(peak, 'OP/s')}\n"
@@ -590,6 +630,14 @@ def _programs(panels: list[Panel]) -> list[dict[str, str]]:
         }
         for panel in panels
         if panel.work.program is not None
+    ] + [
+        {
+            "title": f"{panel.chip.name} — {panel.dtype.value} — FlashAttention-2",
+            "filename": panel.work.flash_program.filename,
+            "source": panel.work.flash_program.source,
+        }
+        for panel in panels
+        if panel.work.flash_program is not None
     ]
 
 
@@ -609,6 +657,9 @@ def _stationarity_banner(panels: list[Panel]) -> str:
     # The FIRST span carrying a grid, not the first span: span 0 is the kernel
     # dispatch, which has no tile to address, so reading its grid returned None
     # and this banner silently never appeared on a matmul page at all.
+    own = {panel.work.banner for panel in panels if panel.work.banner}
+    if own:
+        return own.pop() if len(own) == 1 else ""
     grids = {
         next((span.grid for span in panel.work.trace.spans if span.grid is not None), None)
         for panel in panels
@@ -702,7 +753,9 @@ def write_timeline(panels: list[Panel], command: str, out: Path) -> None:
                 "detail": row.detail,
                 "note": row.note,
                 "lane": row.lane.value if row.lane else None,
-                "quantity": _quantity(row, panels[row.panel].work.trace),
+                "quantity": _quantity(
+                    row, panels[row.panel].work.trace, panels[row.panel].work.operand_names
+                ),
                 "panel": row.panel,
                 "header": row.header,
                 "colour": row.colour,
@@ -737,6 +790,7 @@ def write_timeline(panels: list[Panel], command: str, out: Path) -> None:
         deployments=_deployments(panels),
         programs=_programs(panels),
         total_s=total,
+        **_page_text(panels),
         hint=(
             " Rows are banded by chip and the time axis is <b>shared and absolute</b>, so a bar "
             "twice as long took twice as long."
@@ -746,6 +800,22 @@ def write_timeline(panels: list[Panel], command: str, out: Path) -> None:
     )
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(page, encoding="utf-8")
+
+
+def _page_text(panels: list[Panel]) -> dict[str, str]:
+    """The legend and program introduction, when every panel's workload supplies its own.
+
+    Left to the page's matmul defaults otherwise, so a matmul or network page is
+    unchanged byte for byte.
+    """
+    out: dict[str, str] = {}
+    legends = {panel.work.legend for panel in panels}
+    intros = {panel.work.program_intro for panel in panels}
+    if len(legends) == 1 and (legend := legends.pop()):
+        out["legend"] = legend
+    if len(intros) == 1 and (intro := intros.pop()):
+        out["program_intro"] = intro
+    return out
 
 
 def _tile_segments(tile_start: int, tile_end: int, grid_cols: int) -> list[tuple[int, int, int]]:
@@ -880,6 +950,17 @@ def _tip(span: Span) -> str:
     when = f"{format_time(span.start_s)} + {format_time(span.duration_s)}"
     idx = _index_notation(span)
     idx_line = f"\n{idx}" if idx else ""
+    if span.lane is Lane.DRAM and span.op_type == "attention":
+        kind = {
+            Stage.LOAD_A: "LOAD — Q, the rows this wave's programs keep on their units",
+            Stage.LOAD: "STAGE — a K and V block, fetched once and shared by every program "
+            "of the head in this wave (D33)",
+            Stage.STORE: "STORE — O, after the last kv block",
+        }.get(span.stage, "LOAD")
+        return (
+            f"{kind}\n{span.label}\n{when}\n"
+            f"{format_bytes(span.bytes_moved)} @ {format_bandwidth(span.rate_bytes_per_s)}"
+        )
     if span.lane is Lane.DRAM:
         # "band" rather than "k-slice": what one A staging event covers follows
         # the grid, and is a slice of K only under weight-stationary (D53).
@@ -1097,7 +1178,7 @@ def write_animation(panel: Panel, command: str, out: Path) -> None:
     out.write_text(page, encoding="utf-8")
 
 
-def _quantity(row: Row, trace: PipelineTrace) -> str:
+def _quantity(row: Row, trace: PipelineTrace, names: tuple[str, str, str] = ("B", "A", "C")) -> str:
     """What went through this resource. The part an instruction-centric view
     cannot give: a row means nothing for a comparison until it carries a number."""
     if row.quantity:
@@ -1111,8 +1192,8 @@ def _quantity(row: Row, trace: PipelineTrace) -> str:
         weights, activations = trace.operand_bytes
         return (
             f"{format_bytes(totals[Lane.DRAM])} @ {format_bandwidth(rate)}\n"
-            f"LOAD B={format_bytes(weights)} · A={format_bytes(activations)}\n"
-            f"STORE C={format_bytes(writes)}"
+            f"LOAD {names[0]}={format_bytes(weights)} · {names[1]}={format_bytes(activations)}\n"
+            f"STORE {names[2]}={format_bytes(writes)}"
         )
     if row.lane is Lane.SRAM:
         mean, peak = concurrency[Lane.SRAM]
@@ -1176,6 +1257,20 @@ def _subtitle(panels: list[Panel]) -> str:
 
 
 def _trace_subtitle(trace: PipelineTrace) -> str:
+    if trace.kind == "blocks":
+        drawn = (
+            f"{trace.steps} steps drawn, coalesced from {trace.tiles} (wave, kv block) steps — "
+            f"each merged step draws its array and vector work as one bar apiece. "
+            if trace.coalesced
+            else f"{trace.steps} (wave, kv block) steps. "
+        )
+        buffering = (
+            f"K/V double buffered — the reported latency omits {format_time(trace.fill_drain_s)} "
+            f"of pipeline fill/drain."
+            if trace.double_buffered
+            else "No room for a second K/V buffer: loads and arithmetic alternate."
+        )
+        return f"Span {format_time(trace.total_s)}. {drawn}{buffering}"
     steps = (
         f"{trace.steps} steps drawn, coalesced from {trace.tiles} "
         f"{'operations' if trace.kind == 'operations' else 'tiles'}. "
@@ -1409,3 +1504,75 @@ def _common_dtypes(chips: list[HardwareSpec]) -> str:
         *({d for u in c.compute_units for d in u.supported_dtypes} for c in chips)
     )
     return ", ".join(sorted(d.value for d in shared))
+
+
+FLASH_LEGEND = (
+    "Each step is one kv block of one lockstep wave. On the DRAM row, hatched bars are "
+    "<b>Q</b> (read once, on a wave&rsquo;s first block), solid bars are a <b>K and V</b> block "
+    "(fetched once per wave and shared by every program of the head, D33), and hollow bars are "
+    "<b>O</b> written back after the last block. On the array row each step draws two bars, "
+    "<b>S = Q&middot;K&#7488;</b> then <b>O += P&middot;V</b>; the vector row between them is "
+    "the online softmax &mdash; max, exp, sum, and from the second block on the rescale of O. "
+    "Grey rows are declared by the chip and unused by this model."
+)
+"""The DRAM-row legend a FlashAttention page carries (D71)."""
+
+FLASH_PROGRAM_INTRO = (
+    "The plan above as a program you can run, edit and break: the same programs dealt to "
+    "units in the same waves, each inner matmul walked tile by tile under the stationarity "
+    "the plan chose, the online softmax written out in <code>run_program()</code>. It counts "
+    "what it moves and the vector work it does, checks those counts against this page&rsquo;s "
+    "own numbers, and checks O against softmax(Q&middot;K&#7488;/&radic;d)&middot;V computed "
+    "all at once. It validates <b>counts, not time</b>. Save it with <code>--emit</code>."
+)
+"""What the program section says about an emitted FlashAttention program (D71)."""
+
+
+def build_flash(
+    chip: HardwareSpec,
+    plan: FlashPlan,
+    *,
+    steps: int,
+    program: FlashProgram | None = None,
+) -> Panel:
+    """One chip's FlashAttention plan as a timeline panel (D71).
+
+    *chip* is the chip the plan was costed on — idealised if the plan was — so
+    the trace draws the same rates the report charged. The roofline point is the
+    matrix work (``4·Sq·Skv·d`` per head) over the plan's DRAM traffic, the same
+    pair ``bwz attention`` quotes as its utilisation.
+    """
+    chosen = plan.chosen
+    if chosen is None:
+        raise ValueError(f"{plan.chip_id}: an infeasible plan has no timeline to draw.")
+    shape = plan.shape
+    qk = chosen.qk.chosen.stationarity.value
+    pv = chosen.pv.chosen.stationarity.value
+    banner = (
+        f"<b>FlashAttention-2</b> Br={chosen.br}, Bc={chosen.bc}: {chosen.programs:,} "
+        f"program(s) — one per (batch, head, {chosen.br}-row block of Q) — dealt to "
+        f"{chosen.used_cores:,} of {plan.units:,} {plan.unit_name} in {chosen.waves:,} lockstep "
+        f"wave(s). Each step below is one kv block of one wave: K and V staged on the DRAM "
+        f"row, then S = Q·Kᵀ ({qk}) and O += P·V ({pv}) on the array with the online "
+        f"softmax between them on {plan.vector_unit_name}."
+    )
+    work = Workload(
+        name=(f"attention {shape.batch}x{shape.heads} heads, S={shape.q_len}, d={shape.head_dim}"),
+        trace=flash_trace(chip, plan, max_steps=steps),
+        explanations=(),
+        flops=2.0 * shape.macs,
+        dram_bytes=chosen.dram_bytes,
+        latency_s=chosen.latency_s,
+        bound=chosen.bound,
+        machine=machine_model(chip, shape.dtype),
+        units_used=chosen.used_cores,
+        flash_program=program,
+        operand_names=("K,V", "Q", "O"),
+        banner=banner,
+        legend=FLASH_LEGEND,
+        program_intro=FLASH_PROGRAM_INTRO,
+        unit_noun="program",
+        vector_units_used=chosen.used_cores
+        * max(1, machine_model(chip, shape.dtype).vector_unit.count // plan.units),
+    )
+    return Panel(chip, shape.dtype, work)

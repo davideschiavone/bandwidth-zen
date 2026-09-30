@@ -51,6 +51,7 @@ from bwz.emit.flash import check as emit_flash_check
 from bwz.emit.flash import emit_flash
 from bwz.figures import (
     Panel,
+    build_flash,
     build_matmul,
     build_phases,
     shared_dtype,
@@ -1678,8 +1679,32 @@ def attention(
         "`bwz attention ... --emit-stdout | python -` runs it",
         rich_help_panel=PANEL_OUTPUT,
     ),
+    timeline: bool = typer.Option(
+        False,
+        "--timeline",
+        help="Also write the zoomable HTML timeline of the chosen plan: DRAM, on-chip, array "
+        "and vector rows, one step per (wave, kv block), with the runnable program below it",
+        rich_help_panel=PANEL_FIGURE,
+    ),
+    compare_with: list[str] = typer.Option(
+        [],
+        "--compare-with",
+        metavar="CHIP",
+        help="Plan the same attention on this chip too and draw both on ONE page with a "
+        "shared, absolute time axis. Repeatable. Every chip must support --dtype",
+        rich_help_panel=PANEL_FIGURE,
+    ),
+    steps: int = typer.Option(
+        256,
+        "--steps",
+        help="Steps in the drawn trace before (wave, kv block) steps are coalesced",
+        rich_help_panel=PANEL_FIGURE,
+    ),
     out: Path = typer.Option(
-        Path("."), "--out", help="Directory --emit writes to", rich_help_panel=PANEL_OUTPUT
+        Path("."),
+        "--out",
+        help="Directory --emit and --timeline write to",
+        rich_help_panel=PANEL_OUTPUT,
     ),
 ) -> None:
     """One attention call as FlashAttention-2: the formula picks the blocks and each
@@ -1747,6 +1772,75 @@ def attention(
         destination.write_text(program.source, encoding="utf-8")
         _wrote(destination)
         print(f"  run it: python {destination}")
+
+    if timeline:
+        _draw_flash(
+            hardware,
+            plan,
+            compare_with,
+            shape,
+            br=br,
+            bc=bc,
+            stationarity=stationarity,
+            ideal=ideal,
+            steps=steps,
+            out=out,
+        )
+
+
+def _draw_flash(
+    hardware: HardwareSpec,
+    plan: FlashPlan,
+    compare_with: list[str],
+    shape: FlashShape,
+    *,
+    br: int | None,
+    bc: int | None,
+    stationarity: Dataflow | None,
+    ideal: bool,
+    steps: int,
+    out: Path,
+) -> None:
+    """The chosen plan as a timeline, one panel per chip (D71).
+
+    Every chip plans the SAME attention with the same pins; a chip that cannot
+    is refused with its own reason rather than dropped from the page.
+    """
+    panels = []
+    for index, chip_id in enumerate([hardware.id, *compare_with]):
+        try:
+            chip = hardware if index == 0 else load_chip(chip_id)
+        except SpecLoadError as exc:
+            console.quiet = False
+            console.print(f"[red]bwz:[/red] {exc}")
+            raise typer.Exit(code=1) from exc
+        own = (
+            plan
+            if index == 0
+            else plan_flash(chip, shape, br=br, bc=bc, stationarity=stationarity, ideal=ideal)
+        )
+        if own.chosen is None:
+            console.quiet = False
+            console.print(f"[red]bwz:[/red] {chip.id} cannot run this attention:")
+            for reason in own.infeasibility:
+                console.print(f"  • {reason}")
+            raise typer.Exit(code=2)
+        costed = idealised(chip) if ideal else chip
+        program = emit_flash(costed, own, command=_command(), version=bwz.__version__)
+        emit_flash_check(program)
+        panels.append(build_flash(costed, own, steps=steps, program=program))
+    chips = [panel.chip for panel in panels]
+    who = chips[0].id if len(chips) == 1 else "compare-" + "-vs-".join(c.id for c in chips)
+    blocks = (
+        f"-br{plan.chosen.br}-bc{plan.chosen.bc}"
+        if len(panels) == 1 and plan.chosen is not None
+        else ""
+    )
+    stem = (
+        f"{who}-flash-S{shape.q_len}-d{shape.head_dim}-h{shape.heads_total}"
+        f"{blocks}-{shape.dtype.value}"
+    )
+    _draw(panels, command=_command(), out=out, stem=stem, timeline=True, animate=False)
 
 
 def _attention_table(plan: FlashPlan, chosen: FlashCandidate) -> Table:

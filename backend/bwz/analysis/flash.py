@@ -49,6 +49,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
+from bwz.analysis.pipeline import Lane, PipelineTrace, Span, Stage
 from bwz.analysis.roofline import MachineModel, classify, idealised, machine_model
 from bwz.analysis.stationarity import (
     K_ON_GRID,
@@ -60,7 +61,7 @@ from bwz.analysis.stationarity import (
 )
 from bwz.analysis.tiling import padded, systolic_utilisation
 from bwz.calibration import SOFTMAX_FLOPS_PER_SCORE
-from bwz.graph.ops import MatmulAttrs
+from bwz.graph.ops import GraphPhase, MatmulAttrs
 from bwz.report import Bound, ReductionPlacement
 from bwz.spec.dtypes import DType, accumulator_for, bytes_per_element
 from bwz.spec.hardware_spec import ComputeUnit, Dataflow, HardwareSpec
@@ -540,6 +541,97 @@ def _choose(
 # ------------------------------------------------------------------ one candidate
 
 
+@dataclass(frozen=True, slots=True)
+class BlockStep:
+    """One kv block of one program: the three stages it runs, in order (FA2).
+
+    ``S = Q·Kᵀ`` on the array, the online softmax on the vector unit, ``O += P·V``
+    on the array. The planner sums these; the schedule draws them. Both read
+    this one object, so the picture cannot run a different cost than the number.
+    """
+
+    width: int
+    """Key rows in this block: ``Bc``, or fewer for the ragged last one."""
+    t_qk_s: float
+    t_softmax_s: float
+    """Softmax over the block's scores, plus the rescale of O on every block but
+    the first."""
+    t_pv_s: float
+    qk_ops: float
+    softmax_ops: float
+    pv_ops: float
+    slots: int
+    scores: int
+    rescaled: int
+    inner_adds: int
+
+
+@dataclass(frozen=True, slots=True)
+class ProgramSteps:
+    """Everything one program of *rows* query rows does, block by block."""
+
+    rows: int
+    blocks: tuple[BlockStep, ...]
+    t_normalise_s: float
+    normalised: int
+
+
+def program_steps(
+    machine: MachineModel,
+    shape: FlashShape,
+    bc: int,
+    flows: tuple[Dataflow, Dataflow],
+    rows: int,
+) -> ProgramSteps:
+    """The per-block costs of one program — the single source of FlashAttention time.
+
+    Each block is ``t(S = Q·Kᵀ) + t_softmax + t(O += P·V)``, the inner matmuls by
+    :func:`inner_cost` (the lone-matmul formula on one unit), the softmax at the
+    vector unit's per-unit share: ``5`` operations per score, plus ``rows · d``
+    for the rescale on every block after the first. After the last block, O is
+    divided by the running sum: ``rows · d`` more.
+    """
+    unit = machine.unit
+    assert unit.systolic_dims is not None
+    array_rows, array_cols = unit.systolic_dims
+    d = shape.head_dim
+    per_unit_vector = machine.effective_vector_flops_per_s / unit.count
+    kv_blocks = math.ceil(shape.kv_len / bc)
+    blocks = []
+    for j in range(kv_blocks):
+        width = min(bc, shape.kv_len - j * bc)
+        first = inner_cost(machine, rows, width, d, flows[0])
+        second = inner_cost(machine, rows, d, width, flows[1])
+        scores = rows * width
+        rescale = rows * d if j > 0 else 0
+        softmax_ops = SOFTMAX_FLOPS_PER_SCORE * scores + rescale
+        blocks.append(
+            BlockStep(
+                width=width,
+                # Serial: S must exist before softmax, P before P·V (FA2, one
+                # warp group). The inner reductions overlap their own matmul (D62).
+                t_qk_s=first.t_s,
+                t_softmax_s=softmax_ops / per_unit_vector,
+                t_pv_s=second.t_s,
+                qk_ops=2.0 * rows * width * d,
+                softmax_ops=softmax_ops,
+                pv_ops=2.0 * rows * d * width,
+                slots=_slots(rows, width, d, array_rows, array_cols)
+                + _slots(rows, d, width, array_rows, array_cols),
+                scores=scores,
+                rescaled=rescale,
+                inner_adds=first.vector_adds + second.vector_adds,
+            )
+        )
+    normalised = rows * d
+    return ProgramSteps(
+        rows=rows,
+        blocks=tuple(blocks),
+        t_normalise_s=normalised / per_unit_vector,
+        normalised=normalised,
+    )
+
+
 def _candidate(
     machine: MachineModel,
     shape: FlashShape,
@@ -548,12 +640,9 @@ def _candidate(
     forced: Dataflow | None,
 ) -> FlashCandidate:
     unit = machine.unit
-    assert unit.systolic_dims is not None
-    rows, cols = unit.systolic_dims
     d = shape.head_dim
     operand = bytes_per_element(shape.dtype)
     acc = bytes_per_element(accumulator_for(shape.dtype))
-    per_unit_vector = machine.effective_vector_flops_per_s / unit.count
 
     # The full block decides the dataflow; the ragged last block runs the same one.
     qk = _choose(machine, QK, br, bc, d, forced)
@@ -561,28 +650,21 @@ def _candidate(
 
     q_blocks = math.ceil(shape.q_len / br)
     kv_blocks = math.ceil(shape.kv_len / bc)
-    kv_widths = [min(bc, shape.kv_len - j * bc) for j in range(kv_blocks)]
+
+    flows = (qk.chosen.stationarity, pv.chosen.stationarity)
 
     def program(rows_i: int) -> tuple[float, float, int, int, int, int, int]:
         """(t_matrix, t_vector, mac_slots, scores, rescaled, normalised, inner adds)."""
-        t_mat = t_vec = 0.0
-        slots = scores = rescaled = adds = 0
-        for j, width in enumerate(kv_widths):
-            first = inner_cost(machine, rows_i, width, d, qk.chosen.stationarity)
-            second = inner_cost(machine, rows_i, d, width, pv.chosen.stationarity)
-            block_scores = rows_i * width
-            block_rescale = rows_i * d if j > 0 else 0
-            # Serial: S must exist before softmax, P before P·V (FA2, one warp
-            # group). The inner reductions overlap their own matmul (D62).
-            t_mat += first.t_s + second.t_s
-            t_vec += (SOFTMAX_FLOPS_PER_SCORE * block_scores + block_rescale) / per_unit_vector
-            slots += _slots(rows_i, width, d, rows, cols) + _slots(rows_i, d, width, rows, cols)
-            scores += block_scores
-            rescaled += block_rescale
-            adds += first.vector_adds + second.vector_adds
-        normalised = rows_i * d
-        t_vec += normalised / per_unit_vector
-        return t_mat, t_vec, slots, scores, rescaled, normalised, adds
+        steps = program_steps(machine, shape, bc, flows, rows_i)
+        return (
+            sum(step.t_qk_s + step.t_pv_s for step in steps.blocks),
+            sum(step.t_softmax_s for step in steps.blocks) + steps.t_normalise_s,
+            sum(step.slots for step in steps.blocks),
+            sum(step.scores for step in steps.blocks),
+            sum(step.rescaled for step in steps.blocks),
+            steps.normalised,
+            sum(step.inner_adds for step in steps.blocks),
+        )
 
     full = program(min(br, shape.q_len))
     tail_rows = shape.q_len - (q_blocks - 1) * br
@@ -751,3 +833,301 @@ def _assumptions(
             f"latency is t_dram + t_compute."
         )
     return tuple(out)
+
+
+# ------------------------------------------------------------------ the schedule
+
+
+@dataclass(frozen=True, slots=True)
+class _Step:
+    """One (wave, kv block) of the schedule, before it is placed in time."""
+
+    label: str
+    loads: tuple[tuple[Stage, str, float], ...]
+    compute: tuple[tuple[Lane, str, float, float, str], ...]
+    """``(lane, label, seconds, operations, operator family)``, in issue order."""
+    store: float
+
+
+def flash_trace(chip: HardwareSpec, plan: FlashPlan, *, max_steps: int = 256) -> PipelineTrace:
+    """The chosen plan as a schedule: which resource is busy when (MODEL.md §6.9, D71).
+
+    One step is one kv block of one lockstep wave. Its DRAM work is the block of
+    K and V for every head in the wave (plus the wave's Q rows on its first
+    block); its compute is the wave's slowest program running that block —
+    ``S = Q·Kᵀ`` on the array, softmax on the vector unit, ``O += P·V`` on the
+    array — and O is stored after the last block. K/V is double buffered when
+    the plan says a second buffer fits, exactly as in §6.5::
+
+        load_start(i)    = max(dram_free, compute_end(i - depth))
+        compute_start(i) = max(load_end(i), compute_end(i - 1))
+
+    Every span is a slice of a quantity the plan already charged, and the step
+    costs come from :func:`program_steps` — the function the planner sums — so
+    the DRAM lane sums to ``t_dram``, the array lane to ``t_matrix`` and the
+    vector lane to ``t_vector``, and the span is never shorter than the reported
+    latency (D19). With more than *max_steps* steps, consecutive ones are
+    coalesced and each merged step draws its array and vector work as one bar
+    apiece.
+
+    *chip* must be the chip the plan was costed on — idealised if the plan was.
+    """
+    chosen = plan.chosen
+    if chosen is None:
+        raise ValueError(f"{plan.chip_id}: an infeasible plan has no schedule to draw.")
+    shape = plan.shape
+    machine = machine_model(chip, shape.dtype)
+    d = shape.head_dim
+    operand = bytes_per_element(shape.dtype)
+    bandwidth = machine.effective_bandwidth_bytes_per_s
+    flows = (chosen.qk.chosen.stationarity, chosen.pv.chosen.stationarity)
+    q_blocks, used = chosen.q_blocks, chosen.used_cores
+    full_rows = min(chosen.br, shape.q_len)
+    tail_rows = shape.q_len - (q_blocks - 1) * chosen.br
+    full = program_steps(machine, shape, chosen.bc, flows, full_rows)
+    tail = (
+        full
+        if tail_rows == full_rows
+        else program_steps(machine, shape, chosen.bc, flows, tail_rows)
+    )
+
+    fine: list[_Step] = []
+    last_block = chosen.kv_blocks - 1
+    for wave in range(chosen.waves):
+        first_p, last_p = wave * used, min((wave + 1) * used, chosen.programs) - 1
+        members = last_p - first_p + 1
+        n_tail = 0 if tail is full else (last_p + 1) // q_blocks - first_p // q_blocks
+        n_full = members - n_tail
+        slowest = tail if n_full == 0 else full
+        heads = last_p // q_blocks - first_p // q_blocks + 1
+        rows_total = n_full * full.rows + n_tail * tail.rows
+        for j in range(chosen.kv_blocks):
+            big, small, crit = full.blocks[j], tail.blocks[j], slowest.blocks[j]
+            loads: list[tuple[Stage, str, float]] = []
+            if j == 0:
+                loads.append(
+                    (
+                        Stage.LOAD_A,
+                        f"Q — {members} program(s), {rows_total} rows",
+                        rows_total * d * operand,
+                    )
+                )
+            loads.append(
+                (
+                    Stage.LOAD,
+                    f"K_{j}, V_{j} — {heads} head(s) x {crit.width} rows",
+                    2.0 * heads * crit.width * d * operand,
+                )
+            )
+            compute: list[tuple[Lane, str, float, float, str]] = [
+                (
+                    Lane.CORE,
+                    f"S = Q·Kᵀ, block {j}",
+                    crit.t_qk_s,
+                    n_full * big.qk_ops + n_tail * small.qk_ops,
+                    "attention",
+                ),
+                (
+                    Lane.VECTOR,
+                    f"softmax{' + rescale O' if j else ''}, block {j}",
+                    crit.t_softmax_s,
+                    n_full * big.softmax_ops + n_tail * small.softmax_ops,
+                    "softmax",
+                ),
+                (
+                    Lane.CORE,
+                    f"O += P·V, block {j}",
+                    crit.t_pv_s,
+                    n_full * big.pv_ops + n_tail * small.pv_ops,
+                    "attention",
+                ),
+            ]
+            if j == last_block:
+                compute.append(
+                    (
+                        Lane.VECTOR,
+                        "O = O / l",
+                        slowest.t_normalise_s,
+                        float(n_full * full.normalised + n_tail * tail.normalised),
+                        "softmax",
+                    )
+                )
+            fine.append(
+                _Step(
+                    label=f"wave {wave}, kv block {j}",
+                    loads=tuple(loads),
+                    compute=tuple(compute),
+                    store=rows_total * d * operand if j == last_block else 0.0,
+                )
+            )
+
+    steps = _coalesce(fine, max_steps)
+    depth = 2 if chosen.double_buffered else 1
+    resident = chosen.working_set_bytes / depth
+    spans: list[Span] = []
+    start = 0.0
+    if chosen.t_fixed_s > 0:
+        spans.append(
+            Span(
+                Lane.CORE,
+                Stage.DISPATCH,
+                "kernel dispatch",
+                0.0,
+                chosen.t_fixed_s,
+                0,
+                GraphPhase.STATIC,
+                op_type="attention",
+            )
+        )
+        start = chosen.t_fixed_s
+    dram_free = start
+    load_start: dict[int, float] = {}
+    load_end: dict[int, float] = {}
+    compute_end: dict[int, float] = {}
+
+    def load(i: int) -> None:
+        nonlocal dram_free
+        at = max(dram_free, compute_end.get(i - depth, start))
+        load_start[i] = at
+        for stage, label, moved in steps[i].loads:
+            end = at + moved / bandwidth
+            spans.append(
+                Span(
+                    Lane.DRAM,
+                    stage,
+                    label,
+                    at,
+                    end,
+                    i,
+                    GraphPhase.STATIC,
+                    op_type="attention",
+                    bytes_moved=moved,
+                )
+            )
+            at = end
+        dram_free = load_end[i] = at
+
+    def store(i: int) -> None:
+        nonlocal dram_free
+        moved = steps[i].store
+        if moved <= 0:
+            return
+        at = max(compute_end[i], dram_free)
+        end = at + moved / bandwidth
+        spans.append(
+            Span(
+                Lane.DRAM,
+                Stage.STORE,
+                f"O — {steps[i].label}",
+                at,
+                end,
+                i,
+                GraphPhase.STATIC,
+                op_type="attention",
+                bytes_moved=moved,
+            )
+        )
+        dram_free = end
+
+    load(0)
+    for i, step in enumerate(steps):
+        at = max(load_end[i], compute_end.get(i - 1, start))
+        for lane, label, seconds, operations, family in step.compute:
+            spans.append(
+                Span(
+                    lane,
+                    Stage.EXEC,
+                    f"{label} — {step.label}",
+                    at,
+                    at + seconds,
+                    i,
+                    GraphPhase.STATIC,
+                    op_type=family,
+                    flops=operations,
+                )
+            )
+            at += seconds
+        compute_end[i] = at
+        spans.append(
+            Span(
+                Lane.SRAM,
+                Stage.HOLD,
+                f"K/V block and programs' state — {step.label}",
+                load_start[i],
+                at,
+                i,
+                GraphPhase.STATIC,
+                op_type="attention",
+                resident_bytes=resident,
+            )
+        )
+        # The next block's fetch outranks this block's write-back (§6.5). Without
+        # a second buffer nothing may overlap, so the store goes first.
+        if depth == 2:
+            if i + 1 < len(steps):
+                load(i + 1)
+            store(i)
+        else:
+            store(i)
+            if i + 1 < len(steps):
+                load(i + 1)
+
+    total = max(span.end_s for span in spans)
+    return PipelineTrace(
+        spans=tuple(spans),
+        total_s=total,
+        reported_latency_s=chosen.latency_s,
+        steps=len(steps),
+        tiles=len(fine),
+        double_buffered=chosen.double_buffered,
+        fill_drain_s=max(0.0, total - chosen.latency_s),
+        kind="blocks",
+        work_by_op=(
+            ("attention", 2.0 * shape.macs, chosen.t_matrix_s),
+            ("softmax", chosen.vector_ops - chosen.inner_vector_adds, chosen.t_vector_s),
+        ),
+    )
+
+
+def _coalesce(fine: list[_Step], max_steps: int) -> list[_Step]:
+    """Merge runs of consecutive steps until at most *max_steps* remain.
+
+    A merged step keeps its bytes by stage and its work by lane — array, then
+    vector, as one bar each — so every lane still sums to the same totals; what
+    is lost is the interleaving inside the run, which the subtitle says.
+    """
+    if len(fine) <= max(1, max_steps):
+        return fine
+    size = math.ceil(len(fine) / max(1, max_steps))
+    out: list[_Step] = []
+    for begin in range(0, len(fine), size):
+        run = fine[begin : begin + size]
+        by_stage: dict[Stage, float] = {}
+        for step in run:
+            for stage, _label, moved in step.loads:
+                by_stage[stage] = by_stage.get(stage, 0.0) + moved
+        work: dict[Lane, tuple[float, float]] = {}
+        for step in run:
+            for lane, _label, seconds, operations, _family in step.compute:
+                time, ops = work.get(lane, (0.0, 0.0))
+                work[lane] = (time + seconds, ops + operations)
+        label = f"{run[0].label} … {run[-1].label}"
+        names = {Stage.LOAD_A: "Q", Stage.LOAD: "K and V"}
+        out.append(
+            _Step(
+                label=label,
+                loads=tuple((stage, names[stage], moved) for stage, moved in by_stage.items()),
+                compute=tuple(
+                    (
+                        lane,
+                        "S = Q·Kᵀ and O += P·V" if lane is Lane.CORE else "softmax",
+                        seconds,
+                        operations,
+                        "attention" if lane is Lane.CORE else "softmax",
+                    )
+                    for lane, (seconds, operations) in work.items()
+                ),
+                store=sum(step.store for step in run),
+            )
+        )
+    return out

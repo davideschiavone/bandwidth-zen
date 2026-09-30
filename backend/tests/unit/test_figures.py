@@ -319,3 +319,37 @@ def test_the_banner_is_silent_when_two_chips_would_disagree() -> None:
     """
     panels = [_matmul_panel("a100_80gb", dtype=DType.INT8), _matmul_panel("metis_aipu", DType.INT8)]
     assert "reduction" not in _stationarity_banner(panels)
+
+
+# ------------------------------------------------------------ FlashAttention (D71)
+
+
+def test_a_flash_page_speaks_attention_not_matmul(tmp_path: Path) -> None:
+    from bwz.analysis import idealised
+    from bwz.analysis.flash import FlashShape, plan_flash
+    from bwz.emit.flash import emit_flash
+    from bwz.figures import build_flash
+
+    chip = load_chip("a100_80gb")
+    plan = plan_flash(chip, FlashShape(1, 2, 64, 64, 16, DType.FP16), br=16, bc=16, ideal=True)
+    ideal = idealised(chip)
+    panel = build_flash(
+        ideal, plan, steps=256, program=emit_flash(ideal, plan, command="x", version="t")
+    )
+    out = tmp_path / "flash.html"
+    write_timeline([panel], "bwz attention ...", out)
+    page = out.read_text(encoding="utf-8")
+    assert "FlashAttention-2</b> Br=16, Bc=16" in page
+    assert "LOAD K,V=" in page and "STORE O=" in page
+    assert "operand B</b> (the tile the array holds)" not in page
+    assert "def run_program(" in page
+    # Eight programs, each with 1/432 of the CUDA cores: 128 lanes, not 6912.
+    assert "128 of 6912" in page
+
+
+def test_a_matmul_page_keeps_its_own_legend(tmp_path: Path) -> None:
+    from bwz.figures.timeline_html import MATMUL_LEGEND
+
+    out = tmp_path / "matmul.html"
+    write_timeline([_matmul_panel("a100_80gb")], "bwz matmul (test)", out)
+    assert MATMUL_LEGEND in out.read_text(encoding="utf-8")

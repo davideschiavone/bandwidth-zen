@@ -934,3 +934,11 @@ chosen stationarity, the online softmax written out in `run_program()`. It asser
 idle unit-waves, MACs, MAC slots, K/V staging events, the bytes of Q, K, V and O, scores, rescales,
 normalisations and inner partial adds against the plan, and checks `O` against the textbook
 `softmax(Q Kᵀ/√d) V` computed all at once in float64.
+
+**The schedule (D71).** `--timeline` draws the chosen plan through `analysis/flash.flash_trace`:
+one step per (wave, kv block), whose DRAM work is that block of K and V for every head in the wave
+(plus the wave's Q on its first block, O after its last) and whose compute is the wave's slowest
+program running the block — `S = Q·Kᵀ`, softmax, `P·V`. Loads are scheduled by §6.5's rule with
+K/V double buffered when the plan says a second buffer fits. The step costs come from
+`program_steps`, the same function the planner sums, so each lane sums back to its term exactly
+and the span exceeds the reported latency only by the fill/drain `max()` omits (D19).

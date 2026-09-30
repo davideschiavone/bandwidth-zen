@@ -890,6 +890,7 @@ dataflow its unit declares, by the same formula `bwz matmul` uses (`docs/MODEL.m
 | `--stationarity` | pin both inner matmuls to one dataflow; refused, not clamped, if the unit lacks it |
 | `--top` | candidates listed beside the chosen one (default 8) |
 | `--emit`, `--emit-stdout`, `--out` | as for `matmul` (§2.6) |
+| `--timeline`, `--compare-with`, `--steps` | the zoomable page of the chosen plan (§3a.4, §6) |
 | `--ideal`, `--quiet` | as for `matmul` |
 
 ### 3a.1 A shape small enough to count by hand
@@ -1003,6 +1004,35 @@ is one per score: `d = 32` is two k-slices of 16 in `S = Q·Kᵀ`, so each score
 while `P·V`'s contraction is `Bc = 16`, one slice, and owes none. `--emit` writes the
 same file to `--out` as `flash-<chip>-<dtype>-br<Br>-bc<Bc>-<qk>-<pv>.py`.
 
+### 3a.4 `--timeline` — the plan, drawn
+
+```bash
+uv run bwz attention -c a100_80gb --ideal -S 64 --head-dim 16 --heads 2 --br 16 --bc 16 --timeline --out build
+uv run bwz attention -c metis_aipu -d int8 --ideal -S 1100 --head-dim 64 --heads 3 \
+    --br 512 --bc 512 --timeline --out build
+```
+
+```
+wrote build/timeline-a100_80gb-flash-S64-d16-h2-br16-bc16-fp16.html
+wrote build/timeline-metis_aipu-flash-S1100-d64-h3-br512-bc512-int8.html
+```
+
+One step per (wave, kv block). The DRAM row carries Q on a wave's first block (hatched), a K and V
+block per step (solid, shared by every program of the head in that wave) and O after the last
+(hollow). The array row draws `S = Q·Kᵀ` and `O += P·V` as two bars per step with the online
+softmax between them on the vector row, so the serial chain FlashAttention-2 runs is visible bar by
+bar. K/V is double buffered when the plan says a second buffer fits, and the next block's fetch
+overlaps this block's arithmetic.
+
+Every lane sums back to the plan — DRAM to `t_dram`, the array to `t_matrix`, the vector unit to
+`t_vector` — and the span is never shorter than the reported latency (D19); the subtitle names the
+fill/drain it adds. The vector row names the lanes the plan actually engages: each program gets
+`1/units` of the vector unit, so the toy's eight programs engage 128 of A100's 6912 CUDA cores.
+The Metis page shows the other chip's story in one glance: three waves on four cores, K and V
+fetched again for the heads that straddle a wave, and the DPU's softmax bars as long as the
+array's. `--compare-with h100_sxm` puts both chips on one shared time axis; the page embeds the
+runnable program below the roofline.
+
 ---
 
 ## 4. `bwz run` — a network on a chip
@@ -1097,12 +1127,12 @@ plain stem, which is the same condition that leaves its stationarity banner blan
 
 | flag | on | meaning |
 |---|---|---|
-| `--timeline` | `matmul`, `run`, `encoder-layer` | the zoomable page: where the time went, per hardware resource, with the roofline and the runnable loop nest below it |
+| `--timeline` | `matmul`, `run`, `encoder-layer`, `attention` | the zoomable page: where the time went, per hardware resource, with the roofline and the runnable loop nest below it |
 | `--animate` | `matmul`, `encoder-layer` | a second page playing the same schedule back as DRAM → SRAM → Accelerator motion. Not on `run`: a full model's per-operation trace coalesces hundreds of operations, past what a station diagram can usefully show (D42) |
-| `--compare-with CHIP` | all three | draw that chip alongside `--chip` on **one** page with a shared, absolute time axis. Repeatable. Refused with `--animate`, which plays one chip back |
-| `--out DIR` | all three | where the pages go (default `.`) |
-| `--steps N` | all three | resolution of the drawn trace (default 256) — the only such knob, since the page zooms rather than needing a second, coarser register (D37) |
-| `-q`, `--quiet` | all three | drop the report table; the `wrote …` lines still print |
+| `--compare-with CHIP` | all four | draw that chip alongside `--chip` on **one** page with a shared, absolute time axis. Repeatable. Refused with `--animate`, which plays one chip back |
+| `--out DIR` | all four | where the pages go (default `.`) |
+| `--steps N` | all four | resolution of the drawn trace (default 256) — the only such knob, since the page zooms rather than needing a second, coarser register (D37) |
+| `-q`, `--quiet` | all four | drop the report table; the `wrote …` lines still print |
 
 Everything else is the command's own: the shape flags, the dataflow strategy flags of §2.5, and
 `--ideal`. That is the point — `bwz matmul --stationarity ws --timeline` draws the decomposition

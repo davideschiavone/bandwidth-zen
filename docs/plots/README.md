@@ -24,6 +24,7 @@ commands themselves rather than from a separate script (D55).
 | `machine-<chip>.png` | `plot_roofline.py` | The three-element machine (D5a) — DRAM, SRAM-as-capacity, array — and which link carries a bandwidth number |
 | `timeline-<chip>-<dtype>.html` | `bwz matmul --timeline` | Where the time went, per hardware resource, **zoomable**, with the roofline for that run below it |
 | `timeline-<chip>-<model>-<phase>-<dtype>.html` | `bwz run --timeline` | A network instead of a matmul, one page per phase |
+| `timeline-<chip>-flash-S<S>-d<d>-h<heads>-br<Br>-bc<Bc>-<dtype>.html` | `bwz attention --timeline` | A FlashAttention plan: one step per (wave, kv block) — K/V staged, `S = Q·Kᵀ`, softmax on the vector row, `P·V` — with the runnable program below (D71) |
 | `timeline-compare-<a>-vs-<b>-….html` | any of them, `--compare-with CHIP` | Two chips, one workload, **one shared absolute time axis**, plus both rooflines |
 | `animate-<chip>-<dtype>.html` | `bwz matmul --animate` | A matmul's or the encoder's schedule, **played back** as DRAM -> SRAM -> Accelerator motion. Not on `bwz run`, not with `--compare-with`, opt-in — not part of `make plots` |
 

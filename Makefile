@@ -47,6 +47,7 @@ plots:
 	$(BACKEND) bwz matmul -M 4096 -N 4096 -K 4096 -c chip_a -d int8 --timeline $(PLOTS_OUT)
 	$(BACKEND) bwz run --model gemma3_4b -c a100_80gb --compare-with metis_aipu \
 		--weights int8 --input-tokens 512 --output-tokens 1 --timeline $(PLOTS_OUT)
+	$(BACKEND) bwz attention -c a100_80gb -S 4096 --head-dim 128 --heads 32 --timeline $(PLOTS_OUT)
 
 docker:
 	@echo "no-op until M4: docker compose lands with the API + frontend"

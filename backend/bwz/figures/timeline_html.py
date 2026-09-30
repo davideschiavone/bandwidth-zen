@@ -118,15 +118,7 @@ TEMPLATE = """<!doctype html>
 {boxes}
 <p class="hint">Rows are hardware resources, not steps. <b>Wheel</b> zooms about the cursor ·
 <b>drag</b> pans · <b>double-click</b> resets · <b>hover</b> a bar for its own numbers.
-On the DRAM row, solid bars are <b>operand B</b> (the tile the array holds), hatched bars are
-<b>operand A</b> (streaming through it), and hollow bars are the result written back.
-Grey rows are declared by the chip and unused by this model. <b>Reading a tile address:</b>
-<code>Operand(row,col)</code> numbers tiles row-major within the tile grid the banner above names,
-0-indexed; <code>:</code> in either position means that dimension is swept in full rather than cut,
-so <code>C(:,col)</code> is one column band of C over the whole of M (D53). A comma-range like
-<code>0..124</code> is not one tile — it names every tile in that row from column 0 through 124,
-compacted so hundreds of tiles read as a few ranges rather than being spelled out one by
-one.{hint}</p>
+{legend}{hint}</p>
 <div id="wrap"><svg id="chart"></svg><div id="tip"></div></div>
 
 <h2 class="section">Roofline — where this workload sits</h2>
@@ -460,6 +452,30 @@ class Box:
     across them."""
 
 
+MATMUL_LEGEND = """On the DRAM row, solid bars are <b>operand B</b> (the tile the array holds), \
+hatched bars are
+<b>operand A</b> (streaming through it), and hollow bars are the result written back.
+Grey rows are declared by the chip and unused by this model. <b>Reading a tile address:</b>
+<code>Operand(row,col)</code> numbers tiles row-major within the tile grid the banner above names,
+0-indexed; <code>:</code> in either position means that dimension is swept in full rather than cut,
+so <code>C(:,col)</code> is one column band of C over the whole of M (D53). A comma-range like
+<code>0..124</code> is not one tile — it names every tile in that row from column 0 through 124,
+compacted so hundreds of tiles read as a few ranges rather than being spelled out one by
+one."""
+"""The DRAM-row legend and tile-address key a matmul page carries."""
+
+MATMUL_PROGRAM_INTRO = (
+    "The loop nest this model actually schedules, as a program you can "
+    "run, edit and break &mdash; the tile grid above, walked. It stages A on the same "
+    "events, hands tiles to cores the same way, counts what it moves and checks those "
+    "counts against this page&rsquo;s own numbers, so it cannot narrate a schedule the "
+    "model did not cost. It validates <b>counts, not time</b>: timing it and comparing "
+    "that to the predicted latency is a category error. Save it with "
+    "<code>--emit</code>, or regenerate with the command in this page&rsquo;s footer."
+)
+"""What the program section says about a matmul's emitted walk."""
+
+
 def render(
     *,
     title: str,
@@ -475,6 +491,8 @@ def render(
     programs: list[dict[str, str]] | None = None,
     hint: str = "",
     banner: str = "",
+    legend: str = MATMUL_LEGEND,
+    program_intro: str = MATMUL_PROGRAM_INTRO,
 ) -> str:
     """Build the page. Pure: returns text, writes nothing.
 
@@ -540,13 +558,7 @@ def render(
     if programs:
         programs_html = (
             '<h2 class="section">How it is deployed on the chip &mdash; run it yourself</h2>'
-            '<p class="hint">The loop nest this model actually schedules, as a program you can '
-            "run, edit and break &mdash; the tile grid above, walked. It stages A on the same "
-            "events, hands tiles to cores the same way, counts what it moves and checks those "
-            "counts against this page&rsquo;s own numbers, so it cannot narrate a schedule the "
-            "model did not cost. It validates <b>counts, not time</b>: timing it and comparing "
-            "that to the predicted latency is a category error. Save it with "
-            "<code>--emit</code>, or regenerate with the command in this page&rsquo;s footer.</p>"
+            f'<p class="hint">{program_intro}</p>'
         ) + "".join(
             f'<h3 class="deploy">{_escape(p["title"])}</h3>'
             f'<p class="hint"><code>{_escape(p["filename"])}</code> &mdash; run it with '
@@ -564,6 +576,7 @@ def render(
         deployments=deploy_html,
         programs=programs_html,
         hint=hint,
+        legend=legend,
         banner=f'<p class="banner">{banner}</p>' if banner else "",
     )
 

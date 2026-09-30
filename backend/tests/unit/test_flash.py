@@ -8,8 +8,16 @@ from __future__ import annotations
 
 import pytest
 
-from bwz.analysis import machine_model
-from bwz.analysis.flash import FlashShape, inner_cost, local_group_slices, plan_flash
+from bwz.analysis import idealised, machine_model
+from bwz.analysis.flash import (
+    FlashPlan,
+    FlashShape,
+    flash_trace,
+    inner_cost,
+    local_group_slices,
+    plan_flash,
+)
+from bwz.analysis.pipeline import Lane, PipelineTrace
 from bwz.report import Bound, ReductionPlacement
 from bwz.spec import load_chip
 from bwz.spec.dtypes import DType
@@ -195,3 +203,94 @@ def test_the_assumptions_name_the_imc_write_on_an_in_memory_array() -> None:
     assert any("WRITTEN into the array" in note for note in plan.assumptions)
     a100 = plan_flash(load_chip("a100_80gb"), _a100_toy())
     assert not any("WRITTEN into the array" in note for note in a100.assumptions)
+
+
+# ------------------------------------------------------------------ the schedule (D71)
+
+
+def _lanes(
+    chip_id: str, shape: FlashShape, br: int | None = None, bc: int | None = None
+) -> tuple[FlashPlan, PipelineTrace]:
+    chip = load_chip(chip_id)
+    plan = plan_flash(chip, shape, ideal=True, br=br, bc=bc)
+    return plan, flash_trace(idealised(chip), plan)
+
+
+@pytest.mark.parametrize(
+    ("chip_id", "shape", "pins"),
+    [
+        ("a100_80gb", FlashShape(1, 2, 64, 64, 16, DType.FP16), {"br": 16, "bc": 32}),
+        ("a100_80gb", FlashShape(1, 32, 4096, 4096, 128, DType.FP16), {}),
+        ("metis_aipu", FlashShape(1, 3, 1100, 1100, 64, DType.INT8), {"br": 512, "bc": 512}),
+    ],
+)
+def test_every_lane_sums_back_to_the_plan(
+    chip_id: str, shape: FlashShape, pins: dict[str, int]
+) -> None:
+    """The schedule invents no cost (D19): DRAM busy time is t_dram, the array's is
+    t_matrix (plus the dispatch), the vector unit's is t_vector; bytes and operations
+    are the plan's; and the drawn span is never shorter than the reported latency."""
+    plan, trace = _lanes(chip_id, shape, **pins)
+    chosen = plan.chosen
+    assert chosen is not None
+    busy, totals = trace.busy_s, trace.totals
+    assert busy[Lane.DRAM] == pytest.approx(chosen.t_dram_s)
+    assert busy[Lane.CORE] == pytest.approx(chosen.t_matrix_s + chosen.t_fixed_s)
+    assert busy[Lane.VECTOR] == pytest.approx(chosen.t_vector_s)
+    assert totals[Lane.DRAM] == pytest.approx(chosen.dram_bytes)
+    assert totals[Lane.CORE] == pytest.approx(2 * shape.macs)
+    assert trace.total_s >= chosen.latency_s * (1 - 1e-12)
+
+
+def test_the_toy_draws_one_step_per_wave_and_kv_block() -> None:
+    """2 heads x 4 programs on 8 units is one wave; Bc=32 over 64 keys is two blocks:
+    two steps, each drawing S = Q·Kᵀ, softmax, P·V — and O = O / l after the last."""
+    _, trace = _lanes("a100_80gb", FlashShape(1, 2, 64, 64, 16, DType.FP16), br=16, bc=32)
+    assert (trace.steps, trace.tiles) == (2, 2)
+    compute = [
+        span.label.split(" — ")[0] for span in trace.spans if span.lane in (Lane.CORE, Lane.VECTOR)
+    ]
+    assert compute == [
+        "S = Q·Kᵀ, block 0",
+        "softmax, block 0",
+        "O += P·V, block 0",
+        "S = Q·Kᵀ, block 1",
+        "softmax + rescale O, block 1",
+        "O += P·V, block 1",
+        "O = O / l",
+    ]
+
+
+def test_without_a_second_buffer_nothing_overlaps() -> None:
+    """Squeeze A100's on-chip capacity so one K/V buffer fits and two do not
+    (33 792 B against 37 888 B for the toy): the plan serialises, and the drawn span
+    is then exactly t_fixed + t_dram + t_compute — no fill/drain to hide."""
+    chip = load_chip("a100_80gb")
+    small = chip.model_copy(
+        update={
+            "memory": [
+                chip.memory[0].model_copy(update={"capacity_bytes": 34_000.0}),
+                chip.memory[1].model_copy(update={"capacity_bytes": 1_000.0}),
+                chip.memory[2],
+            ]
+        }
+    )
+    shape = FlashShape(1, 2, 64, 64, 16, DType.FP16)
+    plan = plan_flash(small, shape, br=16, bc=32)
+    chosen = plan.chosen
+    assert chosen is not None and not chosen.double_buffered
+    trace = flash_trace(small, plan)
+    assert trace.total_s == pytest.approx(chosen.t_fixed_s + chosen.t_dram_s + chosen.t_compute_s)
+
+
+def test_coalescing_keeps_every_total() -> None:
+    chip = load_chip("a100_80gb")
+    plan = plan_flash(chip, FlashShape(1, 32, 4096, 4096, 128, DType.FP16), ideal=True)
+    whole, merged = (
+        flash_trace(idealised(chip), plan),
+        flash_trace(idealised(chip), plan, max_steps=10),
+    )
+    assert merged.steps <= 10 < merged.tiles == whole.tiles
+    for lane in (Lane.DRAM, Lane.CORE, Lane.VECTOR):
+        assert merged.busy_s[lane] == pytest.approx(whole.busy_s[lane])
+        assert merged.totals[lane] == pytest.approx(whole.totals[lane])

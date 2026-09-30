@@ -3466,3 +3466,37 @@ small on Metis, whose DPU is already the bottleneck, so it is charged and the ru
 - On an in-memory array (Metis) every K and V block must be written into the banks as the
   stationary operand. That write is capacity-modelled only — it needs the on-chip bandwidth term v1
   lacks (D5a, D30) — and the drawer says so.
+
+## D71 — The FlashAttention plan, drawn: one step per (wave, kv block) (2026-09-30)
+
+### What was missing
+
+D70 gave attention a plan and a program, but `--timeline` existed only on `matmul`, `run` and
+`encoder-layer`, all drawn from `analysis/pipeline.py`'s matmul and graph schedules. The most
+teachable thing about FlashAttention — the serial chain of array, vector unit, array inside every
+block, and K/V fetches hiding behind it — could only be read off a table.
+
+### The change
+
+`analysis/flash.flash_trace` turns the chosen plan into a `PipelineTrace` of the same `Span`s every
+other page draws. One step is one kv block of one lockstep wave; its DRAM work is the block of K and
+V for every head in the wave (Q on the wave's first block, O after its last), its compute the wave's
+slowest program running that block. Loads follow §6.5's double-buffer rule. The per-block costs were
+factored out of the planner into `program_steps`, which both now read — so the DRAM, array and vector
+lanes sum to `t_dram`, `t_matrix` and `t_vector` exactly, and the span is never shorter than the
+reported latency (D19). Past `--steps` steps, consecutive ones are coalesced with every total kept.
+
+The page itself needed three things generalised rather than special-cased. A `Workload` now carries
+its own achieved rate when it has no `Report` phase, its operand names (`K,V`/`Q`/`O` rather than
+`B`/`A`/`C`), a banner, a legend and a program introduction — the matmul defaults are unchanged byte
+for byte. And the vector row names the lanes a workload engages when it is not the whole unit: each
+FlashAttention program gets `1/units` of the vector unit (D70), so eight programs on A100 engage
+128 of 6912 CUDA cores. Saying "6912 of 6912, assumed engaged" there would have contradicted the
+rate the plan charged.
+
+### What it does not do
+
+`--animate` is not on `bwz attention` yet: the playback's stations and geometry panel are built
+around a matmul's tile grid, and the flash walk needs its own. `--compare-with` works, with one
+catch the model states rather than hides: A100's CUDA cores declare no int8 datapath, so A100 cannot
+run int8 attention (no vector unit for the softmax, D62) and cannot share an int8 page with Metis.
