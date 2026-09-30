@@ -477,3 +477,52 @@ def test_attention_compares_two_chips_on_one_page(tmp_path: Path) -> None:
     )
     assert result.exit_code == 0, result.output
     assert (tmp_path / "timeline-compare-a100_80gb-vs-h100_sxm-flash-S64-d16-h1-fp16.html").exists()
+
+
+def test_attention_animates(tmp_path: Path) -> None:
+    result = runner.invoke(
+        app,
+        [
+            "attention",
+            "-c",
+            "a100_80gb",
+            "-S",
+            "64",
+            "--head-dim",
+            "16",
+            "--heads",
+            "2",
+            "--br",
+            "16",
+            "--bc",
+            "16",
+            "--animate",
+            "--out",
+            str(tmp_path),
+            "-q",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert (tmp_path / "animate-a100_80gb-flash-S64-d16-h2-br16-bc16-fp16.html").exists()
+
+
+def test_attention_refuses_to_animate_two_chips(tmp_path: Path) -> None:
+    result = runner.invoke(
+        app,
+        [
+            "attention",
+            "-c",
+            "a100_80gb",
+            "-S",
+            "64",
+            "--head-dim",
+            "16",
+            "--animate",
+            "--compare-with",
+            "h100_sxm",
+            "--out",
+            str(tmp_path),
+        ],
+    )
+    assert result.exit_code == 1
+    assert "--animate plays back one chip" in result.output

@@ -891,6 +891,7 @@ dataflow its unit declares, by the same formula `bwz matmul` uses (`docs/MODEL.m
 | `--top` | candidates listed beside the chosen one (default 8) |
 | `--emit`, `--emit-stdout`, `--out` | as for `matmul` (§2.6) |
 | `--timeline`, `--compare-with`, `--steps` | the zoomable page of the chosen plan (§3a.4, §6) |
+| `--animate` | the same schedule played back, with the score matrix filling block by block (§3a.5) |
 | `--ideal`, `--quiet` | as for `matmul` |
 
 ### 3a.1 A shape small enough to count by hand
@@ -1033,6 +1034,32 @@ fetched again for the heads that straddle a wave, and the DPU's softmax bars as 
 array's. `--compare-with h100_sxm` puts both chips on one shared time axis; the page embeds the
 runnable program below the roofline.
 
+### 3a.5 `--animate` — the plan, played back
+
+```bash
+uv run bwz attention -c a100_80gb --ideal -S 64 --head-dim 16 --heads 2 --br 16 --bc 16 --animate --out build
+```
+
+```
+wrote build/animate-a100_80gb-flash-S64-d16-h2-br16-bc16-fp16.html
+```
+
+The same schedule as the timeline, played as motion between the chip's stations: Q, K/V and O
+blocks cross from DRAM, the array glows for `S = Q·Kᵀ` and `O += P·V`, the vector unit for the
+softmax between them. The code pane is the emitted program (§3a.3), and each event lights the
+statement it *is* — `q = Q.read(...)`, the `staging.band(...)` fetches, the `matmul_os(...)` call and
+the `mma(...)` inside it, the softmax lines, `divide_rows(o, l)`, `O.write(...)` — because every
+span carries a key the emitter tagged those lines with.
+
+Below it, one head's Q, Kᵀ, O and the score matrix S cut into Br x Bc blocks. The live block lights
+on the engine working on it — orange while the array computes it, green while the vector unit
+softmaxes it — and the blocks this wave already consumed turn **dashed**: S is used and thrown away,
+never stored, and watching the dashed blocks trail the live one is the clearest picture of why
+FlashAttention moves `O(S·d)` bytes where plain attention moves `O(S²)`. The caption names the wave,
+the kv block, the heads and the Q row blocks in flight. Past `--steps` steps the trace is coalesced
+and the panel says no single block is live. Like `matmul`'s, `--animate` plays one chip; with
+`--compare-with` it is refused.
+
 ---
 
 ## 4. `bwz run` — a network on a chip
@@ -1128,7 +1155,7 @@ plain stem, which is the same condition that leaves its stationarity banner blan
 | flag | on | meaning |
 |---|---|---|
 | `--timeline` | `matmul`, `run`, `encoder-layer`, `attention` | the zoomable page: where the time went, per hardware resource, with the roofline and the runnable loop nest below it |
-| `--animate` | `matmul`, `encoder-layer` | a second page playing the same schedule back as DRAM → SRAM → Accelerator motion. Not on `run`: a full model's per-operation trace coalesces hundreds of operations, past what a station diagram can usefully show (D42) |
+| `--animate` | `matmul`, `encoder-layer`, `attention` | a second page playing the same schedule back as DRAM → SRAM → Accelerator motion. Not on `run`: a full model's per-operation trace coalesces hundreds of operations, past what a station diagram can usefully show (D42) |
 | `--compare-with CHIP` | all four | draw that chip alongside `--chip` on **one** page with a shared, absolute time axis. Repeatable. Refused with `--animate`, which plays one chip back |
 | `--out DIR` | all four | where the pages go (default `.`) |
 | `--steps N` | all four | resolution of the drawn trace (default 256) — the only such knob, since the page zooms rather than needing a second, coarser register (D37) |

@@ -1686,6 +1686,14 @@ def attention(
         "and vector rows, one step per (wave, kv block), with the runnable program below it",
         rich_help_panel=PANEL_FIGURE,
     ),
+    animate: bool = typer.Option(
+        False,
+        "--animate",
+        help="Also write the flow animation: the same schedule played back as DRAM -> SRAM "
+        "-> array/vector motion, the score matrix filling block by block, and the emitted "
+        "program's running statement lit up",
+        rich_help_panel=PANEL_FIGURE,
+    ),
     compare_with: list[str] = typer.Option(
         [],
         "--compare-with",
@@ -1703,7 +1711,7 @@ def attention(
     out: Path = typer.Option(
         Path("."),
         "--out",
-        help="Directory --emit and --timeline write to",
+        help="Directory --emit, --timeline and --animate write to",
         rich_help_panel=PANEL_OUTPUT,
     ),
 ) -> None:
@@ -1773,7 +1781,7 @@ def attention(
         _wrote(destination)
         print(f"  run it: python {destination}")
 
-    if timeline:
+    if timeline or animate:
         _draw_flash(
             hardware,
             plan,
@@ -1785,6 +1793,8 @@ def attention(
             ideal=ideal,
             steps=steps,
             out=out,
+            timeline=timeline,
+            animate=animate,
         )
 
 
@@ -1800,8 +1810,10 @@ def _draw_flash(
     ideal: bool,
     steps: int,
     out: Path,
+    timeline: bool,
+    animate: bool,
 ) -> None:
-    """The chosen plan as a timeline, one panel per chip (D71).
+    """The chosen plan as a timeline and/or an animation, one panel per chip (D71).
 
     Every chip plans the SAME attention with the same pins; a chip that cannot
     is refused with its own reason rather than dropped from the page.
@@ -1840,7 +1852,7 @@ def _draw_flash(
         f"{who}-flash-S{shape.q_len}-d{shape.head_dim}-h{shape.heads_total}"
         f"{blocks}-{shape.dtype.value}"
     )
-    _draw(panels, command=_command(), out=out, stem=stem, timeline=True, animate=False)
+    _draw(panels, command=_command(), out=out, stem=stem, timeline=timeline, animate=animate)
 
 
 def _attention_table(plan: FlashPlan, chosen: FlashCandidate) -> Table:

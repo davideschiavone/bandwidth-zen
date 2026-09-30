@@ -353,3 +353,47 @@ def test_a_matmul_page_keeps_its_own_legend(tmp_path: Path) -> None:
     out = tmp_path / "matmul.html"
     write_timeline([_matmul_panel("a100_80gb")], "bwz matmul (test)", out)
     assert MATMUL_LEGEND in out.read_text(encoding="utf-8")
+
+
+def _flash_panel() -> Panel:
+    from bwz.analysis import idealised
+    from bwz.analysis.flash import FlashShape, plan_flash
+    from bwz.emit.flash import emit_flash
+    from bwz.figures import build_flash
+
+    chip = load_chip("a100_80gb")
+    plan = plan_flash(chip, FlashShape(1, 2, 64, 64, 16, DType.FP16), br=16, bc=16, ideal=True)
+    ideal = idealised(chip)
+    return build_flash(
+        ideal, plan, steps=256, program=emit_flash(ideal, plan, command="x", version="t")
+    )
+
+
+def test_a_flash_animation_plays_the_plan(tmp_path: Path) -> None:
+    """The playback carries the flash panel's blocks, the flash help text, and every
+    event's key names lines the emitted program actually tagged (D71)."""
+    import json
+
+    from bwz.figures import write_animation
+    from bwz.figures.dataflow_html import FLASH_INTRO
+
+    panel = _flash_panel()
+    out = tmp_path / "animate.html"
+    write_animation(panel, "bwz attention ...", out)
+    page = out.read_text(encoding="utf-8")
+    _is_self_contained(page)
+    assert FLASH_INTRO in page
+    data = json.loads(re.search(r"const DATA = (\{.*?\});\n", page, re.S).group(1))  # type: ignore[union-attr]  # the page always carries DATA
+    assert data["flash"]["q_blocks"] == 4 and data["flash"]["kv_blocks"] == 4
+    keys = {event["key"] for event in data["flow"] if event["key"]}
+    assert keys == {"load_q", "load_kv", "qk", "softmax", "pv", "normalise", "store_o"}
+    assert keys <= set(data["stage_lines"])
+
+
+def test_a_matmul_animation_keeps_its_own_help(tmp_path: Path) -> None:
+    from bwz.figures import write_animation
+    from bwz.figures.dataflow_html import MATMUL_INTRO
+
+    out = tmp_path / "animate.html"
+    write_animation(_matmul_panel("a100_80gb"), "bwz matmul (test)", out)
+    assert MATMUL_INTRO in out.read_text(encoding="utf-8")

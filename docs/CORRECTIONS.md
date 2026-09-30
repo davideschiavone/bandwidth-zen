@@ -3500,3 +3500,32 @@ rate the plan charged.
 around a matmul's tile grid, and the flash walk needs its own. `--compare-with` works, with one
 catch the model states rather than hides: A100's CUDA cores declare no int8 datapath, so A100 cannot
 run int8 attention (no vector unit for the softmax, D62) and cannot share an int8 page with Metis.
+
+## D72 — `bwz attention --animate`: the plan played back, statement by statement (2026-09-30)
+
+### What was missing
+
+The flow animation (D40–D48) plays a matmul's or the encoder's schedule, lighting pseudo-C or
+emitted-program lines by stage and drawing a matmul's A/B/C tile grid. A FlashAttention step has
+two array bars that share a stage and a lane — `S = Q·Kᵀ` and `O += P·V` — so stage and lane alone
+could not say which statement was running, and the A/B/C panel has nothing to say about a score
+matrix that is never stored.
+
+### The change
+
+`Span.key` names the program statement a span is, when stage and lane cannot. `flash_trace` sets it
+on every span; the emitter tags its lines with the same keys **as it writes them** (a separator the
+tidy pass strips and turns into line numbers — never matched afterwards by text, the rule D54
+already follows), and `emit.flash.check` refuses a program with a key on no statement. The page
+looks a span's key up first and falls back to `stage_lane` and `stage`, so every matmul and encoder
+page behaves exactly as before.
+
+A second geometry panel draws one head's Q, Kᵀ, O and S in Br x Bc blocks, working out each event's
+(wave, kv block) from its step. The live block lights on the engine working on it; blocks the wave
+already consumed are dashed. The page's help paragraph became a parameter with a flash version; the
+matmul text is unchanged byte for byte.
+
+### What it does not do
+
+The panel draws one head: the heads in flight are named in the caption, not drawn side by side.
+Coalesced traces (more steps than `--steps`) show no live block, and say so.

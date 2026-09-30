@@ -59,6 +59,10 @@ class FlashProgram:
     source: str
     predicted: dict[str, float]
     working_set_bytes: float
+    stage_lines: tuple[tuple[str, tuple[int, ...]], ...] = ()
+    """0-indexed source lines per playback key — ``load_q``, ``load_kv``, ``qk``,
+    ``softmax``, ``pv``, ``normalise``, ``store_o`` and the stage/lane fallbacks —
+    so ``--animate`` lights the statement that is running (D71)."""
 
 
 def default_filename(plan: FlashPlan, chosen: FlashCandidate) -> str:
@@ -116,7 +120,10 @@ def emit_flash(
     lines += _constants(plan, chosen, predicted, seed, groups=(qk_group, pv_group))
     lines += ["", ""]
     for flow in flows:
-        lines += _inner_matmul(flow)
+        keys = tuple(
+            key for key, used in (("qk", flow is qk_flow), ("pv", flow is pv_flow)) if used
+        )
+        lines += _inner_matmul(flow, (*keys, "exec_core"))
         lines += ["", ""]
     lines += _program(qk_flow, pv_flow)
     lines += ["", ""]
@@ -126,10 +133,12 @@ def emit_flash(
     lines += ["", ""]
     lines += _harness_split()[1]
     lines += ["", "", 'if __name__ == "__main__":', "    raise SystemExit(main())"]
+    source, stage_lines = _tidy(lines)
     return FlashProgram(
         chip_id=plan.chip_id,
         filename=default_filename(plan, chosen),
-        source=_tidy(lines),
+        source=source,
+        stage_lines=stage_lines,
         predicted=predicted,
         working_set_bytes=working_set,
     )
@@ -486,7 +495,7 @@ _INNER_HEAD = {
 }
 
 
-def _inner_matmul(flow: Dataflow) -> list[str]:
+def _inner_matmul(flow: Dataflow, keys: tuple[str, ...]) -> list[str]:
     name = f"matmul_{flow.value}"
     head = [
         _rule(f"inner matmul, {_TITLE[flow]}"),
@@ -504,7 +513,9 @@ def _inner_matmul(flow: Dataflow) -> list[str]:
             "            block = copy_of(sub(acc, r0, r1, c0, c1))   # the accumulator",
             "            for k0 in range(0, k, ROWS):                 # K swept INSIDE the tile",
             "                k1 = min(k0 + ROWS, k)",
-            "                mma(block, sub(a, r0, r1, k0, k1), sub(b, k0, k1, c0, c1),",
+            _tag(
+                "                mma(block, sub(a, r0, r1, k0, k1), sub(b, k0, k1, c0, c1),", *keys
+            ),
             "                    counters, SLOTS_PER_MMA)",
             "            put_block(acc, r0, c0, block)",
         ]
@@ -518,7 +529,7 @@ def _inner_matmul(flow: Dataflow) -> list[str]:
             "            for r0 in range(0, m, ROWS):             # M swept past it",
             "                r1 = min(r0 + ROWS, m)",
             "                partial = zeros(r1 - r0, c1 - c0, acc_dtype)",
-            "                mma(partial, sub(a, r0, r1, k0, k1), resident,",
+            _tag("                mma(partial, sub(a, r0, r1, k0, k1), resident,", *keys),
             "                    counters, SLOTS_PER_MMA)",
             "                add_block(acc, r0, c0, partial)",
             "                _count_partial(ledger, kt, group_slices, (r1 - r0) * (c1 - c0))",
@@ -533,7 +544,7 @@ def _inner_matmul(flow: Dataflow) -> list[str]:
             "            for c0 in range(0, n, COLS):             # N swept past it",
             "                c1 = min(c0 + COLS, n)",
             "                partial = zeros(r1 - r0, c1 - c0, acc_dtype)",
-            "                mma(partial, resident, sub(b, k0, k1, c0, c1),",
+            _tag("                mma(partial, resident, sub(b, k0, k1, c0, c1),", *keys),
             "                    counters, SLOTS_PER_MMA)",
             "                add_block(acc, r0, c0, partial)",
             "                _count_partial(ledger, kt, group_slices, (r1 - r0) * (c1 - c0))",
@@ -560,6 +571,26 @@ _COUNT_PARTIAL = [
 
 # ------------------------------------------------------------------------ one program
 
+TAG = "\x00"
+"""Separates an emitted line from the playback keys it carries; :func:`_tidy`
+strips it. Tagged while the line is written, never matched afterwards by its
+text — the emitter is the one place that knows what each line does (D71)."""
+
+LOAD_Q = ("load_q", "load_a")
+LOAD_KV = ("load_kv", "load_b")
+QK_KEYS = ("qk", "exec_core")
+SOFTMAX = ("softmax", "exec_vector")
+PV_KEYS = ("pv", "exec_core")
+NORMALISE = ("normalise", "exec_vector")
+STORE_O = ("store_o", "store")
+"""Each statement's keys: the span key the schedule gives it (``Span.key``) and
+the plain stage/lane tag a coalesced bar falls back to."""
+
+
+def _tag(line: str, *keys: str) -> str:
+    """*line*, marked with the playback keys that should light it."""
+    return f"{line}{TAG}{','.join(keys)}"
+
 
 def _program(qk_flow: Dataflow, pv_flow: Dataflow) -> list[str]:
     return [
@@ -576,7 +607,11 @@ def _program(qk_flow: Dataflow, pv_flow: Dataflow) -> list[str]:
         '        log_block(f"core {core_id} wave {wave}: program {program} = head {head}, "',
         '                  f"query rows {r0}:{r1}")',
         "",
-        "    q = Q.read(head, r0, r1, 0, HEAD_DIM)             # Q_i: read once, kept on the unit",
+        _tag(
+            "    q = Q.read(head, r0, r1, 0, HEAD_DIM)"
+            "             # Q_i: read once, kept on the unit",
+            *LOAD_Q,
+        ),
         "    o = zeros(rows, HEAD_DIM, SOFTMAX_DTYPE)           # the O accumulator, on the unit",
         "    m = [-math.inf] * rows                             # running row max",
         "    l = [0.0] * rows                                   # running row sum",
@@ -585,35 +620,49 @@ def _program(qk_flow: Dataflow, pv_flow: Dataflow) -> list[str]:
         "        c0, c1 = j * BC, min((j + 1) * BC, KV_LEN)",
         "        # Staged chip-wide: every program of this head in this wave shares the",
         "        # fetch, so K and V cross DRAM once per wave the head spans (D33).",
-        '        k = staging.band(("K", wave, head, j), lambda: K.read(head, c0, c1, 0, HEAD_DIM))',
-        '        v = staging.band(("V", wave, head, j), lambda: V.read(head, c0, c1, 0, HEAD_DIM))',
+        _tag(
+            '        k = staging.band(("K", wave, head, j), '
+            "lambda: K.read(head, c0, c1, 0, HEAD_DIM))",
+            *LOAD_KV,
+        ),
+        _tag(
+            '        v = staging.band(("V", wave, head, j), '
+            "lambda: V.read(head, c0, c1, 0, HEAD_DIM))",
+            *LOAD_KV,
+        ),
         "",
-        "        s = zeros(rows, c1 - c0, S_ACC_DTYPE)          # S = Q_i Kᵀ_j, never leaves",
-        f"        matmul_{qk_flow.value}(s, q, transpose(k), S_ACC_DTYPE, counters, ledger,",
-        "                  QK_GROUP_SLICES)                # QK_STATIONARITY",
-        "        s = as_dtype(s, SOFTMAX_DTYPE)",
-        "        scale_all(s, SCALE)",
+        _tag(
+            "        s = zeros(rows, c1 - c0, S_ACC_DTYPE)          # S = Q_i Kᵀ_j, never leaves",
+            *QK_KEYS,
+        ),
+        _tag(
+            f"        matmul_{qk_flow.value}(s, q, transpose(k), S_ACC_DTYPE, counters, ledger,",
+            *QK_KEYS,
+        ),
+        _tag("                  QK_GROUP_SLICES)                # QK_STATIONARITY", *QK_KEYS),
+        _tag("        s = as_dtype(s, SOFTMAX_DTYPE)", *SOFTMAX),
+        _tag("        scale_all(s, SCALE)", *SOFTMAX),
         "",
-        "        m_new = [max(old, new) for old, new in zip(m, row_max(s))]",
-        "        p = exp_shifted(s, m_new, SOFTMAX_DTYPE)        # P = exp(S - m')",
-        "        alpha = [math.exp(old - new) for old, new in zip(m, m_new)]",
-        "        l = [a * old + new for a, old, new in zip(alpha, l, row_sum(p))]",
+        _tag("        m_new = [max(old, new) for old, new in zip(m, row_max(s))]", *SOFTMAX),
+        _tag("        p = exp_shifted(s, m_new, SOFTMAX_DTYPE)        # P = exp(S - m')", *SOFTMAX),
+        _tag("        alpha = [math.exp(old - new) for old, new in zip(m, m_new)]", *SOFTMAX),
+        _tag("        l = [a * old + new for a, old, new in zip(alpha, l, row_sum(p))]", *SOFTMAX),
         '        ledger.add("scores", rows * (c1 - c0))',
         "        if j > 0:",
         "            # The max moved, so everything O holds was weighted against the old",
         "            # one: rescale it. On block 0, O is still zero and there is nothing to do.",
-        "            scale_rows(o, alpha)",
+        _tag("            scale_rows(o, alpha)", *SOFTMAX),
         '            ledger.add("rescaled", rows * HEAD_DIM)',
         "",
-        f"        matmul_{pv_flow.value}(o, p, v, SOFTMAX_DTYPE, counters, ledger,",
-        "                  PV_GROUP_SLICES)                # PV_STATIONARITY",
+        _tag(f"        matmul_{pv_flow.value}(o, p, v, SOFTMAX_DTYPE, counters, ledger,", *PV_KEYS),
+        _tag("                  PV_GROUP_SLICES)                # PV_STATIONARITY", *PV_KEYS),
         "        m = m_new",
         "        if DEBUG:",
         '            log(f"  kv block {j}: keys {c0}:{c1}, row max now {max(m):.4g}")',
         "",
-        "    divide_rows(o, l)                                   # O = O / l",
+        _tag("    divide_rows(o, l)                                   # O = O / l", *NORMALISE),
         '    ledger.add("normalised", rows * HEAD_DIM)',
-        "    O.write(head, r0, 0, o)",
+        _tag("    O.write(head, r0, 0, o)", *STORE_O),
         "    counters.count_tile()",
         "    if DEBUG:",
         "        log_flush()",
@@ -752,6 +801,21 @@ def check(program: FlashProgram) -> None:
                 f"{program.filename}: PREDICTED[{key!r}] is {actual!r}, but the plan says "
                 f"{expected!r}."
             )
+    lines = program.source.splitlines()
+    tagged = dict(program.stage_lines)
+    for key in ("load_q", "load_kv", "qk", "softmax", "pv", "normalise", "store_o"):
+        indices = tagged.get(key, ())
+        if not indices:
+            raise ValueError(
+                f"{program.filename}: no line carries the playback key {key!r}; --animate "
+                f"would play that step with nothing lit."
+            )
+        for index in indices:
+            if not 0 <= index < len(lines) or not lines[index].strip():
+                raise ValueError(
+                    f"{program.filename}: key {key!r} points at line {index}, which is not a "
+                    f"statement of the {len(lines)}-line file."
+                )
     for name, key in (("WAVES", "waves"), ("USED_CORES", "used_cores")):
         emitted = constants.get(name)
         if not isinstance(emitted, int) or emitted != program.predicted[key]:
@@ -761,19 +825,29 @@ def check(program: FlashProgram) -> None:
             )
 
 
-def _tidy(lines: list[str]) -> str:
-    """At most two blank lines in a row, none at either end."""
-    kept: list[str] = []
+def _tidy(lines: list[str]) -> tuple[str, tuple[tuple[str, tuple[int, ...]], ...]]:
+    """At most two blank lines in a row, none at either end — and where each key landed.
+
+    Line numbers are computed here, after the blank runs collapse, or every
+    index below the first collapse would point at the wrong statement.
+    """
+    kept: list[tuple[str, tuple[str, ...]]] = []
     blanks = 0
-    for line in lines:
-        blanks = blanks + 1 if not line.strip() else 0
+    for raw in lines:
+        text, _, tags = raw.partition(TAG)
+        blanks = blanks + 1 if not text.strip() else 0
         if blanks <= 2:
-            kept.append(line.rstrip())
-    while kept and not kept[0]:
+            kept.append((text.rstrip(), tuple(t for t in tags.split(",") if t)))
+    while kept and not kept[0][0]:
         kept.pop(0)
-    while kept and not kept[-1]:
+    while kept and not kept[-1][0]:
         kept.pop()
-    return "\n".join(kept) + "\n"
+    where: dict[str, list[int]] = {}
+    for index, (_text, keys) in enumerate(kept):
+        for tag in keys:
+            where.setdefault(tag, []).append(index)
+    source = "\n".join(text for text, _tags in kept) + "\n"
+    return source, tuple((tag, tuple(indices)) for tag, indices in where.items())
 
 
 __all__ = ["FlashProgram", "check", "default_filename", "emit_flash", "predicted_for"]

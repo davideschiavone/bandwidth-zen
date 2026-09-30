@@ -844,8 +844,9 @@ class _Step:
 
     label: str
     loads: tuple[tuple[Stage, str, float], ...]
-    compute: tuple[tuple[Lane, str, float, float, str], ...]
-    """``(lane, label, seconds, operations, operator family)``, in issue order."""
+    compute: tuple[tuple[Lane, str, float, float, str, str], ...]
+    """``(lane, label, seconds, operations, operator family, program key)``, in
+    issue order. The key names the emitted program's statement (D71)."""
     store: float
 
 
@@ -919,19 +920,21 @@ def flash_trace(chip: HardwareSpec, plan: FlashPlan, *, max_steps: int = 256) ->
                     2.0 * heads * crit.width * d * operand,
                 )
             )
-            compute: list[tuple[Lane, str, float, float, str]] = [
+            compute: list[tuple[Lane, str, float, float, str, str]] = [
                 (
                     Lane.CORE,
                     f"S = Q·Kᵀ, block {j}",
                     crit.t_qk_s,
                     n_full * big.qk_ops + n_tail * small.qk_ops,
                     "attention",
+                    "qk",
                 ),
                 (
                     Lane.VECTOR,
                     f"softmax{' + rescale O' if j else ''}, block {j}",
                     crit.t_softmax_s,
                     n_full * big.softmax_ops + n_tail * small.softmax_ops,
+                    "softmax",
                     "softmax",
                 ),
                 (
@@ -940,6 +943,7 @@ def flash_trace(chip: HardwareSpec, plan: FlashPlan, *, max_steps: int = 256) ->
                     crit.t_pv_s,
                     n_full * big.pv_ops + n_tail * small.pv_ops,
                     "attention",
+                    "pv",
                 ),
             ]
             if j == last_block:
@@ -950,6 +954,7 @@ def flash_trace(chip: HardwareSpec, plan: FlashPlan, *, max_steps: int = 256) ->
                         slowest.t_normalise_s,
                         float(n_full * full.normalised + n_tail * tail.normalised),
                         "softmax",
+                        "normalise",
                     )
                 )
             fine.append(
@@ -1002,6 +1007,7 @@ def flash_trace(chip: HardwareSpec, plan: FlashPlan, *, max_steps: int = 256) ->
                     GraphPhase.STATIC,
                     op_type="attention",
                     bytes_moved=moved,
+                    key="load_q" if stage is Stage.LOAD_A else "load_kv",
                 )
             )
             at = end
@@ -1025,6 +1031,7 @@ def flash_trace(chip: HardwareSpec, plan: FlashPlan, *, max_steps: int = 256) ->
                 GraphPhase.STATIC,
                 op_type="attention",
                 bytes_moved=moved,
+                key="store_o",
             )
         )
         dram_free = end
@@ -1032,7 +1039,7 @@ def flash_trace(chip: HardwareSpec, plan: FlashPlan, *, max_steps: int = 256) ->
     load(0)
     for i, step in enumerate(steps):
         at = max(load_end[i], compute_end.get(i - 1, start))
-        for lane, label, seconds, operations, family in step.compute:
+        for lane, label, seconds, operations, family, key in step.compute:
             spans.append(
                 Span(
                     lane,
@@ -1044,6 +1051,7 @@ def flash_trace(chip: HardwareSpec, plan: FlashPlan, *, max_steps: int = 256) ->
                     GraphPhase.STATIC,
                     op_type=family,
                     flops=operations,
+                    key=key,
                 )
             )
             at += seconds
@@ -1108,7 +1116,7 @@ def _coalesce(fine: list[_Step], max_steps: int) -> list[_Step]:
                 by_stage[stage] = by_stage.get(stage, 0.0) + moved
         work: dict[Lane, tuple[float, float]] = {}
         for step in run:
-            for lane, _label, seconds, operations, _family in step.compute:
+            for lane, _label, seconds, operations, _family, _key in step.compute:
                 time, ops = work.get(lane, (0.0, 0.0))
                 work[lane] = (time + seconds, ops + operations)
         label = f"{run[0].label} … {run[-1].label}"
@@ -1124,6 +1132,9 @@ def _coalesce(fine: list[_Step], max_steps: int) -> list[_Step]:
                         seconds,
                         operations,
                         "attention" if lane is Lane.CORE else "softmax",
+                        # A merged bar is several statements at once; the page
+                        # falls back to lighting every line of its lane.
+                        "",
                     )
                     for lane, (seconds, operations) in work.items()
                 ),

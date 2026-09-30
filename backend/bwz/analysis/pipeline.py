@@ -162,6 +162,11 @@ class Span:
     tile_end)`` this step covers — the same numbering ``deploy.py``'s
     ``GROUP``/``tile()`` macros use. ``None`` for a network's per-operation
     trace, which has no tile grid to index into (D48)."""
+    key: str = ""
+    """Which statement of an emitted program this span is, when a workload's
+    stage alone cannot say — FlashAttention's two array bars are both
+    ``Stage.EXEC`` on the core lane, one ``S = Q·Kᵀ`` and one ``P·V`` (D71). The
+    animation lights the program lines tagged with it."""
     grid: TileGrid | None = None
     """A lone matmul only: the decomposition this trace was built from (D53).
     ``grid.decode`` turns ``tile_start``/``tile_end`` into a (row, col) position

@@ -100,6 +100,7 @@ TEMPLATE = """<!doctype html>
   .geo-label {{ font-size: 11px; fill: var(--ink-2); }}
   .geo-highlight {{ fill-opacity: 0.55; }}
   .geo-boundary {{ stroke: var(--ink-3); stroke-width: 0.6; }}
+  .geo-discarded {{ fill: none; stroke: var(--ink-3); stroke-width: 1; stroke-dasharray: 3 2; }}
   #geocaption {{
     background: #17171a; color: #fff; border-radius: 7px; padding: 10px 14px;
     margin-top: 10px; font-size: 12px; line-height: 1.55; max-width: 480px;
@@ -128,29 +129,7 @@ TEMPLATE = """<!doctype html>
   {banner}
   {notes}
 </div>
-<p class="hint">Stations are the chip profile's own declared resources — one per memory level and
-compute unit, grey for the ones this model doesn't cost (hover a grey station for why, same as
-the timeline's rows, D20/D43). Blocks are sized from each event's own bytes, log-compressed so the
-smallest and largest both stay visible — not to scale against each other or against the stations.
-Solid blocks are operand B, hatched blocks are operand A streaming (D31), hollow blocks are the
-result written back. Each compute station glows independently while it executes — never "entering"
-it, since the byte/flop model has no event distinct from the arithmetic itself for that moment; two
-different engines never glow together, because operations run in strict sequence in this model
-(D5a). The pseudo-C on the right lights up the line(s) executing right now — more than one at once
-when double buffering means more than one statement is truly concurrent (D41). Below, A/B/C's own
-shapes (schematic, not to scale, D48): the tile grid has a row axis and a column axis, and every
-tile sweeps the third dimension in full, so an operand is cut along a dimension exactly when the
-grid carries it and covered whole along the one it sweeps (D53). Under weight-stationary that
-gives B the 2-D grid and C a set of column bands; under output-stationary it is the other way
-round. The caption below names which. The lit cell tracks whichever operand the current instant
-actually touches. <b>Reading a tile address:</b> a tile is named
-<code>Operand(row,col)</code>, row-major within the grid, 0-indexed; <code>:</code> in either
-position means that dimension is swept in full rather than cut, so <code>C(:,col)</code> is one
-column band of C over the whole of M. A comma-range like <code>0..124</code> is not one tile — it
-names *every* tile in that row from column 0 through 124 inclusive, compacted so a wave of
-hundreds of tiles reads as a few ranges instead of being spelled out one by one:
-<code>B(0,0..124); B(1,0..124); B(2,0..124); B(3,0..56)</code> is
-<code>125 + 125 + 125 + 57 = 432</code> tiles, not 4.</p>
+<p class="hint">{intro}</p>
 
 <div id="controls">
   <button id="playBtn">Play</button>
@@ -267,7 +246,10 @@ function updateCodeHighlight(events) {{
   // Lane.CORE, nothing to disambiguate).
   const hotLineLane = new Map();
   events.forEach(f => {{
-    const lines = DATA.stage_lines[f.stage + "_" + f.lane] || DATA.stage_lines[f.stage];
+    // A span's own key first: FlashAttention's two array bars share a stage and
+    // a lane, and only the key says which statement is running (D71).
+    const lines = (f.key && DATA.stage_lines[f.key]) ||
+      DATA.stage_lines[f.stage + "_" + f.lane] || DATA.stage_lines[f.stage];
     (lines || []).forEach(l => hotLineLane.set(l, f.lane));
   }});
 
@@ -331,9 +313,10 @@ const geoSvg = document.getElementById("geometry");
 const geoCaption = document.getElementById("geocaption");
 const georow = document.getElementById("georow");
 const GEO = DATA.geometry;
+const FLASH = DATA.flash;
 const GEO_GAP = 14, GEO_MIN_PX = 40, GEO_MAX_PX = 200, GEO_GRID_CAP = 40;
 
-if (!GEO) {{
+if (!GEO && !FLASH) {{
   georow.style.display = "none";
   geoCaption.style.display = "none";
 }}
@@ -411,7 +394,123 @@ function geoRects(segs, dimV, dimH) {{
   return out;
 }}
 
+// ---- the FlashAttention panel (D71) ----------------------------------------
+// Q on the left, Kᵀ (and V, the same blocks) on top, the score matrix S in the
+// middle, O on the right — one head, cut into Br x Bc blocks. The block being
+// computed lights on the array, then on the vector unit while the softmax runs;
+// the blocks this wave already consumed are drawn dashed, because FlashAttention
+// never stores S: only O ever reaches DRAM.
+function drawFlash(events) {{
+  while (geoSvg.firstChild) geoSvg.removeChild(geoSvg.firstChild);
+  const F = FLASH;
+  const vals = [F.q_len, F.kv_len, F.d];
+  const lo = Math.log1p(Math.min(...vals)), hi = Math.log1p(Math.max(...vals));
+  const px = v => hi === lo ? (GEO_MIN_PX + GEO_MAX_PX) / 2
+    : GEO_MIN_PX + (Math.log1p(v) - lo) / (hi - lo) * (GEO_MAX_PX - GEO_MIN_PX);
+  const qPx = px(F.q_len), kvPx = px(F.kv_len), dPx = px(F.d);
+  // A left margin, or Q's label — centred over a column only d wide — runs off
+  // the viewBox for any wide shape.
+  const TOP = 16, LEFT = 36;
+  const qX = LEFT, sX = qX + dPx + GEO_GAP, oX = sX + kvPx + GEO_GAP;
+  const kY = TOP, sY = TOP + dPx + GEO_GAP;
+  geoSvg.setAttribute("viewBox", `0 0 ${{oX + dPx + 10}} ${{sY + qPx + 16}}`);
+
+  const box = (x, y, w, h, label) => {{
+    geoSvg.appendChild(el("rect", {{class: "geo-rect", x, y, width: w, height: h}}));
+    geoSvg.appendChild(el("text", {{
+      class: "geo-label", x: x + w / 2, y: y - 5, "text-anchor": "middle",
+    }}, label));
+  }};
+  box(qX, sY, dPx, qPx, `Q ${{F.q_len}}x${{F.d}}`);
+  box(sX, kY, kvPx, dPx, `Kᵀ ${{F.d}}x${{F.kv_len}} (and V)`);
+  box(sX, sY, kvPx, qPx, "S — never stored");
+  box(oX, sY, dPx, qPx, `O ${{F.q_len}}x${{F.d}}`);
+
+  const rowsCut = Math.max(1, Math.ceil(F.q_blocks / GEO_GRID_CAP));
+  const colsCut = Math.max(1, Math.ceil(F.kv_blocks / GEO_GRID_CAP));
+  const hLines = (x, w) => {{
+    for (let i = rowsCut; i < F.q_blocks; i += rowsCut) {{
+      const y = sY + (i / F.q_blocks) * qPx;
+      geoSvg.appendChild(el("line", {{class: "geo-grid", x1: x, x2: x + w, y1: y, y2: y}}));
+    }}
+  }};
+  const vLines = (y, h) => {{
+    for (let i = colsCut; i < F.kv_blocks; i += colsCut) {{
+      const x = sX + (i / F.kv_blocks) * kvPx;
+      geoSvg.appendChild(el("line", {{class: "geo-grid", x1: x, x2: x, y1: y, y2: y + h}}));
+    }}
+  }};
+  hLines(qX, dPx); hLines(sX, kvPx); hLines(oX, dPx);
+  vLines(kY, dPx); vLines(sY, qPx);
+
+  const live = events.filter(f => f.step != null && f.stage !== "hold");
+  if (F.coalesced || !live.length) {{
+    geoCaption.innerHTML = '<div class="geo-static">' + (F.coalesced
+      ? "Steps are coalesced at this size, so no single block is live — pass a larger " +
+        "--steps, or a smaller shape, to watch S fill block by block."
+      : "S is computed one Br x Bc block at a time on the array, softmaxed on the vector " +
+        "unit, used for O += P·V and thrown away.") + "</div>";
+    return;
+  }}
+  const step = live[0].step;
+  const wave = Math.floor(step / F.kv_blocks), j = step % F.kv_blocks;
+  const first = wave * F.used, last = Math.min((wave + 1) * F.used, F.programs) - 1;
+  const rowBlocks = new Set(), heads = new Set();
+  for (let p = first; p <= last; p++) {{
+    rowBlocks.add(p % F.q_blocks);
+    heads.add(Math.floor(p / F.q_blocks));
+  }}
+  const keys = new Set(live.map(f => f.key));
+  const rowSpan = r => [sY + (r / F.q_blocks) * qPx, sY + ((r + 1) / F.q_blocks) * qPx];
+  const colSpan = c => [sX + (c / F.kv_blocks) * kvPx, sX + ((c + 1) / F.kv_blocks) * kvPx];
+  const paint = (x0, y0, x1, y1, colour) => geoSvg.appendChild(el("rect", {{
+    class: "geo-highlight", x: x0, y: y0, width: x1 - x0, height: y1 - y0, style: "fill:" + colour,
+  }}));
+  rowBlocks.forEach(r => {{
+    const [y0, y1] = rowSpan(r);
+    for (let c = 0; c < j; c++) {{
+      const [x0, x1] = colSpan(c);
+      geoSvg.appendChild(el("rect", {{
+        class: "geo-discarded", x: x0, y: y0, width: x1 - x0, height: y1 - y0,
+      }}));
+    }}
+    const [x0, x1] = colSpan(j);
+    if (keys.has("load_q")) paint(qX, y0, qX + dPx, y1, COLOUR.dram);
+    if (keys.has("qk")) paint(x0, y0, x1, y1, COLOUR.core);
+    if (keys.has("softmax")) paint(x0, y0, x1, y1, COLOUR.vector);
+    if (keys.has("pv")) paint(oX, y0, oX + dPx, y1, COLOUR.core);
+    if (keys.has("normalise")) paint(oX, y0, oX + dPx, y1, COLOUR.vector);
+    if (keys.has("store_o")) paint(oX, y0, oX + dPx, y1, COLOUR.dram);
+  }});
+  if (keys.has("load_kv")) {{
+    const [x0, x1] = colSpan(j);
+    paint(x0, kY, x1, kY + dPx, COLOUR.dram);
+  }}
+  const doing = [];
+  if (keys.has("load_q")) doing.push("loading Q for this wave's programs");
+  if (keys.has("load_kv")) {{
+    doing.push(`staging K_${{j}} and V_${{j}}, shared by the wave's programs of each head`);
+  }}
+  if (keys.has("qk")) doing.push(`S = Q·Kᵀ for block ${{j}} on the array`);
+  if (keys.has("softmax")) {{
+    doing.push(j ? "online softmax and the rescale of O on the vector unit"
+      : "online softmax on the vector unit");
+  }}
+  if (keys.has("pv")) doing.push(`O += P·V_${{j}} on the array`);
+  if (keys.has("normalise")) doing.push("O = O / l");
+  if (keys.has("store_o")) doing.push("writing O back");
+  const hs = [...heads];
+  geoCaption.innerHTML =
+    `<div class="geo-static">wave ${{wave + 1}} of ${{F.waves}} · kv block ${{j + 1}} of ` +
+    `${{F.kv_blocks}} · head${{hs.length > 1 ? "s" : ""}} ${{Math.min(...hs)}}` +
+    `${{hs.length > 1 ? ".." + Math.max(...hs) : ""}} · Q row block(s) ` +
+    `${{formatIndexRanges([...rowBlocks])}} of ${{F.q_blocks}} (Br=${{F.br}}, Bc=${{F.bc}}). ` +
+    `Dashed: S blocks this wave already used and discarded.</div>` +
+    `<div class="geo-active">${{doing.join(" · ") || "waiting"}}</div>`;
+}}
+
 function drawGeometry(events) {{
+  if (FLASH) {{ drawFlash(events); return; }}
   if (!GEO) return;
   while (geoSvg.firstChild) geoSvg.removeChild(geoSvg.firstChild);
 
@@ -807,6 +906,47 @@ syncScrub();
 """
 
 
+MATMUL_INTRO = """Stations are the chip profile's own declared resources — one per memory level and
+compute unit, grey for the ones this model doesn't cost (hover a grey station for why, same as
+the timeline's rows, D20/D43). Blocks are sized from each event's own bytes, log-compressed so the
+smallest and largest both stay visible — not to scale against each other or against the stations.
+Solid blocks are operand B, hatched blocks are operand A streaming (D31), hollow blocks are the
+result written back. Each compute station glows independently while it executes — never "entering"
+it, since the byte/flop model has no event distinct from the arithmetic itself for that moment; two
+different engines never glow together, because operations run in strict sequence in this model
+(D5a). The pseudo-C on the right lights up the line(s) executing right now — more than one at once
+when double buffering means more than one statement is truly concurrent (D41). Below, A/B/C's own
+shapes (schematic, not to scale, D48): the tile grid has a row axis and a column axis, and every
+tile sweeps the third dimension in full, so an operand is cut along a dimension exactly when the
+grid carries it and covered whole along the one it sweeps (D53). Under weight-stationary that
+gives B the 2-D grid and C a set of column bands; under output-stationary it is the other way
+round. The caption below names which. The lit cell tracks whichever operand the current instant
+actually touches. <b>Reading a tile address:</b> a tile is named
+<code>Operand(row,col)</code>, row-major within the grid, 0-indexed; <code>:</code> in either
+position means that dimension is swept in full rather than cut, so <code>C(:,col)</code> is one
+column band of C over the whole of M. A comma-range like <code>0..124</code> is not one tile — it
+names *every* tile in that row from column 0 through 124 inclusive, compacted so a wave of
+hundreds of tiles reads as a few ranges instead of being spelled out one by one:
+<code>B(0,0..124); B(1,0..124); B(2,0..124); B(3,0..56)</code> is
+<code>125 + 125 + 125 + 57 = 432</code> tiles, not 4."""
+"""The help paragraph a matmul or network playback carries."""
+
+FLASH_INTRO = (
+    "Stations are the chip profile's own declared resources — one per memory level and compute "
+    "unit, grey for the ones this model doesn't cost (D20/D43). Blocks are sized from each "
+    "event's own bytes, log-compressed. Hatched blocks are <b>Q</b> (read on a wave's first kv "
+    "block), solid blocks a <b>K and V</b> block (shared by every program of the head in the "
+    "wave, D33), hollow blocks <b>O</b> written back. The array glows for S = Q&middot;K&#7488; "
+    "and O += P&middot;V, the vector unit for the online softmax between them — never both at "
+    "once, because FlashAttention-2 runs that chain serially. The program on the right lights "
+    "the statement executing right now. Below: one head's Q, K&#7488; and O, and the score "
+    "matrix S cut into Br x Bc blocks. The live block lights on the engine working on it; "
+    "dashed blocks were already used by this wave and thrown away — S is never stored, which "
+    "is the whole of FlashAttention (D71)."
+)
+"""The help paragraph a FlashAttention playback carries (D71)."""
+
+
 def render(
     *,
     title: str,
@@ -823,6 +963,9 @@ def render(
     code_lines: list[str],
     stage_lines: dict[str, list[int]],
     geometry: dict[str, object] | None = None,
+    flash: dict[str, object] | None = None,
+    banner: str | None = None,
+    intro: str | None = None,
 ) -> str:
     """Build the page. Pure: returns text, writes nothing.
 
@@ -842,6 +985,12 @@ def render(
     re-derivation, so the panel draws whichever operand this chip's
     stationarity actually keeps resident. ``None`` for a network workload,
     which has no tile grid; the geometry panel renders nothing in that case.
+
+    ``flash`` replaces it for a FlashAttention plan (D71): the shape and blocks —
+    ``q_len``, ``kv_len``, ``d``, ``br``, ``bc``, ``q_blocks``, ``kv_blocks``,
+    ``waves``, ``used``, ``programs`` and whether steps were ``coalesced`` — from
+    which the panel works out which (wave, kv block) each event is. ``banner``
+    overrides the strategy line for a workload the matmul vocabulary does not fit.
     """
     data = json.dumps(
         {
@@ -852,6 +1001,7 @@ def render(
             "stations": stations,
             "stage_lines": stage_lines,
             "geometry": geometry,
+            "flash": flash,
         }
     )
     # Stationarity first: it decides the whole decomposition the other two knobs
@@ -876,7 +1026,7 @@ def render(
             "<b>workload</b> a network graph — operations run in sequence (D5a), "
             "no single A/B dataflow strategy to name"
         )
-    banner = " &nbsp; · &nbsp; ".join(parts)
+    banner = banner if banner is not None else " &nbsp; · &nbsp; ".join(parts)
     notes_html = (
         "<ul>" + "".join(f"<li>{_escape(n)}</li>" for n in notes) + "</ul>" if notes else ""
     )
@@ -892,6 +1042,7 @@ def render(
         banner=banner,
         notes=notes_html,
         code=code_html,
+        intro=intro if intro is not None else (FLASH_INTRO if flash is not None else MATMUL_INTRO),
     )
 
 

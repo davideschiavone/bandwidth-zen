@@ -137,6 +137,9 @@ class Workload:
     unit_noun: str = "tile"
     """What one piece of work handed to a matrix unit is called — a tile of a
     matmul's grid, or a FlashAttention program."""
+    flash_geometry: dict[str, object] | None = None
+    """The blocks the ``--animate`` FlashAttention panel draws the score matrix
+    with (D71): shape, ``Br``/``Bc``, waves and whether steps were coalesced."""
     vector_units_used: int | None = None
     """Vector lanes this workload engages, when it is not the whole unit: a
     FlashAttention program gets its unit's share of the vector unit, so eight
@@ -1071,6 +1074,7 @@ def _flow_spans(trace: PipelineTrace) -> list[dict[str, object]]:
                 "step": span.step,
                 "tile_start": span.tile_start,
                 "tile_end": span.tile_end,
+                "key": span.key or None,
             }
         )
     return out
@@ -1093,6 +1097,9 @@ def write_animation(panel: Panel, command: str, out: Path) -> None:
     a second compute engine gets more stations, not a collapsed picture of one.
     """
     work = panel.work
+    if work.flash_program is not None:
+        _write_flash_animation(panel, command, out)
+        return
     dataflow = work.dataflow
     assert work.phase is not None, "every --animate workload carries its phase"
     # The code pane shows the RUNNABLE program where there is one (D54): the
@@ -1173,6 +1180,48 @@ def write_animation(panel: Panel, command: str, out: Path) -> None:
         code_lines=code_lines,
         stage_lines=stage_lines,
         geometry=geometry,
+    )
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(page, encoding="utf-8")
+
+
+def _write_flash_animation(panel: Panel, command: str, out: Path) -> None:
+    """A FlashAttention plan played back (D71): the same stations and the same trace
+    as the timeline, the emitted program in the code pane — each event lighting the
+    statement its ``Span.key`` names — and the score-matrix panel instead of the
+    matmul's tile grid."""
+    work = panel.work
+    program = work.flash_program
+    assert program is not None
+    stations: list[dict[str, object]] = [
+        {
+            "name": row.title,
+            "detail": row.detail,
+            "note": row.note,
+            "lane": row.lane.value if row.lane else None,
+        }
+        for row in rows_for(panel)
+    ]
+    page = render_animation(
+        title=_title([panel]),
+        subtitle=_subtitle([panel]),
+        footer=(
+            f"bwz {bwz.__version__}{_git()} — playback of the same schedule the timeline "
+            f"draws; the reported latency, not the drawn span, is the ground truth."
+            f"<br><code>$ {command}</code>"
+        ),
+        flow=_flow_spans(work.trace),
+        total_s=work.trace.total_s,
+        reported_latency_s=work.trace.reported_latency_s,
+        fill_drain_s=work.trace.fill_drain_s,
+        stations=stations,
+        a_strategy=None,
+        b_dataflow=None,
+        notes=[],
+        code_lines=program.source.split("\n"),
+        stage_lines={tag: list(indices) for tag, indices in program.stage_lines},
+        flash=work.flash_geometry,
+        banner=work.banner,
     )
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(page, encoding="utf-8")
@@ -1556,9 +1605,10 @@ def build_flash(
         f"row, then S = Q·Kᵀ ({qk}) and O += P·V ({pv}) on the array with the online "
         f"softmax between them on {plan.vector_unit_name}."
     )
+    trace = flash_trace(chip, plan, max_steps=steps)
     work = Workload(
-        name=(f"attention {shape.batch}x{shape.heads} heads, S={shape.q_len}, d={shape.head_dim}"),
-        trace=flash_trace(chip, plan, max_steps=steps),
+        name=f"attention {shape.batch}x{shape.heads} heads, S={shape.q_len}, d={shape.head_dim}",
+        trace=trace,
         explanations=(),
         flops=2.0 * shape.macs,
         dram_bytes=chosen.dram_bytes,
@@ -1572,6 +1622,19 @@ def build_flash(
         legend=FLASH_LEGEND,
         program_intro=FLASH_PROGRAM_INTRO,
         unit_noun="program",
+        flash_geometry={
+            "q_len": shape.q_len,
+            "kv_len": shape.kv_len,
+            "d": shape.head_dim,
+            "br": chosen.br,
+            "bc": chosen.bc,
+            "q_blocks": chosen.q_blocks,
+            "kv_blocks": chosen.kv_blocks,
+            "waves": chosen.waves,
+            "used": chosen.used_cores,
+            "programs": chosen.programs,
+            "coalesced": trace.coalesced,
+        },
         vector_units_used=chosen.used_cores
         * max(1, machine_model(chip, shape.dtype).vector_unit.count // plan.units),
     )

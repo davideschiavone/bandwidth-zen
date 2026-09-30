@@ -942,3 +942,10 @@ program running the block — `S = Q·Kᵀ`, softmax, `P·V`. Loads are schedule
 K/V double buffered when the plan says a second buffer fits. The step costs come from
 `program_steps`, the same function the planner sums, so each lane sums back to its term exactly
 and the span exceeds the reported latency only by the fill/drain `max()` omits (D19).
+
+**The playback (D72).** `--animate` plays the same trace. Every span carries a `key` —
+`load_q`, `load_kv`, `qk`, `softmax`, `pv`, `normalise`, `store_o` — that the emitter tagged the
+program's lines with as it wrote them, so the code pane lights the statement running at each
+instant, and a panel draws one head's score matrix filling block by block, the consumed blocks
+dashed because S is never stored.
+
