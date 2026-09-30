@@ -22,18 +22,18 @@ Each `.html` file is self-contained. Download or clone the repository, then doub
 `deck.html` or `notebook.html`. It opens in your default browser.
 
 > Clicking an `.html` file on github.com shows its **source code**, not the page. To view it,
-> download it (the "Download raw file" button) and open it locally, or use the GitHub Pages
-> link below.
+> download it (the "Download raw file" button) and open it locally, or use the online link below.
 
-**Option 2: GitHub Pages link.** If Pages is enabled for this repository (Settings → Pages →
-"Deploy from a branch", branch `main`, folder `/ (root)`), the pages are served at
-`https://<user>.github.io/<repo>/matmul-rearranged/`. If the repository serves Pages from `/docs`
-instead, this folder has to live under `docs/` to be published.
+**Option 2: online.** The folder is published with GitHub Pages at
+**https://davideschiavone.github.io/bandwidth-zen/** (landing page), with
+[`deck.html`](https://davideschiavone.github.io/bandwidth-zen/deck.html) and
+[`notebook.html`](https://davideschiavone.github.io/bandwidth-zen/notebook.html) next to it.
+The workflow `.github/workflows/pages.yml` redeploys it whenever this folder changes on `main`.
 
 **Option 3: a local web server** (optional; only needed if your browser restricts local files):
 
 ```bash
-cd matmul-rearranged
+cd matmul-notebook
 python3 -m http.server 8000     # then open http://localhost:8000
 ```
 
