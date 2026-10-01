@@ -13,6 +13,7 @@ const fail = (msg) => { failures++; console.log('  FAIL ' + msg); };
 
 // ---------------- part 1: simulators ----------------
 require(path.join(ROOT, '..', 'matmul', 'src', 'engine2.js'));
+require(path.join(ROOT, '..', 'common', 'widget.js'));
 require(path.join(ROOT, 'src', 'engine.js'));
 const A = globalThis.ATT, X = globalThis.MM2;
 let n = 0;

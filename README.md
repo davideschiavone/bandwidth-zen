@@ -23,9 +23,10 @@ every assumption it made.
 
 Animated slide decks and interactive notebooks that show, on tiny hand-checkable examples, what the
 model reasons about: how a **matmul** maps onto a chip ([deck](https://davideschiavone.github.io/bandwidth-zen/matmul/deck.html) ·
-[notebook](https://davideschiavone.github.io/bandwidth-zen/matmul/notebook.html)) and how **attention** becomes FlashAttention
-([deck](https://davideschiavone.github.io/bandwidth-zen/attention/deck.html) · [notebook](https://davideschiavone.github.io/bandwidth-zen/attention/notebook.html)) — every knob is a
-`bwz` flag. The sources, and how to rebuild and test them, are in [`notebook/`](notebook/README.md).
+[notebook](https://davideschiavone.github.io/bandwidth-zen/matmul/notebook.html)) how **attention** becomes FlashAttention
+([deck](https://davideschiavone.github.io/bandwidth-zen/attention/deck.html) · [notebook](https://davideschiavone.github.io/bandwidth-zen/attention/notebook.html)), and what one
+**encoder layer** does and costs ([deck](https://davideschiavone.github.io/bandwidth-zen/encoder/deck.html) ·
+[notebook](https://davideschiavone.github.io/bandwidth-zen/encoder/notebook.html)). The sources, and how to rebuild and test them, are in [`notebook/`](notebook/README.md).
 
 ## What it does
 

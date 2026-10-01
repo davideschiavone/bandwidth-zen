@@ -34,7 +34,7 @@
 <main>
   <p class="eyebrow">bandwidth-zen · interactive notebooks and slide decks</p>
   <h1>How a workload maps onto a chip</h1>
-  <p>Small, hand-checkable examples of the two kernels at the heart of a transformer, animated step by step. Every animation ends by checking its result against the textbook formula, and every knob is a flag of the <code>bwz</code> command-line model.</p>
+  <p>Small, hand-checkable examples of the kernels at the heart of a transformer, and of the layer they make, animated step by step. Every animation ends by checking its result against the textbook formula, and every knob is a flag of the <code>bwz</code> command-line model.</p>
 
   <section class="topic">
     <p class="eyebrow">One multiplication · many loop orders · one 4×4 example</p>
@@ -55,6 +55,17 @@
     <div class="cards">
       <a class="card" href="attention/deck.html"><b>Slide deck</b><span>15 slides with step-by-step animations.</span><em>open attention/deck.html →</em></a>
       <a class="card" href="attention/notebook.html"><b>Interactive notebook</b><span>12 chapters and live knobs: -S, --kv-len, --head-dim, --heads, --batch, --br, --bc, --stationarity, cores.</span><em>open attention/notebook.html →</em></a>
+    </div>
+  </section>
+
+  <section class="topic">
+    <p class="eyebrow">Matmuls and attention, put together</p>
+    <h2 class="topic">One encoder layer</h2>
+    <p class="formula">x → x + Attention(norm(x)) → x + FFN(norm(x))</p>
+    <p>The block BERT and ViT stack a dozen times, one operation at a time on numbers small enough to check — then the same operations at real sizes on A100, H100 and an edge NPU: where the parameters are, how tokens and width scale it, which operations are compute- or memory-bound, and what a batch changes.</p>
+    <div class="cards">
+      <a class="card" href="encoder/deck.html"><b>Slide deck</b><span>12 slides with step-by-step animations.</span><em>open encoder/deck.html →</em></a>
+      <a class="card" href="encoder/notebook.html"><b>Interactive notebook</b><span>12 chapters and live knobs: tokens, width, heads, FFN width, activation, norm, batch, chip.</span><em>open encoder/notebook.html →</em></a>
     </div>
   </section>
 

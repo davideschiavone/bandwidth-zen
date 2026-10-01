@@ -1,0 +1,89 @@
+<section class="slide title-slide" data-sec="Start">
+  <p class="eyebrow">Matmuls and attention, put together</p>
+  <h1>One encoder layer</h1>
+  <p class="formula">x → x + Attention(norm(x)) → x + FFN(norm(x))</p>
+  <p class="lede">The block BERT and ViT stack a dozen times. This deck walks it one operation at a time on numbers small enough to check, then prices the same operations at real sizes on real chips.</p>
+  <div class="keys">
+    <span><kbd>→</kbd> next build or animation step</span><span><kbd>↓</kbd> next half-layer</span><span><kbd>←</kbd> back</span>
+    <span><kbd>PgDn</kbd> / <kbd>N</kbd> next slide</span><span><kbd>P</kbd> play</span><span><kbd>E</kbd> finish animation</span>
+  </div>
+</section>
+
+<section class="slide" data-sec="The sizes">
+  <h2>What goes in, what comes out</h2>
+  <div class="points">
+    <p class="b">An encoder reads <b>all its tokens at once</b> — a sentence, or an image cut into patches — and a layer turns <b>S token vectors of width d</b> into S new ones of the same width.</p>
+    <p class="b small"><b>S</b> = tokens (512 for BERT, 197 patches for ViT-B/16) · <b>d</b> = model width (768 for BERT-base, 4096 for an 8B model) · <b>h</b> heads of d/h each · <b>ffn</b> = the FFN's inner width, usually 4·d.</p>
+    <p class="b">Two halves, each added back onto x: <b>attention</b> lets tokens look at each other; the <b>FFN</b> works on each token alone.</p>
+  </div>
+</section>
+
+<section class="slide" data-sec="Op by op">
+  <h2>The layer, one operation per step</h2>
+  <p>4 tokens, d = 8, 2 heads, ffn = 16: 664 parameters, 5280 operations. The run ends with the walk checked against the same layer computed token by token.</p>
+  <div data-widget='{"type":"layer"}'></div>
+</section>
+
+<section class="slide" data-sec="Attention half">
+  <h2>Attention: the only place tokens mix</h2>
+  <div class="points">
+    <p class="b">Q, K, V are three plain matmuls, <b>[S, d] × [d, d]</b>, the same weights for every token — the matmul deck's subject.</p>
+    <p class="b">Attention mixes tokens: each output row is a weighted average of all the V rows — the attention deck's subject, once per head.</p>
+    <p class="b">The output projection mixes the heads back, and the <b>residual add</b> keeps x: the layer only adds a correction.</p>
+  </div>
+</section>
+
+<section class="slide" data-sec="FFN half">
+  <h2>The FFN: each token on its own, and the biggest part</h2>
+  <p>Widen d → ffn, an activation element by element, narrow back. Gated forms (SwiGLU, GeGLU) add a third matrix.</p>
+  <div data-widget='{"type":"layer","S":3,"d":4,"h":1,"ffn":8,"act":"gelu","knobs":[{"k":"act","v":["relu","gelu","swiglu","geglu"]}]}'></div>
+</section>
+
+<section class="slide" data-sec="Parameters">
+  <h2>Where the parameters are</h2>
+  <p>A BERT-base layer: the four projections hold <b>4·d²</b>, the FFN <b>2·d·ffn = 8·d²</b> — two thirds of the layer. Step to price each operation on an A100.</p>
+  <div data-widget='{"type":"cost","S":128,"d":768,"h":12,"ffn":3072,"act":"gelu","norm":"layernorm","vocab":30522,"chip":"a100"}'></div>
+</section>
+
+<section class="slide" data-sec="More tokens">
+  <h2>More tokens: attention grows as S²</h2>
+  <p>Every matmul grows with S; attention with S². The same BERT layer at more and more tokens.</p>
+  <div data-widget='{"type":"cost","S":512,"d":768,"h":12,"ffn":3072,"act":"gelu","norm":"layernorm","vocab":30522,"chip":"a100","knobs":[{"k":"S","v":[128,512,2048,8192]}]}'></div>
+</section>
+
+<section class="slide" data-sec="Three chips">
+  <h2>Same layer, three chips: the bound flips</h2>
+  <p>A projection at 512 tokens does about 220 operations per byte: above A100's ridge (153) — compute-bound; below H100's (295) — memory-bound; far below an edge NPU's (6168).</p>
+  <div data-widget='{"type":"cost","S":512,"d":768,"h":12,"ffn":3072,"act":"gelu","norm":"layernorm","vocab":30522,"chip":"a100","knobs":[{"k":"chip","v":["a100","h100","chip_a"],"labels":["A100","H100","edge NPU"]}]}'></div>
+</section>
+
+<section class="slide" data-sec="Cheap operations">
+  <h2>Norms, activations, residuals: memory-bound everywhere</h2>
+  <div class="points">
+    <p class="b">A few operations per number read and written: 1 to 4 OP per byte, against ridge points in the hundreds.</p>
+    <p class="b">So on every chip they wait on memory — a small share of the time, but pure overhead.</p>
+    <p class="b">Real kernels <b>fuse</b> them into the neighbouring matmul: the data is already on chip, and the extra pass over memory disappears.</p>
+  </div>
+</section>
+
+<section class="slide" data-sec="Batch">
+  <h2>Batch: more rows, the same weights</h2>
+  <p>B sentences are B·S rows for every projection and FFN — the weights are read once and used B times more, so their OP per byte rises. Each sentence still attends only to itself.</p>
+  <div data-widget='{"type":"cost","S":128,"d":768,"h":12,"ffn":3072,"act":"gelu","norm":"layernorm","vocab":30522,"chip":"h100","knobs":[{"k":"batch","v":[1,4,16]}]}'></div>
+</section>
+
+<section class="slide" data-sec="Summary">
+  <h2>What scales with what</h2>
+  <div class="tw"><table class="rule">
+    <tr><th>part</th><th>operations</th><th>parameters</th><th>usually</th></tr>
+    <tr class="b"><td>Q, K, V, O projections</td><td>8·S·d²</td><td>4·d²</td><td>compute-bound at hundreds of tokens</td></tr>
+    <tr class="b"><td>attention</td><td>4·S²·d</td><td>—</td><td>grows fastest with tokens</td></tr>
+    <tr class="b"><td>FFN</td><td>4·S·d·ffn (6· gated)</td><td>2·d·ffn (3· gated)</td><td>the biggest share</td></tr>
+    <tr class="b"><td>norms, activation, residuals</td><td>a few per element</td><td>≈ 0</td><td>memory-bound, fused away</td></tr>
+  </table></div>
+</section>
+
+<section class="slide title-slide" data-sec="End">
+  <h1>Two halves, added to x</h1>
+  <p class="lede">The matmul and attention decks explain the two kinds of operation inside; the notebook lets you turn every size, activation, norm, chip and batch yourself.</p>
+</section>

@@ -15,6 +15,7 @@ from shell import deck_page, lab_page  # noqa: E402
 os.chdir(HERE)
 
 MM2 = open(os.path.join(DEST, '..', 'matmul', 'src', 'engine2.js')).read()
+WIDGET = open(os.path.join(DEST, '..', 'common', 'widget.js')).read()
 ENGINE = open('engine.js').read()
 LABJS = open('lab.js').read()
 CSS = open('attention.css').read()
@@ -24,12 +25,12 @@ FORMULA = ('<span class="tc">O</span> = softmax(<span class="ta">Q</span> <span 
 
 def build_lab():
     page = lab_page('Attention Blocked Notebook', 'Interactive notebook · pick a chapter, then turn the knobs — they are bwz attention\'s own flags',
-                    'Attention, blocked', FORMULA, [MM2, ENGINE, LABJS], CSS)
+                    'Attention, blocked', FORMULA, [MM2, WIDGET, ENGINE, LABJS], CSS)
     open(os.path.join(DEST, 'notebook.html'), 'w', encoding='utf-8').write(page)
 
 
 def build_deck():
-    page = deck_page('Attention Blocked Deck', 'Attention, blocked', open('deck_slides.html').read(), [MM2, ENGINE], CSS)
+    page = deck_page('Attention Blocked Deck', 'Attention, blocked', open('deck_slides.html').read(), [MM2, WIDGET, ENGINE], CSS)
     open(os.path.join(DEST, 'deck.html'), 'w', encoding='utf-8').write(page)
 
 

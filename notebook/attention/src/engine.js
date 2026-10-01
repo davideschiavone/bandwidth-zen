@@ -507,34 +507,10 @@
   Object.defineProperty(InnerView.prototype, 'timer', { get() { return this.view.timer; } });
   ['step', 'back', 'go', 'inner', 'finish', 'reset', 'atEnd', 'atStart', 'play', 'stop', 'keydown', 'destroy', 'trace'].forEach((m) => { InnerView.prototype[m] = function () { return this.view[m].apply(this.view, arguments); }; });
 
-  // ---------------- deck mount ----------------
+  // ---------------- deck mount (shared factory: ../../common/widget.js) ----------------
   const DEFAULTS = { S: 4, T: 4, d: 2, heads: 1, batch: 1, Br: 2, Bc: 2, cores: 1, tile: 1, qk: 'os', pv: 'os', seed: 0 };
   const KNOB_LAB = { Br: 'Br', Bc: 'Bc', cores: 'cores', qk: 'S = QKᵀ flow', heads: 'heads', batch: 'batch', S: 'queries', tile: 'array tile' };
-  const VIEWS = { flash: FlashView, naive: NaiveView, inner: InnerView };
-  function Widget(root, cfg) {
-    const st = Object.assign({}, DEFAULTS, cfg);
-    root.classList.add('stack');
-    const knobs = el('div', 'pv-knobs'); root.appendChild(knobs);
-    const host = el('div'); root.appendChild(host);
-    const make = () => {
-      if (this.view) this.view.destroy();
-      host.innerHTML = ''; const d = el('div'); host.appendChild(d);
-      const P = problem(st);
-      this.view = new VIEWS[st.type](d, Object.assign({}, st, { P }));
-      knobs.querySelectorAll('button').forEach((b) => b.setAttribute('aria-pressed', String(st[b.dataset.k]) === b.dataset.v ? 'true' : 'false'));
-    };
-    (cfg.knobs || []).forEach((kn) => {
-      const grp = el('div', 'seg'); grp.appendChild(el('span', 'seg-l', KNOB_LAB[kn.k] || kn.k));
-      kn.v.forEach((v) => { const b = btn(String(v), kn.k + ' ' + v, () => { st[kn.k] = v; make(); }); b.dataset.k = kn.k; b.dataset.v = String(v); grp.appendChild(b); });
-      knobs.appendChild(grp);
-    });
-    if (!(cfg.knobs || []).length) knobs.hidden = true;
-    make();
-    this.root = root;
-  }
-  ['step', 'back', 'inner', 'finish', 'reset', 'atEnd', 'atStart', 'play', 'stop'].forEach((m) => { Widget.prototype[m] = function () { return this.view[m].apply(this.view, arguments); }; });
-  function mount(node) { const cfg = JSON.parse(node.dataset.widget); node._widget = new Widget(node, cfg); return node._widget; }
-  function mountAll(scope) { return Array.from((scope || document).querySelectorAll('[data-widget]')).map(mount); }
+  const { mount, mountAll } = global.NB.widgets({ flash: FlashView, naive: NaiveView, inner: InnerView }, DEFAULTS, problem, KNOB_LAB);
 
   global.ATT = { problem, refAttention, closeTo, flashPlan, flashState, flashTotals, phaseAt, naivePlan, naiveState, innerAdds, innerProblem, FlashView, NaiveView, InnerView, mount, mountAll, fmt, DEFAULTS, TOL };
   // The deck's shared script calls MM.mountAll(); on the attention deck it mounts attention widgets.

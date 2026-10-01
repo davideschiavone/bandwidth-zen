@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <style>body{margin:0;font:14px system-ui,sans-serif;-webkit-text-size-adjust:100%}img{max-width:100%}[hidden]{display:none!important}:root{padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}</style>
-<title>Attention Blocked Notebook</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap"><style>/* Layout concept: every picture is the textbook matmul layout — B on top, A on the left, C where row i meets column j. */
+<title>Encoder Layer Deck</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap"><style>/* Layout concept: every picture is the textbook matmul layout — B on top, A on the left, C where row i meets column j. */
 :root {
   --bg: #f4f6f9;
   --surface: #ffffff;
@@ -277,85 +277,167 @@ table.mini-tab tr.cur td { background: color-mix(in oklab, var(--fg) 7%, transpa
 .g-end { font: 700 0.72rem var(--font-mono); color: var(--c); display: flex; align-items: center; padding-left: 0.3rem; }
 table.rule td.mem { color: var(--mem); font-weight: 600; }
 
-html, body { height: auto; }
-.lab-head { max-width: 100rem; margin: 0 auto; padding-inline: clamp(16px, 3vw, 2rem); padding-block: 1.4rem 0.4rem; display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.4rem 1.2rem; }
-.lab-head h1 { font: 800 clamp(1.8rem, 4.5vw, 2.8rem)/1 var(--font-display); letter-spacing: -0.03em; margin: 0; }
-.lab-head .formula { font: 600 1.05rem var(--font-mono); }
-.lab-head .eyebrow { font: 600 0.78rem var(--font-mono); color: var(--muted); width: 100%; margin: 0; }
-.chapters { max-width: 100rem; margin: 0 auto; padding-inline: clamp(16px, 3vw, 2rem); padding-block: 0.7rem; display: flex; flex-wrap: wrap; gap: 0.35rem; }
-.btn.chap { display: inline-flex; gap: 0.4rem; align-items: center; font-size: 0.78rem; }
-.btn.chap span { font: 600 0.66rem var(--font-mono); color: var(--muted); }
-.btn.chap[aria-pressed="true"] span { color: var(--bg); }
-.lab { max-width: 100rem; margin: 0 auto; padding-inline: clamp(16px, 3vw, 2rem); padding-block: 0.4rem 3rem; display: grid; grid-template-columns: minmax(0, 1fr); gap: 1.2rem; }
-@media (min-width: 980px) { .lab { grid-template-columns: 16.5rem minmax(0, 1fr); } .knobs { position: sticky; top: calc(env(safe-area-inset-top, 0px) + 0.8rem); max-height: calc(100vh - 1.6rem); overflow-y: auto; } }
-.knobs { align-self: start; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 0.9rem; display: flex; flex-direction: column; gap: 0.7rem; }
-.ksec { font: 700 0.7rem var(--font-display); text-transform: uppercase; letter-spacing: 0.09em; color: var(--c); border-top: 1px solid var(--line); padding-top: 0.6rem; }
-.ksec:first-child { border-top: none; padding-top: 0; }
-.kg { display: flex; flex-direction: column; gap: 0.3rem; }
-.kl { font-size: 0.78rem; color: var(--muted); display: flex; justify-content: space-between; }
-.kl b { color: var(--fg); font-family: var(--font-mono); }
-.kg input[type=range] { width: 100%; accent-color: var(--c); }
-.kg .btn { font-size: 0.72rem; padding: 0.22rem 0.45rem; font-family: var(--font-mono); }
-.labmain { display: flex; flex-direction: column; gap: 0.9rem; min-width: 0; }
-.story { max-width: 62rem; }
-.story h2 { font: 700 1.45rem/1.15 var(--font-display); margin: 0 0 0.35rem; text-wrap: balance; }
-.story p { margin: 0.3rem 0; line-height: 1.55; max-width: 70ch; }
-.story .try { color: var(--muted); font-size: 0.9rem; }
-.story code { background: var(--surface-2); padding: 0 0.3rem; border-radius: 4px; }
-.rule { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 0.6rem 0.8rem; display: flex; flex-direction: column; gap: 0.35rem; }
-.rl { display: flex; flex-wrap: wrap; align-items: center; gap: 0.3rem 0.5rem; font-size: 0.88rem; }
-.rl.small { font-size: 0.8rem; color: var(--muted); }
-.rk { font: 600 0.66rem var(--font-body); text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
-.ar { color: var(--muted); }
+html, body { height: 100%; }
+.deck { height: 100%; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; }
+.top, .bot { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 0.55rem clamp(16px, 3vw, 2rem); border-bottom: 1px solid var(--line); background: var(--surface); }
+.bot { border-bottom: none; border-top: 1px solid var(--line); flex-wrap: wrap; }
+.top .name { font: 700 0.95rem var(--font-display); }
+.top .sec { font: 500 0.8rem var(--font-mono); color: var(--muted); }
+.stage { overflow: auto; }
+.slide { display: none; flex-direction: column; gap: 1rem; max-width: 76rem; margin: 0 auto; padding-inline: clamp(16px, 4vw, 3rem); padding-block: 1.4rem 2.2rem; }
+.slide.on { display: flex; animation: sin .28s ease-out; }
+@keyframes sin { from { opacity: 0; transform: translateX(10px); } to { opacity: 1; transform: none; } }
+.slide h2 { font: 700 clamp(1.5rem, 3.2vw, 2.3rem)/1.1 var(--font-display); margin: 0; letter-spacing: -0.015em; text-wrap: balance; }
+.slide p { margin: 0; line-height: 1.5; font-size: clamp(1rem, 1.6vw, 1.15rem); max-width: 60ch; }
+.slide p.small { font-size: 0.9rem; color: var(--muted); }
+.slide p.big { font-size: clamp(1.15rem, 2vw, 1.4rem); }
+.b { opacity: 0; transform: translateY(8px); transition: opacity .3s, transform .3s; }
+.b.shown { opacity: 1; transform: none; }
+tr.b { transform: none; }
+.split { display: flex; flex-wrap: wrap; gap: 1.5rem 2.5rem; align-items: flex-start; }
+.split > * { min-width: 0; flex: 1 1 20rem; }
+.split > [data-widget] { flex: 0 1 auto; }
+.points { display: flex; flex-direction: column; gap: 0.8rem; }
+.points.wide p { max-width: 62ch; }
+.title-slide { justify-content: center; min-height: 100%; gap: 1.2rem; }
+.title-slide h1 { font: 800 clamp(3rem, 10vw, 6.5rem)/0.95 var(--font-display); letter-spacing: -0.04em; margin: 0; }
+.eyebrow { font: 600 0.85rem var(--font-mono) !important; color: var(--muted); }
+.formula { font: 600 clamp(1.2rem, 3vw, 2rem) var(--font-mono) !important; }
+.lede { font-size: clamp(1.05rem, 2vw, 1.3rem) !important; max-width: 52ch !important; }
+.keys { display: flex; flex-wrap: wrap; gap: 0.5rem 1.2rem; font-size: 0.85rem; color: var(--muted); }
+kbd { font: 600 0.75rem var(--font-mono); border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 0 0.35rem; background: var(--surface); color: var(--fg); }
+.tw { overflow-x: auto; }
+table.rule { border-collapse: collapse; font-size: clamp(0.85rem, 1.4vw, 1rem); }
+table.rule th { text-align: left; font: 600 0.72rem var(--font-body); text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); border-bottom: 2px solid var(--line); padding: 0.5rem 0.8rem; }
+table.rule td { border-bottom: 1px solid var(--line); padding: 0.55rem 0.8rem; vertical-align: top; }
+table.rule code { background: var(--surface-2); padding: 0.05rem 0.3rem; border-radius: 4px; }
+table.cheat { font-size: 0.82rem; }
+table.cheat td, table.cheat th { padding: 0.4rem 0.6rem; }
 .stay-a, .stay-b, .stay-c { font-family: var(--font-mono); font-weight: 600; padding: 0 0.3rem; border-radius: 4px; white-space: nowrap; }
 .stay-a { box-shadow: 0 0 0 2px var(--a); color: var(--a); } .stay-b { box-shadow: 0 0 0 2px var(--b); color: var(--b); } .stay-c { box-shadow: 0 0 0 2px var(--c); color: var(--c); }
-.story .tw { overflow-x: auto; margin: 0.4rem 0; }
-table.cmp { border-collapse: collapse; font-size: 0.86rem; }
-table.cmp th { text-align: left; font: 600 0.7rem var(--font-body); text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); border-bottom: 2px solid var(--line); padding: 0.35rem 0.6rem; }
-table.cmp td { border-bottom: 1px solid var(--line); padding: 0.35rem 0.6rem; }
-table.cmp td.mem { color: var(--mem); font-weight: 600; }
-details.console { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; }
-details.console summary { cursor: pointer; padding: 0.5rem 0.8rem; font: 600 0.82rem var(--font-body); }
-details.console pre { margin: 0; padding: 0.6rem 0.8rem; max-height: 16rem; overflow: auto; font: 0.74rem/1.5 var(--font-mono); border-top: 1px solid var(--line); background: var(--surface-2); white-space: pre; }
-/* Attention's own matrices and states, on the shared tokens: Q is the blue operand (--a), K and V the
-   orange ones (--b), O the green result (--c); the score matrix S takes violet (--mem) when it is
-   computed or stored and magenta (--sp) while the vector unit softmaxes it. */
-.att-grid { display: grid; grid-template-columns: auto auto auto; grid-template-areas: "x k y" "q s o" "z v w"; gap: 0.6rem 0.8rem; align-items: end; justify-items: start; }
-.att-grid > .g-k { grid-area: k; } .att-grid > .g-v { grid-area: v; align-self: start; }
-.att-grid > .g-q { grid-area: q; align-self: start; justify-self: end; }
-.att-grid > .g-s { grid-area: s; align-self: start; } .att-grid > .g-o { grid-area: o; align-self: start; }
-.att-grid.dense { --cell: 1.6rem; } .att-grid.dense .cell { font-size: 0.66rem; }
-.att .cell { font-size: 0.74rem; }
-.k-Q { background: color-mix(in oklab, var(--a) 11%, var(--surface)); color: var(--fg); }
-.k-Q.read { background: var(--a); color: var(--on-strong); }
-.k-K, .k-V { background: color-mix(in oklab, var(--b) 12%, var(--surface)); color: var(--fg); }
-.k-K.read, .k-V.read { background: var(--b); color: var(--on-strong); }
-.k-O { background: var(--surface); border: 1.5px dashed var(--line); color: var(--muted); }
-.k-O.part { background: var(--cp); color: var(--fg); border: 1.5px solid color-mix(in oklab, var(--c) 45%, transparent); }
-.k-O.fin { background: var(--c); color: var(--on-strong); border: 1.5px solid var(--c); }
-.k-O.write, .k-S.write { box-shadow: 0 0 0 2.5px var(--fg); }
-.k-S { background: var(--surface); border: 1.5px dashed var(--line); color: var(--muted); }
-.k-S.s-mem { background: color-mix(in oklab, var(--mem) 22%, var(--surface)); color: var(--fg); border: 1.5px solid color-mix(in oklab, var(--mem) 55%, transparent); }
-.k-S.read-s { box-shadow: 0 0 0 2.5px var(--mem); }
-.k-S.s-gone { background: repeating-linear-gradient(45deg, var(--surface-2) 0 3px, var(--surface) 3px 6px); border: 1.5px dashed var(--muted); color: transparent; }
-.k-S.s-live { background: color-mix(in oklab, var(--mem) 40%, var(--surface)); color: var(--fg); border: 1.5px solid var(--mem); }
-.k-S.s-soft { background: color-mix(in oklab, var(--sp) 30%, var(--surface)); color: var(--fg); border: 1.5px solid var(--sp); }
-.lg.s-live { background: color-mix(in oklab, var(--mem) 40%, var(--surface)); border: 1.5px solid var(--mem); }
-.lg.s-soft { background: color-mix(in oklab, var(--sp) 30%, var(--surface)); border: 1.5px solid var(--sp); }
-.lg.s-gone { background: repeating-linear-gradient(45deg, var(--surface-2) 0 3px, var(--surface) 3px 6px); border: 1.5px dashed var(--muted); }
-.lg.s-mem { background: color-mix(in oklab, var(--mem) 22%, var(--surface)); border: 1.5px solid var(--mem); }
-.counters .cm b { color: var(--mem); }
-.att-head { font-size: 0.85rem; color: var(--muted); } .att-head b { color: var(--fg); }
-.att-run table.runtab { border-collapse: collapse; font: 0.78rem var(--font-mono); margin-top: 0.4rem; }
-.att-run th { text-align: left; font: 600 0.66rem var(--font-body); text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); padding: 0.15rem 0.5rem; border-bottom: 1px solid var(--line); }
-.att-run td { padding: 0.12rem 0.5rem; border-bottom: 1px solid var(--line); }
-.g-num.ph-qk, .g-num.ph-pv { color: var(--mem); } .g-num.ph-sm { color: var(--sp); } .g-num.ph-norm { color: var(--c); }
-.kl code, .ksec code { font: 500 0.68rem var(--font-mono); text-transform: none; letter-spacing: 0; color: var(--muted); }
-.ts { color: var(--mem); font-weight: 600; } .tv { color: var(--b); font-weight: 600; } .tq { color: var(--a); font-weight: 600; }
+.navb { display: flex; gap: 0.4rem; align-items: center; }
+.count { font: 500 0.8rem var(--font-mono); color: var(--muted); min-width: 4.5rem; text-align: center; }
+.prog { flex: 1 1 12rem; display: flex; gap: 3px; min-width: 0; }
+.prog i { flex: 1; height: 5px; border-radius: 3px; background: var(--line); cursor: pointer; }
+.prog i.done { background: color-mix(in oklab, var(--c) 50%, var(--line)); }
+.prog i.cur { background: var(--c); }
+.hint { font-size: 0.75rem; color: var(--muted); }
+@media (prefers-reduced-motion: reduce) { .slide.on { animation: none; } .b { transition: none; } }
+/* The encoder's own layout on the shared tokens: the layer as a strip of operations (attention half
+   tinted blue, FFN half orange), the current operation's matrices beside it, and the cost table. */
+.enc-top { display: grid; grid-template-columns: minmax(12rem, 16rem) minmax(0, 1fr); gap: 1rem; align-items: start; }
+@media (max-width: 760px) { .enc-top { grid-template-columns: minmax(0, 1fr); } }
+.enc-strip { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 3px; counter-reset: op; }
+.enc-op { display: grid; grid-template-columns: 1fr auto; gap: 0 0.5rem; padding: 0.3rem 0.55rem; border-radius: 6px; border: 1px solid var(--line); background: var(--surface); font-size: 0.8rem; }
+.enc-op span { grid-column: 1; font: 500 0.68rem var(--font-mono); color: var(--muted); }
+.enc-op i { grid-column: 2; grid-row: 1 / span 2; align-self: center; font: 500 0.68rem var(--font-mono); font-style: normal; color: var(--muted); }
+.enc-op.g-attn { border-left: 4px solid var(--a); } .enc-op.g-ffn { border-left: 4px solid var(--b); } .enc-op.g-in, .enc-op.g-out { border-left: 4px solid var(--muted); }
+.enc-op.done { opacity: 0.55; } .enc-op.cur { box-shadow: 0 0 0 2px var(--fg); opacity: 1; }
+.enc-stage { display: flex; flex-direction: column; gap: 0.6rem; min-width: 0; overflow-x: auto; }
+.enc-what { font-size: 0.92rem; } .enc-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.6rem 0.8rem; }
+.enc .cell { font-size: 0.7rem; } .enc .mat { --cell: 1.9rem; }
+.enc-cost td, .enc-cost th { white-space: nowrap; } .enc-cost tr.hid td { color: transparent; }
+.enc-cost tr.cur td { background: color-mix(in oklab, var(--fg) 7%, transparent); }
+.enc-cost tr.g-attn td:first-child { box-shadow: inset 4px 0 var(--a); } .enc-cost tr.g-ffn td:first-child { box-shadow: inset 4px 0 var(--b); }
+.enc-cost .sh { display: inline-block; height: 0.6rem; background: var(--fg); opacity: 0.55; border-radius: 2px; margin-right: 0.35rem; vertical-align: middle; max-width: 100px; }
+.b-compute { color: var(--c); font-weight: 600; } .b-memory { color: var(--mem); font-weight: 600; }
+.enc-bar { display: flex; height: 1.1rem; border-radius: 6px; overflow: hidden; border: 1px solid var(--line); background: var(--surface); }
+.enc-bar span { display: block; flex: none; min-width: 0; } .enc-bar .seg-attn { background: var(--a); } .enc-bar .seg-ffn { background: var(--b); } .enc-bar .seg-in, .enc-bar .seg-out { background: var(--muted); }
+.enc-bar .b-memory { background-image: repeating-linear-gradient(45deg, transparent 0 3px, color-mix(in oklab, var(--bg) 55%, transparent) 3px 6px); }
+.story p.sizes { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 0.45rem 0.7rem; }
 </style>
 </head>
 <body>
-<header class="lab-head"><p class="eyebrow">Interactive notebook · pick a chapter, then turn the knobs — they are bwz attention's own flags</p><h1>Attention, blocked</h1><span class="formula"><span class="tc">O</span> = softmax(<span class="ta">Q</span> <span class="tb">K</span>ᵀ / √d) <span class="tb">V</span></span></header><nav class="chapters" id="chapters" aria-label="Chapters"></nav><div class="lab"><aside class="knobs" id="knobs" aria-label="Knobs"></aside><main class="labmain"><section class="story" id="story"></section><div class="rule" id="rule"></div><div id="view"></div><details class="console" id="tracebox" open><summary>Printed steps — the same run as text</summary><pre id="trace"></pre></details></main></div><script>/* General matmul simulator: any M, N, K (up to 8), any tiling, any loop order, any number of cores.
+<div class="deck"><header class="top"><span class="name">One encoder layer</span><span class="sec" id="sec"></span></header><main class="stage"><section class="slide title-slide" data-sec="Start">
+  <p class="eyebrow">Matmuls and attention, put together</p>
+  <h1>One encoder layer</h1>
+  <p class="formula">x → x + Attention(norm(x)) → x + FFN(norm(x))</p>
+  <p class="lede">The block BERT and ViT stack a dozen times. This deck walks it one operation at a time on numbers small enough to check, then prices the same operations at real sizes on real chips.</p>
+  <div class="keys">
+    <span><kbd>→</kbd> next build or animation step</span><span><kbd>↓</kbd> next half-layer</span><span><kbd>←</kbd> back</span>
+    <span><kbd>PgDn</kbd> / <kbd>N</kbd> next slide</span><span><kbd>P</kbd> play</span><span><kbd>E</kbd> finish animation</span>
+  </div>
+</section>
+
+<section class="slide" data-sec="The sizes">
+  <h2>What goes in, what comes out</h2>
+  <div class="points">
+    <p class="b">An encoder reads <b>all its tokens at once</b> — a sentence, or an image cut into patches — and a layer turns <b>S token vectors of width d</b> into S new ones of the same width.</p>
+    <p class="b small"><b>S</b> = tokens (512 for BERT, 197 patches for ViT-B/16) · <b>d</b> = model width (768 for BERT-base, 4096 for an 8B model) · <b>h</b> heads of d/h each · <b>ffn</b> = the FFN's inner width, usually 4·d.</p>
+    <p class="b">Two halves, each added back onto x: <b>attention</b> lets tokens look at each other; the <b>FFN</b> works on each token alone.</p>
+  </div>
+</section>
+
+<section class="slide" data-sec="Op by op">
+  <h2>The layer, one operation per step</h2>
+  <p>4 tokens, d = 8, 2 heads, ffn = 16: 664 parameters, 5280 operations. The run ends with the walk checked against the same layer computed token by token.</p>
+  <div data-widget='{"type":"layer"}'></div>
+</section>
+
+<section class="slide" data-sec="Attention half">
+  <h2>Attention: the only place tokens mix</h2>
+  <div class="points">
+    <p class="b">Q, K, V are three plain matmuls, <b>[S, d] × [d, d]</b>, the same weights for every token — the matmul deck's subject.</p>
+    <p class="b">Attention mixes tokens: each output row is a weighted average of all the V rows — the attention deck's subject, once per head.</p>
+    <p class="b">The output projection mixes the heads back, and the <b>residual add</b> keeps x: the layer only adds a correction.</p>
+  </div>
+</section>
+
+<section class="slide" data-sec="FFN half">
+  <h2>The FFN: each token on its own, and the biggest part</h2>
+  <p>Widen d → ffn, an activation element by element, narrow back. Gated forms (SwiGLU, GeGLU) add a third matrix.</p>
+  <div data-widget='{"type":"layer","S":3,"d":4,"h":1,"ffn":8,"act":"gelu","knobs":[{"k":"act","v":["relu","gelu","swiglu","geglu"]}]}'></div>
+</section>
+
+<section class="slide" data-sec="Parameters">
+  <h2>Where the parameters are</h2>
+  <p>A BERT-base layer: the four projections hold <b>4·d²</b>, the FFN <b>2·d·ffn = 8·d²</b> — two thirds of the layer. Step to price each operation on an A100.</p>
+  <div data-widget='{"type":"cost","S":128,"d":768,"h":12,"ffn":3072,"act":"gelu","norm":"layernorm","vocab":30522,"chip":"a100"}'></div>
+</section>
+
+<section class="slide" data-sec="More tokens">
+  <h2>More tokens: attention grows as S²</h2>
+  <p>Every matmul grows with S; attention with S². The same BERT layer at more and more tokens.</p>
+  <div data-widget='{"type":"cost","S":512,"d":768,"h":12,"ffn":3072,"act":"gelu","norm":"layernorm","vocab":30522,"chip":"a100","knobs":[{"k":"S","v":[128,512,2048,8192]}]}'></div>
+</section>
+
+<section class="slide" data-sec="Three chips">
+  <h2>Same layer, three chips: the bound flips</h2>
+  <p>A projection at 512 tokens does about 220 operations per byte: above A100's ridge (153) — compute-bound; below H100's (295) — memory-bound; far below an edge NPU's (6168).</p>
+  <div data-widget='{"type":"cost","S":512,"d":768,"h":12,"ffn":3072,"act":"gelu","norm":"layernorm","vocab":30522,"chip":"a100","knobs":[{"k":"chip","v":["a100","h100","chip_a"],"labels":["A100","H100","edge NPU"]}]}'></div>
+</section>
+
+<section class="slide" data-sec="Cheap operations">
+  <h2>Norms, activations, residuals: memory-bound everywhere</h2>
+  <div class="points">
+    <p class="b">A few operations per number read and written: 1 to 4 OP per byte, against ridge points in the hundreds.</p>
+    <p class="b">So on every chip they wait on memory — a small share of the time, but pure overhead.</p>
+    <p class="b">Real kernels <b>fuse</b> them into the neighbouring matmul: the data is already on chip, and the extra pass over memory disappears.</p>
+  </div>
+</section>
+
+<section class="slide" data-sec="Batch">
+  <h2>Batch: more rows, the same weights</h2>
+  <p>B sentences are B·S rows for every projection and FFN — the weights are read once and used B times more, so their OP per byte rises. Each sentence still attends only to itself.</p>
+  <div data-widget='{"type":"cost","S":128,"d":768,"h":12,"ffn":3072,"act":"gelu","norm":"layernorm","vocab":30522,"chip":"h100","knobs":[{"k":"batch","v":[1,4,16]}]}'></div>
+</section>
+
+<section class="slide" data-sec="Summary">
+  <h2>What scales with what</h2>
+  <div class="tw"><table class="rule">
+    <tr><th>part</th><th>operations</th><th>parameters</th><th>usually</th></tr>
+    <tr class="b"><td>Q, K, V, O projections</td><td>8·S·d²</td><td>4·d²</td><td>compute-bound at hundreds of tokens</td></tr>
+    <tr class="b"><td>attention</td><td>4·S²·d</td><td>—</td><td>grows fastest with tokens</td></tr>
+    <tr class="b"><td>FFN</td><td>4·S·d·ffn (6· gated)</td><td>2·d·ffn (3· gated)</td><td>the biggest share</td></tr>
+    <tr class="b"><td>norms, activation, residuals</td><td>a few per element</td><td>≈ 0</td><td>memory-bound, fused away</td></tr>
+  </table></div>
+</section>
+
+<section class="slide title-slide" data-sec="End">
+  <h1>Two halves, added to x</h1>
+  <p class="lede">The matmul and attention decks explain the two kinds of operation inside; the notebook lets you turn every size, activation, norm, chip and batch yourself.</p>
+</section>
+</main><footer class="bot"><div class="navb"><button class="btn" id="bprev" type="button" aria-label="Back (←)">◀ Back</button><span class="count" id="cnt"></span><button class="btn pri" id="bnext" type="button" aria-label="Next build or step (→)">Next ▶</button><button class="btn" id="bskip" type="button" aria-label="Next slide (PgDn)">Next slide ⇥</button></div><div class="prog" id="prog"></div><span class="hint">→ step · ↓ inner loop · PgDn slide · P play</span></footer></div><script>/* General matmul simulator: any M, N, K (up to 8), any tiling, any loop order, any number of cores.
    Used by the lab page and by the multi-core slides of the deck. Every view replays from scratch,
    so the counters are always the real ones. */
 (function (global) {
@@ -1545,154 +1627,397 @@ details.console pre { margin: 0; padding: 0.6rem 0.8rem; max-height: 16rem; over
   // The deck's shared script calls MM.mountAll(); on the attention deck it mounts attention widgets.
   if (!global.MM) global.MM = { mountAll };
 })(typeof window !== 'undefined' ? window : globalThis);
-</script><script>/* Interactive notebook for attention: knobs that are `bwz attention`'s own flags, and chapters
-   that build FlashAttention up from the textbook formula. */
-(function () {
+</script><script>/* One transformer encoder layer: the operations it runs, in order, on a tiny example you can check by
+   hand — and what each one costs at a real model's size on a real chip.
+
+   Reuses the matmul notebook's grid, controls and counters (MM2._), the attention notebook's softmax
+   reference (ATT.refAttention) and the shared deck widgets (NB.widgets). The operation list and every
+   count follow bwz's encoder layer: q/k/v/o projections 2·S·d², attention 4·S²·d + 5·h·S², norms 4
+   (rmsnorm) or 6 (layernorm) per element, activations relu 1, gelu 8, swiglu 5, geglu 9 per element,
+   residual adds 1 — so the default shape (S = 4, d = 8, 2 heads, ffn = 16) is 664 parameters and
+   5280 operations, the same as `bwz encoder-layer`'s defaults. */
+(function (global) {
   'use strict';
-  const A = window.ATT;
-  // S = queries (-S), T = keys (--kv-len), d (--head-dim), heads (--heads), batch (--batch),
-  // Br (--br), Bc (--bc), qk/pv (--stationarity, one per inner matmul here), cores, tile.
-  // Chapters that teach the rescale pin a seed whose scores climb key after key (seed 16: −1, 0, 1, 2;
-  // seed 28 over 8 keys), so the running max really moves; a flat row would hide the whole idea.
-  const DEF = { mode: 'flash', S: 4, T: 4, d: 2, heads: 1, batch: 1, seed: 0, Br: 2, Bc: 2, cores: 1, tile: 1, qk: 'os', pv: 'os', hsel: -1, speed: 1 };
-  const S = Object.assign({}, DEF);
-  const $ = (id) => document.getElementById(id);
-  const el = (t, c, h) => { const e = document.createElement(t); if (c) e.className = c; if (h != null) e.innerHTML = h; return e; };
-
-  const CH = [
-    { id: 'plain', t: 'Plain attention', set: { mode: 'naive' }, s: '<h2>The formula, done the obvious way</h2><p><code>O = softmax(Q Kᵀ / √d) V</code>. Every query row scores itself against every key (<b>S = QKᵀ/√d</b>), the scores of a row become probabilities (<b>P = softmax(S)</b>), and the output row is the probability-weighted mix of the value rows (<b>O = P V</b>).</p><p class="sizes"><b>The sizes.</b> <b>Sq</b> (queries) is how many tokens are being processed now: the whole prompt in prefill, often 2k–8k, but just 1 per step in decode. <b>Skv</b> (keys) is how many tokens they can look at — the context so far, so it grows by one with every generated token. <b>d</b> is one head\'s width, usually 64–128; a model has many heads side by side (Llama-3-8B: 32 heads × d = 128 = its width 4096), and a batch repeats all of it per sequence. Here they are tiny so every number fits on screen.</p><p>Done this way, the whole score matrix S exists at once — Sq × Skv numbers per head, 16.8 million at 4096 tokens — and goes to memory and back, and so does P.</p><p class="try">Try: press <b>Next row</b> to do one query row per click, and watch the violet memory counters.</p>' },
-    { id: 'row', t: 'Softmax needs the row', set: { mode: 'naive', S: 2, T: 6, seed: 6 }, s: '<h2>Why S gets stored</h2><p>A softmax divides every exp(score) by the <b>sum</b> of the row, and for safety subtracts the row\'s <b>max</b> first. Both need <b>every</b> score of the row before the first probability can be written. That is the only reason plain attention keeps S: it cannot finish a row until the row is complete.</p><p class="try">Try: more keys (kv-len 8) — the stored row grows with them, and so does the traffic.</p>' },
-    { id: 'online', t: 'Online softmax, one row', set: { mode: 'flash', S: 1, T: 4, Br: 1, Bc: 1, seed: 16 }, s: '<h2>Online softmax: one key at a time</h2><p>Keep, for each query row, a <b>running max m</b> and a <b>running sum l</b>. When a new score arrives: the new max is <code>m′ = max(m, s)</code>; everything accumulated so far was weighted with the old max, so multiply it by <code>e^(m − m′)</code>; then add the new term. At the end divide O by l. The result is <b>exactly</b> the softmax — no score is kept.</p><p class="try">Try: step and watch m and l in the table under the code. When m grows, the rescale line lights up.</p>' },
-    { id: 'kblocks', t: 'Blocks of keys (Bc)', set: { mode: 'flash', S: 1, T: 8, Br: 1, Bc: 2, seed: 28 }, s: '<h2>Blocks of keys: Bc (<code>--bc</code>)</h2><p>Take the keys <b>Bc at a time</b>. Each block is one small matmul for the scores, one softmax update, one small matmul into O. The rescale of O happens once per block after the first, so bigger blocks mean <b>fewer rescales</b> — at the price of a bigger S block on chip.</p><p class="try">Try: Bc = 1, 2, 4, 8 and compare <b>O rescaled</b>. Bc = 8 is one block: no rescale at all, but all 8 scores on chip.</p>' },
-    { id: 'qblocks', t: 'Blocks of queries (Br)', set: { mode: 'flash', S: 4, T: 4, Br: 2, Bc: 2, cores: 1 }, s: '<h2>Blocks of queries: Br (<code>--br</code>)</h2><p>Now several query rows at once: a <b>program</b> owns Br rows of Q and their O, and streams every key block past them. Each block of S is Br × Bc. On one core the programs run one after the other — each is a <b>wave</b> of one.</p><p class="try">Try: Br = 1, 2, 4. Fewer, bigger programs; the same multiplies and exps.</p>' },
-    { id: 'cores', t: 'Programs on cores', set: { mode: 'flash', S: 4, T: 4, Br: 2, Bc: 2, cores: 2 }, s: '<h2>Programs run side by side</h2><p>Programs share nothing but K and V, so they run on different cores at the same time, dealt round-robin: core c takes program <code>wave · cores + c</code>. In each step every busy core does the same phase on its own rows.</p><p class="try">Try: Cores = 1, 2, 3, 4 and watch the timeline: waves, and idle cores when programs run out.</p>' },
-    { id: 'inner', t: 'Inside one block', set: { mode: 'inner', S: 4, T: 4, d: 4, Br: 4, Bc: 4, tile: 2, qk: 'os' }, s: '<h2>Inside a block: S = Q<sub>i</sub>K<sub>j</sub>ᵀ is a matmul</h2><p>Each score block is an ordinary matmul with <b>M = Br, K = d, N = Bc</b> — drawn here by the matmul notebook\'s own view, block loops and all. Its <b>dataflow</b> (os / ws / is) is the same choice as in the matmul notebook: os keeps a block of S in the accumulator and sweeps d inside it; ws and is cut d over the grid, so the pieces must be added.</p><p class="try">Try: flow ws or is, and watch the additions move from "over time" to partial pieces. <code>bwz attention --stationarity</code> pins this.</p>' },
-    { id: 'flows', t: 'Inner dataflow, costed', set: { mode: 'flash', S: 4, T: 4, d: 4, Br: 2, Bc: 2, cores: 2, tile: 2, qk: 'ws', pv: 'ws' }, s: '<h2>What the inner dataflow costs</h2><p>On a unit with no accumulator to sum K in place (a GPU tensor core), ws and is leave <b>(slices − 1) · M · N</b> partial sums for the vector unit per inner matmul: d/tile slices for S = QKᵀ, Bc/tile for O += PV. os leaves none. <code>bwz attention</code> weighs exactly this for every block size and keeps the cheapest.</p><p class="try">Try: switch both flows between os, ws and is and read <b>inner partial adds</b>. Array tile 1 makes every product its own slice.</p>' },
-    { id: 'heads', t: 'Heads and batch', set: { mode: 'flash', S: 2, T: 4, d: 2, heads: 2, batch: 2, Br: 2, Bc: 2, cores: 4 }, s: '<h2>Heads and batch: more programs, nothing shared</h2><p>Every (batch, head) pair has its own Q, K and V, so heads and batch simply multiply the number of programs. Unlike a projection — where a batch reuses the same weights — nothing here is reused across them: K and V bytes grow exactly with batch × heads.</p><p class="try">Try: heads 1 → 4, batch 1 → 2, and watch programs, waves and K,V read. Use <b>Show head</b> to look at another head.</p>' },
-    { id: 'waves', t: 'Waves re-read K and V', set: { mode: 'flash', S: 6, T: 4, d: 2, heads: 3, Br: 2, Bc: 2, cores: 4 }, s: '<h2>When a head straddles two waves</h2><p>K and V are fetched once per <b>wave</b> and shared by every program of that head in the wave. 3 heads × 3 programs = 9 programs on 4 cores: heads 1 and 2 are split across waves, so their K and V are fetched <b>twice</b>. The magenta counter shows the re-read against the once-only figure — the same effect <code>bwz attention</code> reports on a 4-core Metis.</p><p class="try">Try: Cores = 3 or 9 — every head fits one wave and K,V read drops to the once-only figure.</p>' },
-    { id: 'never', t: 'S is never stored', set: { mode: 'flash', S: 4, T: 8, d: 2, Br: 2, Bc: 2, cores: 2 }, s: '<h2>The point: S never leaves the core</h2><p>Plain attention writes and reads back Sq × Skv scores and as many probabilities. FlashAttention writes <b>only O</b>: blocks of S live on chip for one block and are discarded (dashed). It does <b>the same multiplies and exps</b> plus a few rescales.</p><div class="tw"><table class="cmp"><tr><th></th><th>plain</th><th>FlashAttention</th></tr><tr><td>multiplies</td><td>2·Sq·Skv·d</td><td>2·Sq·Skv·d</td></tr><tr><td>exp()</td><td>Sq·Skv</td><td>Sq·Skv</td></tr><tr><td>through memory besides Q, K, V, O</td><td class="mem">4·Sq·Skv (S and P, out and back)</td><td>0</td></tr><tr><td>extra vector work</td><td>—</td><td>Sq·d per key block after the first</td></tr></table></div><p class="try">Try: switch <b>Mode</b> to Plain on the same shape and compare the counters.</p>' },
-    { id: 'play', t: 'Playground', set: { mode: 'flash', S: 8, T: 8, d: 4, heads: 2, batch: 2, Br: 3, Bc: 3, cores: 5, tile: 2, seed: 4 }, s: '<h2>Playground</h2><p>Ragged blocks (3 does not divide 8), uneven programs and cores, several heads. Every knob is live and every run still ends with O checked against softmax(QKᵀ/√d)V. The rule box prints the <code>bwz attention</code> command with the same flags.</p>' }
-  ];
-
-  let view = null;
-  function fix() {
-    S.S = Math.max(1, Math.min(8, S.S)); S.T = Math.max(1, Math.min(8, S.T));
-    S.Br = Math.max(1, Math.min(S.Br, S.S)); S.Bc = Math.max(1, Math.min(S.Bc, S.T));
-    if (S.hsel >= S.heads * S.batch) S.hsel = -1;
-    if (S.mode === 'naive') { S.heads = 1; S.batch = 1; }
-    if (!(S.S === 4 && S.T === 4 && S.d === 2 && S.heads * S.batch === 1) && S.seed === 0) S.seed = 1;
+  const X = global.MM2, H = X._, ATT = global.ATT;
+  const { el, addCls, counters, Mat, mix, key, rng } = H;
+  // Two significant decimals at most, and no "−.00": a value that rounds to zero prints as 0.
+  function fmt(x) {
+    if (Number.isInteger(x)) return String(x);
+    const a = Math.abs(x);
+    if (a < 0.005) return '0';
+    if (a >= 9.95) return x.toFixed(0);
+    if (a >= 0.995) return x.toFixed(1);
+    return x.toFixed(2).replace(/^(-?)0\./, '$1.');
   }
-  function seg(label, key, opts, lab) {
-    const g = el('div', 'kg'); g.appendChild(el('div', 'kl', label));
-    const b = el('div', 'seg');
-    opts.forEach((v) => {
-      const x = el('button', 'btn', lab ? lab(v) : String(v)); x.type = 'button';
-      x.setAttribute('aria-pressed', S[key] === v ? 'true' : 'false');
-      x.addEventListener('click', () => { S[key] = v; rebuild(); });
-      b.appendChild(x);
+
+  // ---------------- conventions (bwz/calibration.py) ----------------
+  const NORM_OPS = { rmsnorm: 4, layernorm: 6, none: 0 };
+  const ACT_OPS = { relu: 1, gelu: 8, swiglu: 5, geglu: 9 };
+  const GATED = { relu: false, gelu: false, swiglu: true, geglu: true };
+  const SOFTMAX_OPS = 5;
+  const EPS = 1e-5;
+
+  // ---------------- the problem ----------------
+  function lcg(seed) { let s = (seed * 2654435761) >>> 0 || 1; return () => ((s = (Math.imul(s, 1664525) + 1013904223) >>> 0) / 4294967296); }
+  function problem(o) {
+    const S = o.S, d = o.d, h = o.h, ffn = o.ffn, vocab = o.vocab || 16;
+    const r = lcg(o.seed || 5);
+    const mat = (rows, cols, lo, span) => rng(rows).map(() => rng(cols).map(() => Math.floor(r() * span) + lo));
+    const table = mat(vocab, d, -1, 4);                   // embeddings: −1 … 2
+    const ids = rng(S).map(() => Math.floor(r() * vocab));
+    const W = { q: mat(d, d, -1, 3), k: mat(d, d, -1, 3), v: mat(d, d, -1, 3), o: mat(d, d, -1, 3),
+      up: mat(d, ffn, -1, 3), gate: GATED[o.act] ? mat(d, ffn, -1, 3) : null, down: mat(ffn, d, -1, 3) };   // weights: −1 … 1
+    const P = { S, d, h, dh: d / h, ffn, vocab, act: o.act, norm: o.norm, table, ids, W, seed: o.seed || 5 };
+    P.steps = forward(P);
+    P.REF = reference(P);
+    return P;
+  }
+
+  // ---------------- the forward pass, op by op ----------------
+  const matmul = (A, B) => A.map((row) => B[0].map((_, j) => row.reduce((s, x, k) => s + x * B[k][j], 0)));
+  const map2 = (A, B, f) => A.map((row, i) => row.map((x, j) => f(x, B[i][j])));
+  const gelu = (x) => 0.5 * x * (1 + Math.tanh(Math.sqrt(2 / Math.PI) * (x + 0.044715 * x * x * x)));
+  const silu = (x) => x / (1 + Math.exp(-x));
+  function normRows(Xm, kind) {
+    if (kind === 'none') return Xm.map((r) => r.slice());
+    return Xm.map((row) => {
+      const n = row.length;
+      if (kind === 'rmsnorm') { const rms = Math.sqrt(row.reduce((s, x) => s + x * x, 0) / n + EPS); return row.map((x) => x / rms); }
+      const mean = row.reduce((s, x) => s + x, 0) / n, v = row.reduce((s, x) => s + (x - mean) * (x - mean), 0) / n;
+      return row.map((x) => (x - mean) / Math.sqrt(v + EPS));
     });
-    g.appendChild(b); return g;
   }
-  function slider(label, key, min, max, step, fmt) {
-    const g = el('div', 'kg'); const id = 'k-' + key;
-    g.appendChild(el('label', 'kl', label + ' <b id="' + id + '-v">' + (fmt ? fmt(S[key]) : S[key]) + '</b>')).setAttribute('for', id);
-    const r = el('input'); r.type = 'range'; r.min = min; r.max = max; r.step = step; r.value = S[key]; r.id = id;
-    r.addEventListener('input', () => { S[key] = +r.value; $(id + '-v').textContent = fmt ? fmt(S[key]) : S[key]; if (key === 'speed' && view) { view.cfg.speed = S.speed; if (view.timer) { view.stop(); view.play(); } } });
-    r.addEventListener('change', () => { if (key !== 'speed') rebuild(); });
-    g.appendChild(r); return g;
-  }
-  const upto = (n) => Array.from({ length: n }, (_, i) => i + 1);
-  function knobs() {
-    const k = $('knobs'); k.innerHTML = '';
-    const sec = (t) => k.appendChild(el('div', 'ksec', t));
-    sec('Shape');
-    k.appendChild(slider('Queries Sq  <code>-S</code>', 'S', 1, 8, 1));
-    k.appendChild(slider('Keys Skv  <code>--kv-len</code>', 'T', 1, 8, 1));
-    k.appendChild(seg('Head width d  <code>--head-dim</code>', 'd', [1, 2, 3, 4]));
-    if (S.mode !== 'naive') {
-      k.appendChild(seg('Heads  <code>--heads</code>', 'heads', [1, 2, 3, 4]));
-      k.appendChild(seg('Batch  <code>--batch</code>', 'batch', [1, 2]));
+  function attention(P, Q, K, V) {
+    const out = Q.map(() => rng(P.d).map(() => 0));
+    for (let hh = 0; hh < P.h; hh++) {
+      const cols = rng(P.dh).map((c) => hh * P.dh + c);
+      const pick = (M) => M.map((r) => cols.map((c) => r[c]));
+      const Oh = ATT.refAttention(pick(Q), pick(K), pick(V), 1 / Math.sqrt(P.dh));
+      Oh.forEach((r, i) => r.forEach((x, c) => { out[i][cols[c]] = x; }));
     }
-    const nums = el('div', 'kg'); nums.appendChild(el('div', 'kl', 'Numbers'));
-    const nb = el('div', 'seg');
-    if (S.S === 4 && S.T === 4 && S.d === 2 && S.heads * S.batch === 1) { const e = el('button', 'btn', 'Running example'); e.type = 'button'; e.setAttribute('aria-pressed', S.seed === 0 ? 'true' : 'false'); e.addEventListener('click', () => { S.seed = 0; rebuild(); }); nb.appendChild(e); }
-    const r = el('button', 'btn', 'New random −1…2'); r.type = 'button'; r.addEventListener('click', () => { S.seed = (S.seed % 97) + 1; rebuild(); }); nb.appendChild(r);
-    nums.appendChild(nb); k.appendChild(nums);
-    sec('Algorithm');
-    k.appendChild(seg('Mode', 'mode', ['naive', 'flash', 'inner'], (v) => ({ naive: 'Plain', flash: 'FlashAttention', inner: 'Inside a block' }[v])));
-    if (S.mode === 'naive') { sec('Playback'); k.appendChild(slider('Speed', 'speed', 0.25, 4, 0.25, (v) => v + '×')); return; }
-    sec('Blocks');
-    k.appendChild(seg('Br: query rows per program  <code>--br</code>', 'Br', upto(S.S)));
-    k.appendChild(seg('Bc: keys per block  <code>--bc</code>', 'Bc', upto(S.T)));
-    sec('Inner matmuls  <code>--stationarity</code>');
-    k.appendChild(seg('S = QKᵀ flow', 'qk', ['os', 'ws', 'is']));
-    if (S.mode === 'flash') k.appendChild(seg('O += PV flow', 'pv', ['os', 'ws', 'is']));
-    k.appendChild(seg('Array tile', 'tile', [1, 2]));
-    if (S.mode === 'flash') {
-      sec('Chip');
-      k.appendChild(slider('Cores', 'cores', 1, 8, 1));
-      const HT = S.heads * S.batch;
-      if (HT > 1) k.appendChild(seg('Show head', 'hsel', [-1].concat(Array.from({ length: HT }, (_, i) => i)), (v) => (v < 0 ? 'the running one' : String(v))));
+    return out;
+  }
+  // Each step: what it reads, what it writes, its weights, and its cost by bwz's conventions.
+  function forward(P) {
+    const { S, d, ffn, h, act, norm } = P, gated = GATED[act];
+    const T = {};
+    const steps = [];
+    const add = (s) => { steps.push(s); return s; };
+    T.x0 = P.ids.map((t) => P.table[t].slice());
+    add({ id: 'embed', group: 'in', title: 'Embedding', what: 'each token id picks its row of the table', ins: ['ids'], out: 'x0', w: 'table', shape: S + ' rows of ' + P.vocab + '×' + d, ops: 0, params: P.vocab * d, kind: 'gather' });
+    const nf = NORM_OPS[norm];
+    if (norm !== 'none') { T.n1 = normRows(T.x0, norm); add({ id: 'attn_norm', group: 'attn', title: norm === 'rmsnorm' ? 'RMSNorm' : 'LayerNorm', what: 'each row scaled to unit size', ins: ['x0'], out: 'n1', shape: S + '×' + d, ops: S * d * nf, params: (norm === 'layernorm' ? 2 : 1) * d, kind: 'norm' }); } else T.n1 = T.x0;
+    ['q', 'k', 'v'].forEach((m) => { T[m] = matmul(T.n1, P.W[m]); add({ id: m + '_proj', group: 'attn', title: m.toUpperCase() + ' projection', what: m.toUpperCase() + ' = x · W' + m, ins: [norm !== 'none' ? 'n1' : 'x0'], w: m, out: m, shape: '[' + S + ',' + d + ']×[' + d + ',' + d + ']', ops: 2 * S * d * d, params: d * d, kind: 'matmul', mnk: [S, d, d] }); });
+    T.a = attention(P, T.q, T.k, T.v);
+    add({ id: 'attn', group: 'attn', title: 'Attention', what: h + ' head' + (h > 1 ? 's' : '') + ' of width ' + P.dh + ': softmax(Q Kᵀ/√' + P.dh + ') V each', ins: ['q', 'k', 'v'], out: 'a', shape: h + ' × [' + S + '×' + S + ']', ops: 4 * S * S * d + SOFTMAX_OPS * h * S * S, params: 0, kind: 'attention' });
+    T.o = matmul(T.a, P.W.o);
+    add({ id: 'o_proj', group: 'attn', title: 'Output projection', what: 'mixes the heads back together', ins: ['a'], w: 'o', out: 'o', shape: '[' + S + ',' + d + ']×[' + d + ',' + d + ']', ops: 2 * S * d * d, params: d * d, kind: 'matmul', mnk: [S, d, d] });
+    T.x1 = map2(T.x0, T.o, (a, b) => a + b);
+    add({ id: 'attn_residual', group: 'attn', title: 'Residual add', what: 'x + attention: the layer only adds a correction', ins: ['x0', 'o'], out: 'x1', shape: S + '×' + d, ops: S * d, params: 0, kind: 'add' });
+    if (norm !== 'none') { T.n2 = normRows(T.x1, norm); add({ id: 'ffn_norm', group: 'ffn', title: norm === 'rmsnorm' ? 'RMSNorm' : 'LayerNorm', what: 'normalise again before the FFN', ins: ['x1'], out: 'n2', shape: S + '×' + d, ops: S * d * nf, params: (norm === 'layernorm' ? 2 : 1) * d, kind: 'norm' }); } else T.n2 = T.x1;
+    const nIn = norm !== 'none' ? 'n2' : 'x1';
+    T.u = matmul(T.n2, P.W.up);
+    add({ id: 'ffn_up', group: 'ffn', title: 'FFN up', what: 'widen every token from d = ' + d + ' to ffn = ' + ffn, ins: [nIn], w: 'up', out: 'u', shape: '[' + S + ',' + d + ']×[' + d + ',' + ffn + ']', ops: 2 * S * d * ffn, params: d * ffn, kind: 'matmul', mnk: [S, ffn, d] });
+    if (gated) { T.g = matmul(T.n2, P.W.gate); add({ id: 'ffn_gate', group: 'ffn', title: 'FFN gate', what: 'a second widening, the gate', ins: [nIn], w: 'gate', out: 'g', shape: '[' + S + ',' + d + ']×[' + d + ',' + ffn + ']', ops: 2 * S * d * ffn, params: d * ffn, kind: 'matmul', mnk: [S, ffn, d] }); }
+    T.f = gated ? map2(T.g, T.u, (g, u) => (act === 'swiglu' ? silu(g) : gelu(g)) * u) : T.u.map((r) => r.map((x) => (act === 'relu' ? Math.max(0, x) : gelu(x))));
+    add({ id: 'ffn_act', group: 'ffn', title: { relu: 'ReLU', gelu: 'GELU', swiglu: 'SwiGLU', geglu: 'GeGLU' }[act], what: { relu: 'max(0, x), element by element', gelu: 'a smooth ReLU, element by element', swiglu: 'silu(gate) · up, element by element', geglu: 'gelu(gate) · up, element by element' }[act], ins: gated ? ['g', 'u'] : ['u'], out: 'f', shape: S + '×' + ffn, ops: S * ffn * ACT_OPS[act], params: 0, kind: 'act' });
+    T.y = matmul(T.f, P.W.down);
+    add({ id: 'ffn_down', group: 'ffn', title: 'FFN down', what: 'back from ffn = ' + ffn + ' to d = ' + d, ins: ['f'], w: 'down', out: 'y', shape: '[' + S + ',' + ffn + ']×[' + ffn + ',' + d + ']', ops: 2 * S * ffn * d, params: ffn * d, kind: 'matmul', mnk: [S, d, ffn] });
+    T.x2 = map2(T.x1, T.y, (a, b) => a + b);
+    add({ id: 'ffn_residual', group: 'ffn', title: 'Residual add', what: 'x + FFN', ins: ['x1', 'y'], out: 'x2', shape: S + '×' + d, ops: S * d, params: 0, kind: 'add' });
+    if (norm !== 'none') { T.out = normRows(T.x2, norm); add({ id: 'final_norm', group: 'out', title: 'Final norm', what: 'the stack\'s last norm, once after the last layer', ins: ['x2'], out: 'out', shape: S + '×' + d, ops: S * d * nf, params: (norm === 'layernorm' ? 2 : 1) * d, kind: 'norm' }); } else T.out = T.x2;
+    P.T = T;
+    return steps;
+  }
+
+  // The same layer, written the other way round: token by token, as a textbook would. It shares
+  // nothing with forward() — its own norm, its own head split, its own projections — except the
+  // attention notebook's softmax reference for each head. The walk above must land on exactly this.
+  function reference(P) {
+    const { S, d, dh, h, ffn, act, norm } = P, gated = GATED[act];
+    const nrm = (row) => {
+      if (norm === 'none') return row.slice();
+      let mean = 0, sq = 0;
+      for (const x of row) { mean += x / d; sq += (x * x) / d; }
+      return norm === 'rmsnorm' ? row.map((x) => x / Math.sqrt(sq + EPS)) : row.map((x) => (x - mean) / Math.sqrt(sq - mean * mean + EPS));
+    };
+    const vecmat = (vec, W) => { const out = new Array(W[0].length).fill(0); vec.forEach((x, k) => W[k].forEach((w, j) => { out[j] += x * w; })); return out; };
+    const x0 = P.ids.map((t) => P.table[t]);
+    const n1 = x0.map(nrm);
+    const q = n1.map((r) => vecmat(r, P.W.q)), k = n1.map((r) => vecmat(r, P.W.k)), v = n1.map((r) => vecmat(r, P.W.v));
+    const heads = rng(h).map((hh) => ATT.refAttention(q.map((r) => r.slice(hh * dh, hh * dh + dh)), k.map((r) => r.slice(hh * dh, hh * dh + dh)), v.map((r) => r.slice(hh * dh, hh * dh + dh)), 1 / Math.sqrt(dh)));
+    return rng(S).map((i) => {
+      const a = [].concat(...heads.map((Oh) => Oh[i]));
+      const o = vecmat(a, P.W.o), x1 = x0[i].map((x, c) => x + o[c]);
+      const n2 = nrm(x1), up = vecmat(n2, P.W.up), gt = gated ? vecmat(n2, P.W.gate) : null;
+      const f = rng(ffn).map((j) => (gated ? (act === 'swiglu' ? silu(gt[j]) : gelu(gt[j])) * up[j] : act === 'relu' ? Math.max(0, up[j]) : gelu(up[j])));
+      const y = vecmat(f, P.W.down);
+      return nrm(x1.map((x, c) => x + y[c]));
+    });
+  }
+  const close = (A, B) => A.every((r, i) => r.every((x, j) => Math.abs(x - B[i][j]) <= 1e-9 * Math.max(1, Math.abs(B[i][j]))));
+
+  // ---------------- closed forms (no walk): what a layer is at any size ----------------
+  function layerOps(o) {
+    const B = o.batch || 1, M = B * o.S, d = o.d, f = o.ffn, gated = GATED[o.act], nf = NORM_OPS[o.norm];
+    const L = [];
+    const op = (id, title, group, ops, params, actIn, actOut, kind) => L.push({ id, title, group, ops, params, actIn, actOut, kind });
+    op('embed', 'Embedding', 'in', 0, o.vocab * d, 0, M * d, 'gather');
+    if (nf) op('attn_norm', 'Norm', 'attn', M * d * nf, (o.norm === 'layernorm' ? 2 : 1) * d, M * d, M * d, 'norm');
+    ['q', 'k', 'v'].forEach((m) => op(m + '_proj', m.toUpperCase() + ' projection', 'attn', 2 * M * d * d, d * d, M * d, M * d, 'matmul'));
+    op('attn', 'Attention', 'attn', B * (4 * o.S * o.S * d + SOFTMAX_OPS * o.h * o.S * o.S), 0, 3 * M * d, M * d, 'attention');
+    op('o_proj', 'Output projection', 'attn', 2 * M * d * d, d * d, M * d, M * d, 'matmul');
+    op('attn_residual', 'Residual add', 'attn', M * d, 0, 2 * M * d, M * d, 'add');
+    if (nf) op('ffn_norm', 'Norm', 'ffn', M * d * nf, (o.norm === 'layernorm' ? 2 : 1) * d, M * d, M * d, 'norm');
+    op('ffn_up', 'FFN up', 'ffn', 2 * M * d * f, d * f, M * d, M * f, 'matmul');
+    if (gated) op('ffn_gate', 'FFN gate', 'ffn', 2 * M * d * f, d * f, M * d, M * f, 'matmul');
+    op('ffn_act', { relu: 'ReLU', gelu: 'GELU', swiglu: 'SwiGLU', geglu: 'GeGLU' }[o.act], 'ffn', M * f * ACT_OPS[o.act], 0, (gated ? 2 : 1) * M * f, M * f, 'act');
+    op('ffn_down', 'FFN down', 'ffn', 2 * M * f * d, f * d, M * f, M * d, 'matmul');
+    op('ffn_residual', 'Residual add', 'ffn', M * d, 0, 2 * M * d, M * d, 'add');
+    if (nf) op('final_norm', 'Final norm', 'out', M * d * nf, (o.norm === 'layernorm' ? 2 : 1) * d, M * d, M * d, 'norm');
+    return L;
+  }
+  // The totals by formula alone — the check every cost view ends on.
+  function closedForm(o) {
+    const B = o.batch || 1, M = B * o.S, d = o.d, f = o.ffn, gated = GATED[o.act], nf = NORM_OPS[o.norm], nn = nf ? 3 : 0;
+    return {
+      ops: 8 * M * d * d + B * (4 * o.S * o.S * d + SOFTMAX_OPS * o.h * o.S * o.S) + (gated ? 6 : 4) * M * d * f + 2 * M * d + M * f * ACT_OPS[o.act] + nn * M * d * nf,
+      params: o.vocab * d + 4 * d * d + (gated ? 3 : 2) * d * f + nn * (o.norm === 'layernorm' ? 2 : 1) * d
+    };
+  }
+
+  // Datasheet ceilings, from the chip profiles (profiles/chips/*.yaml), at each chip's own precision.
+  const CHIPS = {
+    a100: { name: 'A100 · fp16', peak: 312e12, bw: 2.039e12, bytes: 2 },
+    h100: { name: 'H100 · fp16', peak: 989.4e12, bw: 3.35e12, bytes: 2 },
+    chip_a: { name: 'edge NPU (chip_a) · int8', peak: 209.7e12, bw: 34e9, bytes: 1 }
+  };
+  function fmtTime(s) {
+    if (s >= 1) return s.toFixed(2) + ' s';
+    if (s >= 1e-3) return (s * 1e3).toPrecision(3) + ' ms';
+    if (s >= 1e-6) return (s * 1e6).toPrecision(3) + ' µs';
+    return (s * 1e9).toPrecision(3) + ' ns';
+  }
+  function fmtN(n) {
+    const u = [[1e12, 'T'], [1e9, 'G'], [1e6, 'M'], [1e3, 'k']];
+    for (const [v, s] of u) if (Math.abs(n) >= v) return (n / v).toPrecision(3) + s;
+    return String(Math.round(n));
+  }
+
+  // =====================================================================
+  // LayerView: the tiny layer, one operation per step
+  // =====================================================================
+  const NAMES = { ids: 'token ids', x0: 'x', n1: 'norm(x)', q: 'Q', k: 'K', v: 'V', a: 'attention out', o: 'O', x1: 'x (after attention)', n2: 'norm(x)', u: 'up', g: 'gate', f: 'act(up)', y: 'FFN out', x2: 'x (after FFN)', out: 'layer out' };
+  const WNAMES = { table: 'embedding table', q: 'Wq', k: 'Wk', v: 'Wv', o: 'Wo', up: 'W_up', gate: 'W_gate', down: 'W_down' };
+  function LayerView(root, cfg) {
+    this.cfg = cfg; this.root = root; this.P = cfg.P; root.classList.add('w', 'pv', 'enc');
+    this.baseSpeed = 1100; this.t = 0; this.n = this.P.steps.length;
+    const P = this.P;
+    this.totalOps = P.steps.reduce((s, x) => s + x.ops, 0); this.totalParams = P.steps.reduce((s, x) => s + x.params, 0);
+    if (cfg.title !== false) {
+      const head = el('div', 'w-head'); root.appendChild(head);
+      head.innerHTML = '<span class="chip">S = ' + P.S + ' tokens × d = ' + P.d + '</span><span class="chip">' + P.h + ' head' + (P.h > 1 ? 's' : '') + ' of ' + P.dh + '</span><span class="chip">ffn = ' + P.ffn + ' · ' + P.act + '</span><span class="chip">' + P.norm + '</span>';
     }
-    sec('Playback');
-    k.appendChild(slider('Speed', 'speed', 0.25, 4, 0.25, (v) => v + '×'));
+    const top = el('div', 'enc-top'); root.appendChild(top);
+    this.strip = el('ol', 'enc-strip'); top.appendChild(this.strip);
+    this.items = P.steps.map((s) => { const li = el('li', 'enc-op g-' + s.group, '<b>' + s.title + '</b><span>' + s.shape + '</span><i>' + fmtN(s.ops) + ' ops</i>'); this.strip.appendChild(li); return li; });
+    this.stage = el('div', 'enc-stage'); top.appendChild(this.stage);
+    this.cap = el('div', 'cap'); root.appendChild(this.cap);
+    const foot = el('div', 'w-foot'); root.appendChild(foot);
+    this.cnt = el('div', 'counters'); foot.appendChild(this.cnt);
+    const right = el('div', 'stack right'); right.append(this.controls('Next block'), this.scrubber()); foot.appendChild(right);
+    this.keys(); this.go(0);
   }
-  function command() {
-    const f = ['bwz attention -c <chip>', '-S ' + S.S];
-    if (S.T !== S.S) f.push('--kv-len ' + S.T);
-    f.push('--head-dim ' + S.d);
-    if (S.heads > 1) f.push('--heads ' + S.heads);
-    if (S.batch > 1) f.push('--batch ' + S.batch);
-    f.push('--br ' + S.Br, '--bc ' + S.Bc);
-    if (S.qk === S.pv && S.qk !== 'os') f.push('--stationarity ' + S.qk);
-    return f.join(' ');
+  LayerView.prototype.inner = function () {
+    // To the end of the current block: after the attention residual, or the end of the layer.
+    const ids = this.P.steps.map((s) => s.id);
+    const stop = ids.indexOf('attn_residual') + 1;
+    this.go(this.t < stop ? stop : this.n); return true;
+  };
+  function matOf(kind, M, title, opt) {
+    const rows = M.length, cols = M[0].length;
+    const m = new Mat(kind, rows, cols, Object.assign({ rv: 't', cv: 'c', title, dims: rows + '×' + cols }, opt || {}));
+    m.paint({}, (r, c) => fmt(M[r][c]));
+    return m;
   }
-  function rule() {
-    const R = $('rule');
-    if (S.mode === 'naive') {
-      R.innerHTML = '<div class="rl"><span class="rk">plain</span>S = QKᵀ/√d, all ' + S.S + '×' + S.T + ' scores<span class="ar">→</span>P = softmax(S) row by row<span class="ar">→</span>O = P V<span class="ar">·</span><span class="rk">through memory</span><b class="tm">' + 4 * S.S * S.T + '</b> numbers of S and P</div>';
-      return;
+  LayerView.prototype.render = function () {
+    const P = this.P, T = P.T, cur = this.t > 0 ? P.steps[this.t - 1] : null;
+    this.items.forEach((li, i) => { li.classList.toggle('done', i < this.t - 1); li.classList.toggle('cur', i === this.t - 1); });
+    this.stage.innerHTML = '';
+    if (!cur) {
+      this.stage.appendChild(el('p', 'muted', 'The layer is the list on the left, top to bottom. Each step runs one operation on all ' + P.S + ' tokens at once: S × d numbers in, S × d (or S × ffn) out.'));
+    } else {
+      this.stage.appendChild(el('div', 'enc-what', '<b>' + cur.title + '</b> — ' + cur.what));
+      const row = el('div', 'enc-row'); this.stage.appendChild(row);
+      const heads = (m) => (P.h > 1 && m[0].length === P.d ? { cb: P.dh } : {});
+      if (cur.id === 'embed') {
+        const ids = new Mat('A', P.S, 1, { rv: 't', cv: ' ', title: 'token ids', dims: P.S + ' tokens' });
+        ids.paint({}, (r) => String(P.ids[r])); row.appendChild(ids.root);
+        row.appendChild(el('span', 'arrow', '→'));
+      } else {
+        cur.ins.forEach((name, i) => {
+          const m = matOf('A', T[name], NAMES[name], heads(T[name])); row.appendChild(m.root);
+          if (i < cur.ins.length - 1) row.appendChild(el('span', 'arrow', cur.kind === 'add' ? '+' : ','));
+        });
+        if (cur.w) { row.appendChild(el('span', 'arrow', '×')); row.appendChild(matOf('B', P.W[cur.w], WNAMES[cur.w]).root); }
+        row.appendChild(el('span', 'arrow', '→'));
+      }
+      const out = matOf('C', T[cur.out], NAMES[cur.out], heads(T[cur.out]));
+      out.paint(Object.fromEntries(T[cur.out].flatMap((r, i) => r.map((_, j) => [key(i, j), 'fin']))), (r, c) => fmt(T[cur.out][r][c]));
+      row.appendChild(out.root);
+      if (cur.kind === 'attention') this.stage.appendChild(el('p', 'small', 'Each head is the attention notebook\'s computation on its own ' + P.dh + ' columns of Q, K and V (the block lines). Here S is small enough to hold whole; at real sizes it runs as FlashAttention.'));
     }
-    const P = A.problem(S), pl = A.flashPlan(P, S), T = A.flashTotals(P, pl, S);
-    let h = '<div class="rl"><span class="rk">programs</span>' + P.HT + ' head' + (P.HT > 1 ? 's' : '') + ' × ceil(' + S.S + ' / Br=' + pl.Br + ') = <b>' + pl.programs + '</b><span class="ar">·</span><span class="rk">on</span>' + S.cores + ' core' + (S.cores > 1 ? 's' : '') + ' = <b>' + pl.W + ' wave' + (pl.W > 1 ? 's' : '') + '</b><span class="ar">·</span><span class="rk">key blocks</span>ceil(' + S.T + ' / Bc=' + pl.Bc + ') = <b>' + pl.kb + '</b></div>';
-    h += '<div class="rl"><span class="rk">K, V read</span>' + T.kvRead + (T.kvRead > T.kvOnce ? ' <b class="tsp">(' + pl.streams + ' head-streams for ' + P.HT + ' heads)</b>' : ' (each head once)') + '<span class="ar">·</span><span class="rk">O rescaled</span>' + T.rescaled + ' = heads · Sq · d · (blocks − 1)' + (S.qk !== 'os' || S.pv !== 'os' ? '<span class="ar">·</span><span class="rk">inner partial adds</span>' + T.innerAdds : '') + '</div>';
-    h += '<div class="rl small"><span class="rk">same flags</span><code>' + command() + '</code></div>';
-    R.innerHTML = h;
+    const doneOps = P.steps.slice(0, this.t).reduce((s, x) => s + x.ops, 0), doneParams = P.steps.slice(0, this.t).reduce((s, x) => s + x.params, 0);
+    let cap = cur ? '<b>Step ' + this.t + '/' + this.n + '</b> · ' + cur.title + ': ' + fmtN(cur.ops) + ' operations' + (cur.params ? ', ' + cur.params + ' parameters' : ', no parameters') + '.' : 'Press <b>Step</b> to run the layer one operation at a time.';
+    if (this.t === this.n) {
+      const ok = close(T.out, P.REF);
+      cap = 'Done: ' + this.n + ' operations. ' + (ok ? '<span class="ok">Check: the walk equals the layer computed token by token ✓</span>' : '<span class="tsp">differs ✗</span>') + ' ' + this.totalParams + ' parameters, ' + this.totalOps + ' operations' + (closedForm(P).ops === this.totalOps && closedForm(P).params === this.totalParams ? ', matching the closed form' : '') + '.';
+    }
+    this.cap.innerHTML = cap;
+    this.cnt.innerHTML = counters([
+      { label: 'step', value: this.t + '/' + this.n }, { label: 'operations', value: doneOps + '/' + this.totalOps },
+      { label: 'parameters used', value: doneParams + '/' + this.totalParams }
+    ]);
+  };
+  LayerView.prototype.trace = function () {
+    return this.P.steps.slice(0, this.t).map((s, i) => 'step ' + String(i + 1).padStart(2) + ': ' + s.id.padEnd(14) + s.shape.padEnd(22) + String(s.ops).padStart(7) + ' ops' + (s.params ? '  ' + s.params + ' params' : ''));
+  };
+  mix(LayerView.prototype);
+
+  // =====================================================================
+  // CostView: the same operations at any size, priced on a chip
+  // Each op: t = max(operations / peak, bytes / bandwidth) — the roofline, ideal, one op after another.
+  // =====================================================================
+  function costOf(o, chip) {
+    const c = CHIPS[chip], L = layerOps(o);
+    return L.map((x) => {
+      const bytes = (x.id === 'embed' ? x.actOut : x.params + x.actIn + x.actOut) * c.bytes;
+      const tc = x.ops / c.peak, tm = bytes / c.bw;
+      return Object.assign({}, x, { bytes, intensity: bytes ? x.ops / bytes : 0, tc, tm, t: Math.max(tc, tm), bound: tc > tm ? 'compute' : 'memory' });
+    });
   }
-  function trace() {
-    const d = $('trace'); if (!view || !$('tracebox').open) return;
-    const lines = view.trace(400);
-    d.textContent = lines.length ? lines.join('\n') : '(nothing yet — take a step)';
-    d.scrollTop = d.scrollHeight;
+  function CostView(root, cfg) {
+    this.cfg = cfg; this.root = root; root.classList.add('w', 'enc');
+    this.baseSpeed = 700; this.t = 0;
+    const chip = CHIPS[cfg.chip];
+    this.rows = costOf(cfg, cfg.chip); this.n = this.rows.length;
+    this.total = this.rows.reduce((s, r) => s + r.t, 0);
+    if (cfg.title !== false) {
+      const head = el('div', 'w-head'); root.appendChild(head);
+      head.innerHTML = '<span class="chip">' + (cfg.batch > 1 ? cfg.batch + ' × ' : '') + 'S = ' + cfg.S + ' tokens · d = ' + cfg.d + ' · ' + cfg.h + ' heads · ffn = ' + cfg.ffn + '</span><span class="chip">' + chip.name + ': ' + fmtN(chip.peak) + 'OP/s, ' + fmtN(chip.bw) + 'B/s → ridge ' + Math.round(chip.peak / chip.bw) + ' OP/byte</span>';
+    }
+    this.tableWrap = el('div', 'tw'); root.appendChild(this.tableWrap);
+    this.bar = el('div', 'enc-bar'); root.appendChild(this.bar);
+    this.cap = el('div', 'cap'); root.appendChild(this.cap);
+    const foot = el('div', 'w-foot'); root.appendChild(foot);
+    this.cnt = el('div', 'counters'); foot.appendChild(this.cnt);
+    const right = el('div', 'stack right'); right.append(this.controls('All'), this.scrubber()); foot.appendChild(right);
+    this.keys(); this.go(0);
   }
-  function rebuild() {
-    fix();
-    if (view) view.destroy();
-    const host = $('view'); host.innerHTML = '';
-    const d = el('div'); host.appendChild(d);
-    const P = A.problem(S);
-    const cfg = Object.assign({}, S, { P, onStep: trace });
-    view = new ({ naive: A.NaiveView, flash: A.FlashView, inner: A.InnerView }[S.mode])(d, cfg);
-    knobs(); rule(); trace();
+  CostView.prototype.inner = function () { this.go(this.n); return true; };
+  CostView.prototype.render = function () {
+    const cfg = this.cfg, chip = CHIPS[cfg.chip], ridge = chip.peak / chip.bw;
+    const shown = this.rows.slice(0, this.t);
+    let h = '<table class="cmp enc-cost"><tr><th>operation</th><th>operations</th><th>parameters</th><th>bytes moved</th><th>OP / byte</th><th>bound on ' + chip.name.split(' ·')[0] + '</th><th>time</th><th>share</th></tr>';
+    this.rows.forEach((r, i) => {
+      const on = i < this.t;
+      h += '<tr class="' + (on ? 'g-' + r.group : 'hid') + (i === this.t - 1 ? ' cur' : '') + '"><td>' + r.title + '</td><td>' + (on ? fmtN(r.ops) : '') + '</td><td>' + (on ? fmtN(r.params) + (r.id === 'embed' ? ' <span class="muted">(the stack\'s)</span>' : '') : '') + '</td><td>' + (on ? fmtN(r.bytes) + 'B' : '') + '</td><td>' + (on ? (r.intensity ? r.intensity.toPrecision(3) : '—') : '') + '</td><td>' + (on ? '<span class="b-' + r.bound + '">' + r.bound + '</span>' : '') + '</td><td>' + (on ? fmtTime(r.t) : '') + '</td><td>' + (on ? '<span class="sh" style="width:' + Math.max(1, Math.round(100 * r.t / this.total)) + 'px"></span>' + Math.round(100 * r.t / this.total) + '%' : '') + '</td></tr>';
+    });
+    this.tableWrap.innerHTML = h + '</table>';
+    // Widths as shares of the layer's time: flex-grow on raw seconds (~1e-6) would sum below 1,
+    // and a flex line only hands out that fraction of its width.
+    this.bar.innerHTML = shown.map((r) => '<span class="seg-' + r.group + ' b-' + r.bound + '" style="width:' + (100 * r.t / this.total) + '%" title="' + r.title + ': ' + fmtTime(r.t) + '"></span>').join('');
+    const sum = (f) => shown.reduce((s, r) => s + r[f], 0);
+    const mm = shown.filter((r) => r.kind === 'matmul'), at = shown.filter((r) => r.kind === 'attention'), ew = shown.filter((r) => ['norm', 'add', 'act', 'gather'].includes(r.kind));
+    let cap = this.t === 0 ? 'Press <b>Step</b> to price the layer one operation at a time: <b>t = max(operations / peak, bytes / bandwidth)</b> — an operation whose OP/byte is above the ridge point (' + Math.round(ridge) + ') is compute-bound, below it memory-bound.' : '<b>' + this.rows[this.t - 1].title + '</b>: ' + fmtN(this.rows[this.t - 1].ops) + ' operations over ' + fmtN(this.rows[this.t - 1].bytes) + 'B — ' + this.rows[this.t - 1].bound + '-bound.';
+    if (this.t === this.n) {
+      const cf = closedForm(cfg), ok = sum('ops') === cf.ops && sum('params') === cf.params;
+      const share = (L) => Math.round(100 * L.reduce((s, r) => s + r.t, 0) / this.total);
+      const attnW = this.rows.filter((r) => r.group === 'attn').reduce((s, r) => s + r.params, 0), ffnW = this.rows.filter((r) => r.group === 'ffn').reduce((s, r) => s + r.params, 0);
+      cap = 'Layer: <b>' + fmtTime(this.total) + '</b> — matmuls ' + share(mm) + '%, attention ' + share(at) + '%, norms, activations and residuals ' + share(ew) + '%. Its own weights (the embedding table belongs to the whole stack): attention ' + Math.round(100 * attnW / (attnW + ffnW)) + '%, FFN ' + Math.round(100 * ffnW / (attnW + ffnW)) + '%. ' + (ok ? '<span class="ok">Check: operations and parameters equal the closed form ✓</span>' : '<span class="tsp">✗</span>');
+    }
+    this.cap.innerHTML = cap;
+    this.cnt.innerHTML = counters([
+      { label: 'operations', value: fmtN(sum('ops')) }, { label: 'parameters', value: fmtN(sum('params')) },
+      { label: 'bytes', value: fmtN(sum('bytes')) + 'B' }, { label: 'time', value: fmtTime(sum('t')) }
+    ]);
+  };
+  CostView.prototype.trace = function () {
+    return this.rows.slice(0, this.t).map((r) => r.id.padEnd(14) + fmtN(r.ops).padStart(8) + ' ops ' + (fmtN(r.bytes) + 'B').padStart(9) + '  ' + r.bound.padEnd(8) + fmtTime(r.t).padStart(10));
+  };
+  mix(CostView.prototype);
+
+  // ---------------- deck mount ----------------
+  const DEFAULTS = { S: 4, d: 8, h: 2, ffn: 16, act: 'relu', norm: 'rmsnorm', vocab: 16, batch: 1, seed: 0, chip: 'a100' };
+  const LAB = { S: 'tokens S', d: 'width d', act: 'activation', norm: 'norm', chip: 'chip', batch: 'batch', ffn: 'ffn', h: 'heads' };
+  // A cost view needs no numbers, only the sizes; a layer view needs the tiny problem.
+  const build = (cfg) => (cfg.type === 'cost' ? null : problem(cfg));
+  const { mount, mountAll } = global.NB.widgets({ layer: LayerView, cost: CostView }, DEFAULTS, build, LAB);
+
+  global.ENC = { problem, forward, reference, close, layerOps, closedForm, costOf, CHIPS, NORM_OPS, ACT_OPS, LayerView, CostView, mount, mountAll, DEFAULTS };
+  global.MM = { mountAll };
+})(typeof window !== 'undefined' ? window : globalThis);
+</script><script>
+(function () {
+  const slides = Array.from(document.querySelectorAll('.slide'));
+  MM.mountAll();
+  const secEl = document.getElementById('sec'), cntEl = document.getElementById('cnt'), prog = document.getElementById('prog');
+  slides.forEach((s, i) => { const d = document.createElement('i'); d.title = (i + 1) + ' · ' + s.dataset.sec; d.addEventListener('click', () => show(i)); prog.appendChild(d); });
+  let cur = 0;
+  const builds = (s) => Array.from(s.querySelectorAll('.b'));
+  const widget = (s) => { const n = s.querySelector('[data-widget]'); return n && n._widget && n._widget.step ? n._widget : null; };
+  function show(n, revealAll) {
+    n = Math.max(0, Math.min(slides.length - 1, n));
+    const w0 = widget(slides[cur]); if (w0) w0.stop();
+    cur = n;
+    slides.forEach((s, i) => s.classList.toggle('on', i === cur));
+    if (revealAll) builds(slides[cur]).forEach((b) => b.classList.add('shown'));
+    secEl.textContent = slides[cur].dataset.sec;
+    cntEl.textContent = (cur + 1) + ' / ' + slides.length;
+    Array.from(prog.children).forEach((d, i) => { d.className = i === cur ? 'cur' : i < cur ? 'done' : ''; });
+    document.querySelector('.stage').scrollTop = 0;
+    try { history.replaceState(null, '', '#s' + (cur + 1)); } catch (e) {}
   }
-  function chapter(id) {
-    const c = CH.find((x) => x.id === id);
-    Object.keys(DEF).forEach((k) => { S[k] = DEF[k]; });
-    Object.assign(S, c.set);
-    $('story').innerHTML = c.s;
-    document.querySelectorAll('#chapters button').forEach((b) => b.setAttribute('aria-pressed', b.dataset.id === id ? 'true' : 'false'));
-    rebuild();
+  function next() {
+    const s = slides[cur];
+    const hid = builds(s).find((b) => !b.classList.contains('shown'));
+    if (hid) { hid.classList.add('shown'); return; }
+    const w = widget(s);
+    if (w && !w.atEnd()) { w.stop(); w.step(); return; }
+    show(cur + 1);
   }
-  const bar = $('chapters');
-  CH.forEach((c, n) => { const b = el('button', 'btn chap', '<span>' + (n + 1) + '</span>' + c.t); b.type = 'button'; b.dataset.id = c.id; b.addEventListener('click', () => chapter(c.id)); bar.appendChild(b); });
-  $('tracebox').addEventListener('toggle', trace);
+  function prev() {
+    const s = slides[cur];
+    const w = widget(s);
+    if (w && !w.atStart()) { w.stop(); w.back(); return; }
+    const shown = builds(s).filter((b) => b.classList.contains('shown'));
+    if (shown.length) { shown[shown.length - 1].classList.remove('shown'); return; }
+    show(cur - 1, true);
+  }
+  function inner() { const w = widget(slides[cur]); if (w && !w.atEnd()) { w.stop(); builds(slides[cur]).forEach((b) => b.classList.add('shown')); w.inner(); } else next(); }
+  document.getElementById('bprev').addEventListener('click', prev);
+  document.getElementById('bnext').addEventListener('click', next);
+  document.getElementById('bskip').addEventListener('click', () => show(cur + 1));
   document.addEventListener('keydown', (e) => {
     if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey) return;
-    if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT')) return;
-    if (view && view.keydown(e)) e.preventDefault();
+    const k = e.key, w = widget(slides[cur]);
+    let done = true;
+    if (k === 'ArrowRight' || k === ' ') next();
+    else if (k === 'ArrowLeft') prev();
+    else if (k === 'ArrowDown') inner();
+    else if (k === 'ArrowUp') { if (w) { w.stop(); w.reset(); } }
+    else if (k === 'PageDown' || k === 'n' || k === 'N') show(cur + 1);
+    else if (k === 'PageUp' || k === 'b' || k === 'B') show(cur - 1, true);
+    else if (k === 'Home') show(0);
+    else if (k === 'End') show(slides.length - 1, true);
+    else if ((k === 'p' || k === 'P') && w) w.play();
+    else if ((k === 'e' || k === 'E') && w) w.finish();
+    else if ((k === 'r' || k === 'R') && w) w.reset();
+    else done = false;
+    if (done) e.preventDefault();
   });
-  window.LAB = { S, rebuild, chapter, CH, get view() { return view; } };
-  chapter('plain');
+  const m = /^#s(\d+)$/.exec(location.hash);
+  show(m ? +m[1] - 1 : 0, !!m);
 })();
 </script>
 </body>
