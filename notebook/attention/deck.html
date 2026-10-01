@@ -378,6 +378,7 @@ table.cheat td, table.cheat th { padding: 0.4rem 0.6rem; }
     <p class="b"><b>Scores.</b> Every query row against every key: <code>S = Q Kᵀ / √d</code>. Q is Sq × d, K is Skv × d, so S is Sq × Skv.</p>
     <p class="b"><b>Probabilities.</b> Each row of S through a softmax: subtract the row's max, exponentiate, divide by the row's sum.</p>
     <p class="b"><b>Mix.</b> <code>O = P V</code>: each output row is a probability-weighted mix of the value rows. O is Sq × d, like Q.</p>
+    <p class="b small"><b>Sizes in a real model:</b> Sq = tokens processed now (the prompt in prefill, 2k–8k; 1 per step in decode) · Skv = tokens they can look at (the context, growing by one per generated token) · d = one head's width, 64–128 · many heads side by side (Llama-3-8B: 32 × 128 = 4096) · a batch repeats it per sequence.</p>
     <p class="b small">Both S = QKᵀ and O = PV are matmuls — the ones the matmul deck rearranges. What is new is the softmax between them.</p>
   </div>
 </section>
