@@ -12,10 +12,10 @@
 <section class="slide" data-sec="The formula">
   <h2>Three steps, one head</h2>
   <div class="points">
-    <p class="b"><b>Scores.</b> Every query row against every key: <code>S = Q Kᵀ / √d</code>. Q is Sq × d, K is Skv × d, so S is Sq × Skv.</p>
+    <p class="b"><b>Scores.</b> Every query row against every key: <code>S = Q Kᵀ / √d</code>. Q is Tq × d, K is Tkv × d, so S is Tq × Tkv.</p>
     <p class="b"><b>Probabilities.</b> Each row of S through a softmax: subtract the row's max, exponentiate, divide by the row's sum.</p>
-    <p class="b"><b>Mix.</b> <code>O = P V</code>: each output row is a probability-weighted mix of the value rows. O is Sq × d, like Q.</p>
-    <p class="b small"><b>Sizes in a real model:</b> Sq = tokens processed now (the prompt in prefill, 2k–8k; 1 per step in decode) · Skv = tokens they can look at (the context, growing by one per generated token) · d = one head's width, 64–128 · many heads side by side (Llama-3-8B: 32 × 128 = 4096) · a batch repeats it per sequence.</p>
+    <p class="b"><b>Mix.</b> <code>O = P V</code>: each output row is a probability-weighted mix of the value rows. O is Tq × d, like Q.</p>
+    <p class="b small"><b>Sizes in a real model:</b> Tq = tokens processed now (the prompt in prefill, 2k–8k; 1 per step in decode) · Tkv = tokens they can look at (the context, growing by one per generated token) · d = one head's width, 64–128 · many heads side by side (Llama-3-8B: 32 × 128 = 4096) · a batch repeats it per sequence.</p>
     <p class="b small">Both S = QKᵀ and O = PV are matmuls — the ones the matmul deck rearranges. What is new is the softmax between them.</p>
   </div>
 </section>
@@ -30,7 +30,7 @@
   <h2>Softmax needs the whole row</h2>
   <div class="points">
     <p class="b">A softmax divides by the <b>sum</b> of its row, after subtracting the row's <b>max</b>. Neither is known until every score of the row exists.</p>
-    <p class="b">So plain attention keeps all of S: <b>Sq × Skv</b> numbers, then as many probabilities. At 4096 tokens that is 16.8 million scores per head — memory traffic, not arithmetic, sets the time.</p>
+    <p class="b">So plain attention keeps all of S: <b>Tq × Tkv</b> numbers, then as many probabilities. At 4096 tokens that is 16.8 million scores per head — memory traffic, not arithmetic, sets the time.</p>
     <p class="b big">The fix: do not wait for the row. Keep a <b>running</b> max and a <b>running</b> sum.</p>
   </div>
 </section>
@@ -97,12 +97,12 @@
   <h2>The point: S never leaves the core</h2>
   <div class="tw"><table class="rule">
     <tr><th></th><th>plain attention</th><th>FlashAttention</th></tr>
-    <tr class="b"><td>multiplies</td><td>2·Sq·Skv·d</td><td>2·Sq·Skv·d</td></tr>
-    <tr class="b"><td>exp()</td><td>Sq·Skv</td><td>Sq·Skv</td></tr>
-    <tr class="b"><td>S and P through memory</td><td class="tm">4·Sq·Skv</td><td>0</td></tr>
-    <tr class="b"><td>extra vector work</td><td>—</td><td>Sq·d per key block after the first</td></tr>
+    <tr class="b"><td>multiplies</td><td>2·Tq·Tkv·d</td><td>2·Tq·Tkv·d</td></tr>
+    <tr class="b"><td>exp()</td><td>Tq·Tkv</td><td>Tq·Tkv</td></tr>
+    <tr class="b"><td>S and P through memory</td><td class="tm">4·Tq·Tkv</td><td>0</td></tr>
+    <tr class="b"><td>extra vector work</td><td>—</td><td>Tq·d per key block after the first</td></tr>
   </table></div>
-  <p class="b">Same arithmetic, a little more vector work, and the Sq × Skv traffic gone. That is why it is fast.</p>
+  <p class="b">Same arithmetic, a little more vector work, and the Tq × Tkv traffic gone. That is why it is fast.</p>
 </section>
 
 <section class="slide" data-sec="The flags">

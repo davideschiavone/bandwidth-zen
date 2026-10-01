@@ -22,19 +22,19 @@
   };
   function lcg(seed) { let s = (seed * 2654435761) >>> 0 || 1; return () => ((s = (Math.imul(s, 1664525) + 1013904223) >>> 0) / 4294967296); }
   function problem(o) {
-    const Sq = o.S, Skv = o.T, d = o.d, heads = o.heads || 1, batch = o.batch || 1, HT = heads * batch;
-    const ex = !o.seed && Sq === 4 && Skv === 4 && d === 2 && HT === 1;
+    const Tq = o.S, Tkv = o.T, d = o.d, heads = o.heads || 1, batch = o.batch || 1, HT = heads * batch;
+    const ex = !o.seed && Tq === 4 && Tkv === 4 && d === 2 && HT === 1;
     const r = lcg(o.seed || 11);
     const draw = (rows) => rng(rows).map(() => rng(d).map(() => Math.floor(r() * 4) - 1));
     const Q = [], K = [], V = [];
     for (let h = 0; h < HT; h++) {
-      Q.push(ex ? EX.Q.map((x) => x.slice()) : draw(Sq));
-      K.push(ex ? EX.K.map((x) => x.slice()) : draw(Skv));
-      V.push(ex ? EX.V.map((x) => x.slice()) : draw(Skv));
+      Q.push(ex ? EX.Q.map((x) => x.slice()) : draw(Tq));
+      K.push(ex ? EX.K.map((x) => x.slice()) : draw(Tkv));
+      V.push(ex ? EX.V.map((x) => x.slice()) : draw(Tkv));
     }
     const scale = 1 / Math.sqrt(d);
     const REF = Q.map((q, h) => refAttention(q, K[h], V[h], scale));
-    return { Sq, Skv, d, heads, batch, HT, Q, K, V, REF, scale, seed: ex ? 0 : (o.seed || 11) };
+    return { Tq, Tkv, d, heads, batch, HT, Q, K, V, REF, scale, seed: ex ? 0 : (o.seed || 11) };
   }
   // softmax(Q Kᵀ / √d) V the textbook way: every score of a row first, then the softmax, then P V.
   function refAttention(Q, K, V, scale) {
@@ -70,15 +70,15 @@
   // and after the last block, norm: O = O / l, O written back.
   // =====================================================================
   function flashPlan(P, cfg) {
-    const Br = Math.max(1, Math.min(cfg.Br, P.Sq)), Bc = Math.max(1, Math.min(cfg.Bc, P.Skv));
-    const qb = ceil(P.Sq / Br), kb = ceil(P.Skv / Bc);
+    const Br = Math.max(1, Math.min(cfg.Br, P.Tq)), Bc = Math.max(1, Math.min(cfg.Bc, P.Tkv));
+    const qb = ceil(P.Tq / Br), kb = ceil(P.Tkv / Bc);
     const programs = P.HT * qb, used = Math.max(1, Math.min(cfg.cores, programs)), W = ceil(programs / used);
     const L = 3 * kb + 1, n = W * L;
     const progs = rng(programs).map((p) => {
       const head = floor(p / qb), blk = p % qb;
-      return { id: p, head, blk, r0: blk * Br, r1: Math.min((blk + 1) * Br, P.Sq), wave: floor(p / used), core: p % used };
+      return { id: p, head, blk, r0: blk * Br, r1: Math.min((blk + 1) * Br, P.Tq), wave: floor(p / used), core: p % used };
     });
-    const kbl = rng(kb).map((j) => [j * Bc, Math.min((j + 1) * Bc, P.Skv)]);
+    const kbl = rng(kb).map((j) => [j * Bc, Math.min((j + 1) * Bc, P.Tkv)]);
     // K and V cross memory once per wave a head's programs span (D33's staging, as in bwz).
     let streams = 0;
     for (let h = 0; h < P.HT; h++) streams += floor(((h + 1) * qb - 1) / used) - floor((h * qb) / used) + 1;
@@ -94,7 +94,7 @@
     const st = {
       prog: {}, mul: 0, exps: 0, rescaled: 0, normalised: 0, qRead: 0, kvRead: 0, oWritten: 0,
       staged: new Set(), heldMax: 0, innerAdds: 0,
-      O: P.Q.map(() => zeros(P.Sq, d)), Odone: P.Q.map(() => rng(P.Sq).map(() => false))
+      O: P.Q.map(() => zeros(P.Tq, d)), Odone: P.Q.map(() => rng(P.Tq).map(() => false))
     };
     for (let s = 0; s < Math.min(t, pl.n); s++) {
       const { wave, j, ph } = phaseAt(pl, s);
@@ -148,10 +148,10 @@
       adds += innerAdds(cfg.qk, rows, w, P.d, tile) + innerAdds(cfg.pv, rows, P.d, w, tile);
     }));
     return {
-      mul: 2 * P.HT * P.Sq * P.Skv * P.d, exps: P.HT * P.Sq * P.Skv,
-      rescaled: P.HT * P.Sq * P.d * (pl.kb - 1), normalised: P.HT * P.Sq * P.d,
-      qRead: P.HT * P.Sq * P.d, oWritten: P.HT * P.Sq * P.d,
-      kvRead: 2 * pl.streams * P.Skv * P.d, kvOnce: 2 * P.HT * P.Skv * P.d, innerAdds: adds
+      mul: 2 * P.HT * P.Tq * P.Tkv * P.d, exps: P.HT * P.Tq * P.Tkv,
+      rescaled: P.HT * P.Tq * P.d * (pl.kb - 1), normalised: P.HT * P.Tq * P.d,
+      qRead: P.HT * P.Tq * P.d, oWritten: P.HT * P.Tq * P.d,
+      kvRead: 2 * pl.streams * P.Tkv * P.d, kvOnce: 2 * P.HT * P.Tkv * P.d, innerAdds: adds
     };
   }
   function flashCode(pl) {
@@ -175,15 +175,15 @@
   //   P row = softmax(S row)  (S read back, P written)
   //   O row = P row V     (P read back)
   // =====================================================================
-  function naivePlan(P) { return { n: 3 * P.Sq }; }
+  function naivePlan(P) { return { n: 3 * P.Tq }; }
   function naiveState(P, t) {
-    const st = { S: zeros(P.Sq, P.Skv), Pm: zeros(P.Sq, P.Skv), O: zeros(P.Sq, P.d), sOn: rng(P.Sq).map(() => 0), mul: 0, exps: 0, sW: 0, sR: 0, pW: 0, pR: 0 };
+    const st = { S: zeros(P.Tq, P.Tkv), Pm: zeros(P.Tq, P.Tkv), O: zeros(P.Tq, P.d), sOn: rng(P.Tq).map(() => 0), mul: 0, exps: 0, sW: 0, sR: 0, pW: 0, pR: 0 };
     const q = P.Q[0], K = P.K[0], V = P.V[0];
     for (let s = 0; s < t; s++) {
       const i = floor(s / 3), ph = s % 3;
-      if (ph === 0) { st.S[i] = K.map((k) => q[i].reduce((a, x, c) => a + x * k[c], 0) * P.scale); st.mul += P.Skv * P.d; st.sW += P.Skv; st.sOn[i] = 1; }
-      else if (ph === 1) { const m = Math.max(...st.S[i]), e = st.S[i].map((x) => Math.exp(x - m)), l = e.reduce((a, x) => a + x, 0); st.Pm[i] = e.map((x) => x / l); st.exps += P.Skv; st.sR += P.Skv; st.pW += P.Skv; st.sOn[i] = 2; }
-      else { st.O[i] = rng(P.d).map((c) => st.Pm[i].reduce((a, p, j) => a + p * V[j][c], 0)); st.mul += P.Skv * P.d; st.pR += P.Skv; st.sOn[i] = 3; }
+      if (ph === 0) { st.S[i] = K.map((k) => q[i].reduce((a, x, c) => a + x * k[c], 0) * P.scale); st.mul += P.Tkv * P.d; st.sW += P.Tkv; st.sOn[i] = 1; }
+      else if (ph === 1) { const m = Math.max(...st.S[i]), e = st.S[i].map((x) => Math.exp(x - m)), l = e.reduce((a, x) => a + x, 0); st.Pm[i] = e.map((x) => x / l); st.exps += P.Tkv; st.sR += P.Tkv; st.pW += P.Tkv; st.sOn[i] = 2; }
+      else { st.O[i] = rng(P.d).map((c) => st.Pm[i].reduce((a, p, j) => a + p * V[j][c], 0)); st.mul += P.Tkv * P.d; st.pR += P.Tkv; st.sOn[i] = 3; }
     }
     return st;
   }
@@ -193,13 +193,13 @@
   // row of Q and of O, a column of S with a column of Kᵀ and of Vᵀ — the shared axes of the formula.
   function Quint(P, rb, cb, sTitle) {
     this.root = el('div', 'att-grid');
-    if (Math.max(P.Sq, P.Skv) > 6) this.root.classList.add('dense');
+    if (Math.max(P.Tq, P.Tkv) > 6) this.root.classList.add('dense');
     const o = (kind, r, c, extra) => new Mat(kind, r, c, Object.assign({ rv: extra.rv, cv: extra.cv }, extra));
-    this.Q = o('Q', P.Sq, P.d, { rv: 'q', cv: 'd', rb, title: 'Q', dims: P.Sq + '×' + P.d });
-    this.K = o('K', P.d, P.Skv, { rv: 'd', cv: 'k', cb, title: 'Kᵀ', dims: P.d + '×' + P.Skv });
-    this.S = o('S', P.Sq, P.Skv, { rv: 'q', cv: 'k', rb, cb, title: sTitle, dims: P.Sq + '×' + P.Skv });
-    this.V = o('V', P.d, P.Skv, { rv: 'd', cv: 'k', cb, title: 'Vᵀ', dims: 'V is ' + P.Skv + '×' + P.d + ', drawn on its side' });
-    this.O = o('O', P.Sq, P.d, { rv: 'q', cv: 'd', rb, title: 'O', dims: P.Sq + '×' + P.d });
+    this.Q = o('Q', P.Tq, P.d, { rv: 'q', cv: 'd', rb, title: 'Q', dims: P.Tq + '×' + P.d });
+    this.K = o('K', P.d, P.Tkv, { rv: 'd', cv: 'k', cb, title: 'Kᵀ', dims: P.d + '×' + P.Tkv });
+    this.S = o('S', P.Tq, P.Tkv, { rv: 'q', cv: 'k', rb, cb, title: sTitle, dims: P.Tq + '×' + P.Tkv });
+    this.V = o('V', P.d, P.Tkv, { rv: 'd', cv: 'k', cb, title: 'Vᵀ', dims: 'V is ' + P.Tkv + '×' + P.d + ', drawn on its side' });
+    this.O = o('O', P.Tq, P.d, { rv: 'q', cv: 'd', rb, title: 'O', dims: P.Tq + '×' + P.d });
     const slot = (m, cls) => { m.root.classList.add(cls); this.root.appendChild(m.root); };
     slot(this.K, 'g-k'); slot(this.Q, 'g-q'); slot(this.S, 'g-s'); slot(this.O, 'g-o'); slot(this.V, 'g-v');
   }
@@ -380,7 +380,7 @@
     else cap = '<b>Step ' + this.t + '</b> · all key blocks seen: O = O / l, and O is written back — the only thing this program ever writes.';
     if (this.t === pl.n) {
       const ok = P.REF.every((R, h) => closeTo(st.O[h], R));
-      cap = 'Done in ' + pl.n + ' steps. ' + (ok ? '<span class="ok">Check: O == softmax(QKᵀ/√d)·V ✓</span>' : '<span class="tsp">O differs ✗</span>') + ' S was never stored: at most <b>' + st.heldMax + '</b> scores were on chip at once, against ' + P.HT * P.Sq * P.Skv + ' in all.';
+      cap = 'Done in ' + pl.n + ' steps. ' + (ok ? '<span class="ok">Check: O == softmax(QKᵀ/√d)·V ✓</span>' : '<span class="tsp">O differs ✗</span>') + ' S was never stored: at most <b>' + st.heldMax + '</b> scores were on chip at once, against ' + P.HT * P.Tq * P.Tkv + ' in all.';
     }
     this.cap.innerHTML = cap;
     const util = Math.round(100 * pl.programs / (pl.W * cfg.cores));
@@ -419,17 +419,17 @@
     const P = this.P;
     if (cfg.title !== false) {
       const head = el('div', 'w-head'); root.appendChild(head);
-      head.innerHTML = '<span class="chip">one query row per step, three phases</span><span class="chip">S = ' + P.Sq + '×' + P.Skv + ' scores, all kept</span><span class="chip mem">S and P go through memory</span>';
+      head.innerHTML = '<span class="chip">one query row per step, three phases</span><span class="chip">S = ' + P.Tq + '×' + P.Tkv + ' scores, all kept</span><span class="chip mem">S and P go through memory</span>';
     }
     const top = el('div', 'pv-top'); root.appendChild(top);
-    this.q = new Quint(P, P.Sq, P.Skv, 'S = QKᵀ/√d, then P');
+    this.q = new Quint(P, P.Tq, P.Tkv, 'S = QKᵀ/√d, then P');
     top.appendChild(this.q.root);
     const codeWrap = el('div', 'stack'); top.appendChild(codeWrap);
     this.codeEl = el('pre', 'code'); codeWrap.appendChild(this.codeEl);
     this.lines = [
-      { html: '<span class="kw">for</span> i <span class="kw">in</span> range(' + P.Sq + '):  S[i] = <span class="ta">Q[i]</span> <span class="tb">K</span>ᵀ / √d   <span class="cm"># write S</span>', v: 0 },
-      { html: '<span class="kw">for</span> i <span class="kw">in</span> range(' + P.Sq + '):  P[i] = softmax(S[i]) <span class="cm"># read S, write P</span>', v: 1 },
-      { html: '<span class="kw">for</span> i <span class="kw">in</span> range(' + P.Sq + '):  <span class="tc">O[i]</span> = P[i] <span class="tb">V</span>        <span class="cm"># read P</span>', v: 2 }
+      { html: '<span class="kw">for</span> i <span class="kw">in</span> range(' + P.Tq + '):  S[i] = <span class="ta">Q[i]</span> <span class="tb">K</span>ᵀ / √d   <span class="cm"># write S</span>', v: 0 },
+      { html: '<span class="kw">for</span> i <span class="kw">in</span> range(' + P.Tq + '):  P[i] = softmax(S[i]) <span class="cm"># read S, write P</span>', v: 1 },
+      { html: '<span class="kw">for</span> i <span class="kw">in</span> range(' + P.Tq + '):  <span class="tc">O[i]</span> = P[i] <span class="tb">V</span>        <span class="cm"># read P</span>', v: 2 }
     ];
     this.lineEls = this.lines.map((l) => { const d = el('div', 'ln', l.html); this.codeEl.appendChild(d); return d; });
     codeWrap.appendChild(el('div', 'legend', '<span><i class="lg read"></i>read now</span><span><i class="lg s-mem"></i>S (or P) stored</span><span><i class="lg fin"></i>O row done</span>'));
@@ -445,14 +445,14 @@
     const P = this.P, st = naiveState(P, this.t), slot = this.t - 1, i = floor(slot / 3), ph = slot % 3;
     this.q.values(P, 0);
     const cQ = {}, cK = {}, cV = {}, cS = {}, cO = {};
-    for (let r = 0; r < P.Sq; r++) {
-      for (let c = 0; c < P.Skv; c++) if (st.sOn[r]) addCls(cS, key(r, c), 's-mem');
+    for (let r = 0; r < P.Tq; r++) {
+      for (let c = 0; c < P.Tkv; c++) if (st.sOn[r]) addCls(cS, key(r, c), 's-mem');
       if (st.sOn[r] === 3) for (let c = 0; c < P.d; c++) addCls(cO, key(r, c), 'fin');
     }
     if (slot >= 0) {
-      if (ph === 0) { for (let c = 0; c < P.d; c++) addCls(cQ, key(i, c), 'read'); for (let c = 0; c < P.d; c++) for (let b = 0; b < P.Skv; b++) addCls(cK, key(c, b), 'read'); for (let b = 0; b < P.Skv; b++) addCls(cS, key(i, b), 'write'); }
-      if (ph === 1) for (let b = 0; b < P.Skv; b++) addCls(cS, key(i, b), 'read-s');
-      if (ph === 2) { for (let b = 0; b < P.Skv; b++) addCls(cS, key(i, b), 'read-s'); for (let c = 0; c < P.d; c++) for (let b = 0; b < P.Skv; b++) addCls(cV, key(c, b), 'read'); for (let c = 0; c < P.d; c++) addCls(cO, key(i, c), 'write'); }
+      if (ph === 0) { for (let c = 0; c < P.d; c++) addCls(cQ, key(i, c), 'read'); for (let c = 0; c < P.d; c++) for (let b = 0; b < P.Tkv; b++) addCls(cK, key(c, b), 'read'); for (let b = 0; b < P.Tkv; b++) addCls(cS, key(i, b), 'write'); }
+      if (ph === 1) for (let b = 0; b < P.Tkv; b++) addCls(cS, key(i, b), 'read-s');
+      if (ph === 2) { for (let b = 0; b < P.Tkv; b++) addCls(cS, key(i, b), 'read-s'); for (let c = 0; c < P.d; c++) for (let b = 0; b < P.Tkv; b++) addCls(cV, key(c, b), 'read'); for (let c = 0; c < P.d; c++) addCls(cO, key(i, c), 'write'); }
     }
     this.q.Q.paint(cQ, (r, c) => String(P.Q[0][r][c]));
     this.q.K.paint(cK, (r, c) => String(P.K[0][c][r]));
@@ -464,13 +464,13 @@
       ['<b>Row ' + i + '</b>: its scores against every key, written to memory.', '<b>Row ' + i + '</b>: softmax needs the <b>whole row</b> — its max and its sum — so the stored scores are read back and P is written.', '<b>Row ' + i + '</b>: O = P·V, reading P back.'][ph];
     if (this.t === this.n) {
       const ok = closeTo(st.O, P.REF[0]);
-      cap = 'Done. ' + (ok ? '<span class="ok">Check: O == softmax(QKᵀ/√d)·V ✓</span>' : '<span class="tsp">O differs ✗</span>') + ' ' + P.Sq * P.Skv + ' scores were stored and read back, then the same number of probabilities: <b>' + (st.sW + st.sR + st.pW + st.pR) + '</b> numbers through memory that FlashAttention never moves.';
+      cap = 'Done. ' + (ok ? '<span class="ok">Check: O == softmax(QKᵀ/√d)·V ✓</span>' : '<span class="tsp">O differs ✗</span>') + ' ' + P.Tq * P.Tkv + ' scores were stored and read back, then the same number of probabilities: <b>' + (st.sW + st.sR + st.pW + st.pR) + '</b> numbers through memory that FlashAttention never moves.';
     }
     this.cap.innerHTML = cap;
     this.cnt.innerHTML = counters([
-      { label: 'step', value: this.t + '/' + this.n }, { label: 'multiplies', value: st.mul + '/' + 2 * P.Sq * P.Skv * P.d },
+      { label: 'step', value: this.t + '/' + this.n }, { label: 'multiplies', value: st.mul + '/' + 2 * P.Tq * P.Tkv * P.d },
       { label: 'exp()', value: st.exps }, { label: 'S written', value: st.sW, cls: 'cm' }, { label: 'S read', value: st.sR, cls: 'cm' },
-      { label: 'P written', value: st.pW, cls: 'cm' }, { label: 'P read', value: st.pR, cls: 'cm' }, { label: 'S held at once', value: st.sOn.filter((x) => x).length * P.Skv }
+      { label: 'P written', value: st.pW, cls: 'cm' }, { label: 'P read', value: st.pR, cls: 'cm' }, { label: 'S held at once', value: st.sOn.filter((x) => x).length * P.Tkv }
     ]);
   };
   NaiveView.prototype.trace = function () {

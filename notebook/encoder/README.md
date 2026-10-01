@@ -4,7 +4,7 @@
 
 The block BERT and ViT stack: `x → x + Attention(norm(x)) → x + FFN(norm(x))`. Two views:
 
-- **Tiny layer, real numbers** — S ≤ 8 tokens of width d ≤ 8, one operation per step: embedding,
+- **Tiny layer, real numbers** — T ≤ 8 tokens of width d ≤ 8, one operation per step: embedding,
   norm, Q/K/V projections, attention, output projection, residual add, norm, FFN up (and gate),
   activation, FFN down, residual add, final norm. Every run ends with the walk checked against the
   same layer computed token by token, by separate code.
@@ -20,13 +20,13 @@ The block BERT and ViT stack: `x → x + Attention(norm(x)) → x + FFN(norm(x))
 
 ## The sizes
 
-**S** is the number of tokens the encoder reads at once (512 for BERT, 197 patches for ViT-B/16),
+**T** is the number of tokens the encoder reads at once (512 for BERT, 197 patches for ViT-B/16),
 **d** the model width (768 for BERT-base, 4096 for an 8B model), split into **h** heads of d/h, and
 **ffn** the FFN's inner width (usually 4·d, about 8/3·d for gated FFNs).
 
 ## Conventions
 
-- **Counts are bwz's.** Projections 2·S·d², attention 4·S²·d + 5·h·S², norms 4 (RMSNorm) or 6
+- **Counts are bwz's.** Projections 2·T·d², attention 4·T²·d + 5·h·T², norms 4 (RMSNorm) or 6
   (LayerNorm) operations per element, activations ReLU 1, GELU 8, SwiGLU 5, GeGLU 9 per element,
   residual adds 1. Parameters include the embedding table and the final norm, as bwz's encoder
   layer does: the defaults (4 tokens, d = 8, 2 heads, ffn = 16) are 664 parameters and 5280

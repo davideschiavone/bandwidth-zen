@@ -187,7 +187,7 @@
     this.totalOps = P.steps.reduce((s, x) => s + x.ops, 0); this.totalParams = P.steps.reduce((s, x) => s + x.params, 0);
     if (cfg.title !== false) {
       const head = el('div', 'w-head'); root.appendChild(head);
-      head.innerHTML = '<span class="chip">S = ' + P.S + ' tokens × d = ' + P.d + '</span><span class="chip">' + P.h + ' head' + (P.h > 1 ? 's' : '') + ' of ' + P.dh + '</span><span class="chip">ffn = ' + P.ffn + ' · ' + P.act + '</span><span class="chip">' + P.norm + '</span>';
+      head.innerHTML = '<span class="chip">T = ' + P.S + ' tokens × d = ' + P.d + '</span><span class="chip">' + P.h + ' head' + (P.h > 1 ? 's' : '') + ' of ' + P.dh + '</span><span class="chip">ffn = ' + P.ffn + ' · ' + P.act + '</span><span class="chip">' + P.norm + '</span>';
     }
     const top = el('div', 'enc-top'); root.appendChild(top);
     this.strip = el('ol', 'enc-strip'); top.appendChild(this.strip);
@@ -216,7 +216,7 @@
     this.items.forEach((li, i) => { li.classList.toggle('done', i < this.t - 1); li.classList.toggle('cur', i === this.t - 1); });
     this.stage.innerHTML = '';
     if (!cur) {
-      this.stage.appendChild(el('p', 'muted', 'The layer is the list on the left, top to bottom. Each step runs one operation on all ' + P.S + ' tokens at once: S × d numbers in, S × d (or S × ffn) out.'));
+      this.stage.appendChild(el('p', 'muted', 'The layer is the list on the left, top to bottom. Each step runs one operation on all ' + P.S + ' tokens at once: T × d numbers in, T × d (or T × ffn) out.'));
     } else {
       this.stage.appendChild(el('div', 'enc-what', '<b>' + cur.title + '</b> — ' + cur.what));
       const row = el('div', 'enc-row'); this.stage.appendChild(row);
@@ -236,7 +236,7 @@
       const out = matOf('C', T[cur.out], NAMES[cur.out], heads(T[cur.out]));
       out.paint(Object.fromEntries(T[cur.out].flatMap((r, i) => r.map((_, j) => [key(i, j), 'fin']))), (r, c) => fmt(T[cur.out][r][c]));
       row.appendChild(out.root);
-      if (cur.kind === 'attention') this.stage.appendChild(el('p', 'small', 'Each head is the attention notebook\'s computation on its own ' + P.dh + ' columns of Q, K and V (the block lines). Here S is small enough to hold whole; at real sizes it runs as FlashAttention.'));
+      if (cur.kind === 'attention') this.stage.appendChild(el('p', 'small', 'Each head is the attention notebook\'s computation on its own ' + P.dh + ' columns of Q, K and V (the block lines). With this few tokens the whole score matrix fits; at real sizes it runs as FlashAttention, block by block.'));
     }
     const doneOps = P.steps.slice(0, this.t).reduce((s, x) => s + x.ops, 0), doneParams = P.steps.slice(0, this.t).reduce((s, x) => s + x.params, 0);
     let cap = cur ? '<b>Step ' + this.t + '/' + this.n + '</b> · ' + cur.title + ': ' + fmtN(cur.ops) + ' operations' + (cur.params ? ', ' + cur.params + ' parameters' : ', no parameters') + '.' : 'Press <b>Step</b> to run the layer one operation at a time.';
@@ -275,7 +275,7 @@
     this.total = this.rows.reduce((s, r) => s + r.t, 0);
     if (cfg.title !== false) {
       const head = el('div', 'w-head'); root.appendChild(head);
-      head.innerHTML = '<span class="chip">' + (cfg.batch > 1 ? cfg.batch + ' × ' : '') + 'S = ' + cfg.S + ' tokens · d = ' + cfg.d + ' · ' + cfg.h + ' heads · ffn = ' + cfg.ffn + '</span><span class="chip">' + chip.name + ': ' + fmtN(chip.peak) + 'OP/s, ' + fmtN(chip.bw) + 'B/s → ridge ' + Math.round(chip.peak / chip.bw) + ' OP/byte</span>';
+      head.innerHTML = '<span class="chip">' + (cfg.batch > 1 ? cfg.batch + ' × ' : '') + 'T = ' + cfg.S + ' tokens · d = ' + cfg.d + ' · ' + cfg.h + ' heads · ffn = ' + cfg.ffn + '</span><span class="chip">' + chip.name + ': ' + fmtN(chip.peak) + 'OP/s, ' + fmtN(chip.bw) + 'B/s → ridge ' + Math.round(chip.peak / chip.bw) + ' OP/byte</span>';
     }
     this.tableWrap = el('div', 'tw'); root.appendChild(this.tableWrap);
     this.bar = el('div', 'enc-bar'); root.appendChild(this.bar);
@@ -320,7 +320,7 @@
 
   // ---------------- deck mount ----------------
   const DEFAULTS = { S: 4, d: 8, h: 2, ffn: 16, act: 'relu', norm: 'rmsnorm', vocab: 16, batch: 1, seed: 0, chip: 'a100' };
-  const LAB = { S: 'tokens S', d: 'width d', act: 'activation', norm: 'norm', chip: 'chip', batch: 'batch', ffn: 'ffn', h: 'heads' };
+  const LAB = { S: 'tokens T', d: 'width d', act: 'activation', norm: 'norm', chip: 'chip', batch: 'batch', ffn: 'ffn', h: 'heads' };
   // A cost view needs no numbers, only the sizes; a layer view needs the tiny problem.
   const build = (cfg) => (cfg.type === 'cost' ? null : problem(cfg));
   const { mount, mountAll } = global.NB.widgets({ layer: LayerView, cost: CostView }, DEFAULTS, build, LAB);

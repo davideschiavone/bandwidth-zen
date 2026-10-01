@@ -1051,19 +1051,19 @@ details.console pre { margin: 0; padding: 0.6rem 0.8rem; max-height: 16rem; over
   };
   function lcg(seed) { let s = (seed * 2654435761) >>> 0 || 1; return () => ((s = (Math.imul(s, 1664525) + 1013904223) >>> 0) / 4294967296); }
   function problem(o) {
-    const Sq = o.S, Skv = o.T, d = o.d, heads = o.heads || 1, batch = o.batch || 1, HT = heads * batch;
-    const ex = !o.seed && Sq === 4 && Skv === 4 && d === 2 && HT === 1;
+    const Tq = o.S, Tkv = o.T, d = o.d, heads = o.heads || 1, batch = o.batch || 1, HT = heads * batch;
+    const ex = !o.seed && Tq === 4 && Tkv === 4 && d === 2 && HT === 1;
     const r = lcg(o.seed || 11);
     const draw = (rows) => rng(rows).map(() => rng(d).map(() => Math.floor(r() * 4) - 1));
     const Q = [], K = [], V = [];
     for (let h = 0; h < HT; h++) {
-      Q.push(ex ? EX.Q.map((x) => x.slice()) : draw(Sq));
-      K.push(ex ? EX.K.map((x) => x.slice()) : draw(Skv));
-      V.push(ex ? EX.V.map((x) => x.slice()) : draw(Skv));
+      Q.push(ex ? EX.Q.map((x) => x.slice()) : draw(Tq));
+      K.push(ex ? EX.K.map((x) => x.slice()) : draw(Tkv));
+      V.push(ex ? EX.V.map((x) => x.slice()) : draw(Tkv));
     }
     const scale = 1 / Math.sqrt(d);
     const REF = Q.map((q, h) => refAttention(q, K[h], V[h], scale));
-    return { Sq, Skv, d, heads, batch, HT, Q, K, V, REF, scale, seed: ex ? 0 : (o.seed || 11) };
+    return { Tq, Tkv, d, heads, batch, HT, Q, K, V, REF, scale, seed: ex ? 0 : (o.seed || 11) };
   }
   // softmax(Q Kᵀ / √d) V the textbook way: every score of a row first, then the softmax, then P V.
   function refAttention(Q, K, V, scale) {
@@ -1099,15 +1099,15 @@ details.console pre { margin: 0; padding: 0.6rem 0.8rem; max-height: 16rem; over
   // and after the last block, norm: O = O / l, O written back.
   // =====================================================================
   function flashPlan(P, cfg) {
-    const Br = Math.max(1, Math.min(cfg.Br, P.Sq)), Bc = Math.max(1, Math.min(cfg.Bc, P.Skv));
-    const qb = ceil(P.Sq / Br), kb = ceil(P.Skv / Bc);
+    const Br = Math.max(1, Math.min(cfg.Br, P.Tq)), Bc = Math.max(1, Math.min(cfg.Bc, P.Tkv));
+    const qb = ceil(P.Tq / Br), kb = ceil(P.Tkv / Bc);
     const programs = P.HT * qb, used = Math.max(1, Math.min(cfg.cores, programs)), W = ceil(programs / used);
     const L = 3 * kb + 1, n = W * L;
     const progs = rng(programs).map((p) => {
       const head = floor(p / qb), blk = p % qb;
-      return { id: p, head, blk, r0: blk * Br, r1: Math.min((blk + 1) * Br, P.Sq), wave: floor(p / used), core: p % used };
+      return { id: p, head, blk, r0: blk * Br, r1: Math.min((blk + 1) * Br, P.Tq), wave: floor(p / used), core: p % used };
     });
-    const kbl = rng(kb).map((j) => [j * Bc, Math.min((j + 1) * Bc, P.Skv)]);
+    const kbl = rng(kb).map((j) => [j * Bc, Math.min((j + 1) * Bc, P.Tkv)]);
     // K and V cross memory once per wave a head's programs span (D33's staging, as in bwz).
     let streams = 0;
     for (let h = 0; h < P.HT; h++) streams += floor(((h + 1) * qb - 1) / used) - floor((h * qb) / used) + 1;
@@ -1123,7 +1123,7 @@ details.console pre { margin: 0; padding: 0.6rem 0.8rem; max-height: 16rem; over
     const st = {
       prog: {}, mul: 0, exps: 0, rescaled: 0, normalised: 0, qRead: 0, kvRead: 0, oWritten: 0,
       staged: new Set(), heldMax: 0, innerAdds: 0,
-      O: P.Q.map(() => zeros(P.Sq, d)), Odone: P.Q.map(() => rng(P.Sq).map(() => false))
+      O: P.Q.map(() => zeros(P.Tq, d)), Odone: P.Q.map(() => rng(P.Tq).map(() => false))
     };
     for (let s = 0; s < Math.min(t, pl.n); s++) {
       const { wave, j, ph } = phaseAt(pl, s);
@@ -1177,10 +1177,10 @@ details.console pre { margin: 0; padding: 0.6rem 0.8rem; max-height: 16rem; over
       adds += innerAdds(cfg.qk, rows, w, P.d, tile) + innerAdds(cfg.pv, rows, P.d, w, tile);
     }));
     return {
-      mul: 2 * P.HT * P.Sq * P.Skv * P.d, exps: P.HT * P.Sq * P.Skv,
-      rescaled: P.HT * P.Sq * P.d * (pl.kb - 1), normalised: P.HT * P.Sq * P.d,
-      qRead: P.HT * P.Sq * P.d, oWritten: P.HT * P.Sq * P.d,
-      kvRead: 2 * pl.streams * P.Skv * P.d, kvOnce: 2 * P.HT * P.Skv * P.d, innerAdds: adds
+      mul: 2 * P.HT * P.Tq * P.Tkv * P.d, exps: P.HT * P.Tq * P.Tkv,
+      rescaled: P.HT * P.Tq * P.d * (pl.kb - 1), normalised: P.HT * P.Tq * P.d,
+      qRead: P.HT * P.Tq * P.d, oWritten: P.HT * P.Tq * P.d,
+      kvRead: 2 * pl.streams * P.Tkv * P.d, kvOnce: 2 * P.HT * P.Tkv * P.d, innerAdds: adds
     };
   }
   function flashCode(pl) {
@@ -1204,15 +1204,15 @@ details.console pre { margin: 0; padding: 0.6rem 0.8rem; max-height: 16rem; over
   //   P row = softmax(S row)  (S read back, P written)
   //   O row = P row V     (P read back)
   // =====================================================================
-  function naivePlan(P) { return { n: 3 * P.Sq }; }
+  function naivePlan(P) { return { n: 3 * P.Tq }; }
   function naiveState(P, t) {
-    const st = { S: zeros(P.Sq, P.Skv), Pm: zeros(P.Sq, P.Skv), O: zeros(P.Sq, P.d), sOn: rng(P.Sq).map(() => 0), mul: 0, exps: 0, sW: 0, sR: 0, pW: 0, pR: 0 };
+    const st = { S: zeros(P.Tq, P.Tkv), Pm: zeros(P.Tq, P.Tkv), O: zeros(P.Tq, P.d), sOn: rng(P.Tq).map(() => 0), mul: 0, exps: 0, sW: 0, sR: 0, pW: 0, pR: 0 };
     const q = P.Q[0], K = P.K[0], V = P.V[0];
     for (let s = 0; s < t; s++) {
       const i = floor(s / 3), ph = s % 3;
-      if (ph === 0) { st.S[i] = K.map((k) => q[i].reduce((a, x, c) => a + x * k[c], 0) * P.scale); st.mul += P.Skv * P.d; st.sW += P.Skv; st.sOn[i] = 1; }
-      else if (ph === 1) { const m = Math.max(...st.S[i]), e = st.S[i].map((x) => Math.exp(x - m)), l = e.reduce((a, x) => a + x, 0); st.Pm[i] = e.map((x) => x / l); st.exps += P.Skv; st.sR += P.Skv; st.pW += P.Skv; st.sOn[i] = 2; }
-      else { st.O[i] = rng(P.d).map((c) => st.Pm[i].reduce((a, p, j) => a + p * V[j][c], 0)); st.mul += P.Skv * P.d; st.pR += P.Skv; st.sOn[i] = 3; }
+      if (ph === 0) { st.S[i] = K.map((k) => q[i].reduce((a, x, c) => a + x * k[c], 0) * P.scale); st.mul += P.Tkv * P.d; st.sW += P.Tkv; st.sOn[i] = 1; }
+      else if (ph === 1) { const m = Math.max(...st.S[i]), e = st.S[i].map((x) => Math.exp(x - m)), l = e.reduce((a, x) => a + x, 0); st.Pm[i] = e.map((x) => x / l); st.exps += P.Tkv; st.sR += P.Tkv; st.pW += P.Tkv; st.sOn[i] = 2; }
+      else { st.O[i] = rng(P.d).map((c) => st.Pm[i].reduce((a, p, j) => a + p * V[j][c], 0)); st.mul += P.Tkv * P.d; st.pR += P.Tkv; st.sOn[i] = 3; }
     }
     return st;
   }
@@ -1222,13 +1222,13 @@ details.console pre { margin: 0; padding: 0.6rem 0.8rem; max-height: 16rem; over
   // row of Q and of O, a column of S with a column of Kᵀ and of Vᵀ — the shared axes of the formula.
   function Quint(P, rb, cb, sTitle) {
     this.root = el('div', 'att-grid');
-    if (Math.max(P.Sq, P.Skv) > 6) this.root.classList.add('dense');
+    if (Math.max(P.Tq, P.Tkv) > 6) this.root.classList.add('dense');
     const o = (kind, r, c, extra) => new Mat(kind, r, c, Object.assign({ rv: extra.rv, cv: extra.cv }, extra));
-    this.Q = o('Q', P.Sq, P.d, { rv: 'q', cv: 'd', rb, title: 'Q', dims: P.Sq + '×' + P.d });
-    this.K = o('K', P.d, P.Skv, { rv: 'd', cv: 'k', cb, title: 'Kᵀ', dims: P.d + '×' + P.Skv });
-    this.S = o('S', P.Sq, P.Skv, { rv: 'q', cv: 'k', rb, cb, title: sTitle, dims: P.Sq + '×' + P.Skv });
-    this.V = o('V', P.d, P.Skv, { rv: 'd', cv: 'k', cb, title: 'Vᵀ', dims: 'V is ' + P.Skv + '×' + P.d + ', drawn on its side' });
-    this.O = o('O', P.Sq, P.d, { rv: 'q', cv: 'd', rb, title: 'O', dims: P.Sq + '×' + P.d });
+    this.Q = o('Q', P.Tq, P.d, { rv: 'q', cv: 'd', rb, title: 'Q', dims: P.Tq + '×' + P.d });
+    this.K = o('K', P.d, P.Tkv, { rv: 'd', cv: 'k', cb, title: 'Kᵀ', dims: P.d + '×' + P.Tkv });
+    this.S = o('S', P.Tq, P.Tkv, { rv: 'q', cv: 'k', rb, cb, title: sTitle, dims: P.Tq + '×' + P.Tkv });
+    this.V = o('V', P.d, P.Tkv, { rv: 'd', cv: 'k', cb, title: 'Vᵀ', dims: 'V is ' + P.Tkv + '×' + P.d + ', drawn on its side' });
+    this.O = o('O', P.Tq, P.d, { rv: 'q', cv: 'd', rb, title: 'O', dims: P.Tq + '×' + P.d });
     const slot = (m, cls) => { m.root.classList.add(cls); this.root.appendChild(m.root); };
     slot(this.K, 'g-k'); slot(this.Q, 'g-q'); slot(this.S, 'g-s'); slot(this.O, 'g-o'); slot(this.V, 'g-v');
   }
@@ -1409,7 +1409,7 @@ details.console pre { margin: 0; padding: 0.6rem 0.8rem; max-height: 16rem; over
     else cap = '<b>Step ' + this.t + '</b> · all key blocks seen: O = O / l, and O is written back — the only thing this program ever writes.';
     if (this.t === pl.n) {
       const ok = P.REF.every((R, h) => closeTo(st.O[h], R));
-      cap = 'Done in ' + pl.n + ' steps. ' + (ok ? '<span class="ok">Check: O == softmax(QKᵀ/√d)·V ✓</span>' : '<span class="tsp">O differs ✗</span>') + ' S was never stored: at most <b>' + st.heldMax + '</b> scores were on chip at once, against ' + P.HT * P.Sq * P.Skv + ' in all.';
+      cap = 'Done in ' + pl.n + ' steps. ' + (ok ? '<span class="ok">Check: O == softmax(QKᵀ/√d)·V ✓</span>' : '<span class="tsp">O differs ✗</span>') + ' S was never stored: at most <b>' + st.heldMax + '</b> scores were on chip at once, against ' + P.HT * P.Tq * P.Tkv + ' in all.';
     }
     this.cap.innerHTML = cap;
     const util = Math.round(100 * pl.programs / (pl.W * cfg.cores));
@@ -1448,17 +1448,17 @@ details.console pre { margin: 0; padding: 0.6rem 0.8rem; max-height: 16rem; over
     const P = this.P;
     if (cfg.title !== false) {
       const head = el('div', 'w-head'); root.appendChild(head);
-      head.innerHTML = '<span class="chip">one query row per step, three phases</span><span class="chip">S = ' + P.Sq + '×' + P.Skv + ' scores, all kept</span><span class="chip mem">S and P go through memory</span>';
+      head.innerHTML = '<span class="chip">one query row per step, three phases</span><span class="chip">S = ' + P.Tq + '×' + P.Tkv + ' scores, all kept</span><span class="chip mem">S and P go through memory</span>';
     }
     const top = el('div', 'pv-top'); root.appendChild(top);
-    this.q = new Quint(P, P.Sq, P.Skv, 'S = QKᵀ/√d, then P');
+    this.q = new Quint(P, P.Tq, P.Tkv, 'S = QKᵀ/√d, then P');
     top.appendChild(this.q.root);
     const codeWrap = el('div', 'stack'); top.appendChild(codeWrap);
     this.codeEl = el('pre', 'code'); codeWrap.appendChild(this.codeEl);
     this.lines = [
-      { html: '<span class="kw">for</span> i <span class="kw">in</span> range(' + P.Sq + '):  S[i] = <span class="ta">Q[i]</span> <span class="tb">K</span>ᵀ / √d   <span class="cm"># write S</span>', v: 0 },
-      { html: '<span class="kw">for</span> i <span class="kw">in</span> range(' + P.Sq + '):  P[i] = softmax(S[i]) <span class="cm"># read S, write P</span>', v: 1 },
-      { html: '<span class="kw">for</span> i <span class="kw">in</span> range(' + P.Sq + '):  <span class="tc">O[i]</span> = P[i] <span class="tb">V</span>        <span class="cm"># read P</span>', v: 2 }
+      { html: '<span class="kw">for</span> i <span class="kw">in</span> range(' + P.Tq + '):  S[i] = <span class="ta">Q[i]</span> <span class="tb">K</span>ᵀ / √d   <span class="cm"># write S</span>', v: 0 },
+      { html: '<span class="kw">for</span> i <span class="kw">in</span> range(' + P.Tq + '):  P[i] = softmax(S[i]) <span class="cm"># read S, write P</span>', v: 1 },
+      { html: '<span class="kw">for</span> i <span class="kw">in</span> range(' + P.Tq + '):  <span class="tc">O[i]</span> = P[i] <span class="tb">V</span>        <span class="cm"># read P</span>', v: 2 }
     ];
     this.lineEls = this.lines.map((l) => { const d = el('div', 'ln', l.html); this.codeEl.appendChild(d); return d; });
     codeWrap.appendChild(el('div', 'legend', '<span><i class="lg read"></i>read now</span><span><i class="lg s-mem"></i>S (or P) stored</span><span><i class="lg fin"></i>O row done</span>'));
@@ -1474,14 +1474,14 @@ details.console pre { margin: 0; padding: 0.6rem 0.8rem; max-height: 16rem; over
     const P = this.P, st = naiveState(P, this.t), slot = this.t - 1, i = floor(slot / 3), ph = slot % 3;
     this.q.values(P, 0);
     const cQ = {}, cK = {}, cV = {}, cS = {}, cO = {};
-    for (let r = 0; r < P.Sq; r++) {
-      for (let c = 0; c < P.Skv; c++) if (st.sOn[r]) addCls(cS, key(r, c), 's-mem');
+    for (let r = 0; r < P.Tq; r++) {
+      for (let c = 0; c < P.Tkv; c++) if (st.sOn[r]) addCls(cS, key(r, c), 's-mem');
       if (st.sOn[r] === 3) for (let c = 0; c < P.d; c++) addCls(cO, key(r, c), 'fin');
     }
     if (slot >= 0) {
-      if (ph === 0) { for (let c = 0; c < P.d; c++) addCls(cQ, key(i, c), 'read'); for (let c = 0; c < P.d; c++) for (let b = 0; b < P.Skv; b++) addCls(cK, key(c, b), 'read'); for (let b = 0; b < P.Skv; b++) addCls(cS, key(i, b), 'write'); }
-      if (ph === 1) for (let b = 0; b < P.Skv; b++) addCls(cS, key(i, b), 'read-s');
-      if (ph === 2) { for (let b = 0; b < P.Skv; b++) addCls(cS, key(i, b), 'read-s'); for (let c = 0; c < P.d; c++) for (let b = 0; b < P.Skv; b++) addCls(cV, key(c, b), 'read'); for (let c = 0; c < P.d; c++) addCls(cO, key(i, c), 'write'); }
+      if (ph === 0) { for (let c = 0; c < P.d; c++) addCls(cQ, key(i, c), 'read'); for (let c = 0; c < P.d; c++) for (let b = 0; b < P.Tkv; b++) addCls(cK, key(c, b), 'read'); for (let b = 0; b < P.Tkv; b++) addCls(cS, key(i, b), 'write'); }
+      if (ph === 1) for (let b = 0; b < P.Tkv; b++) addCls(cS, key(i, b), 'read-s');
+      if (ph === 2) { for (let b = 0; b < P.Tkv; b++) addCls(cS, key(i, b), 'read-s'); for (let c = 0; c < P.d; c++) for (let b = 0; b < P.Tkv; b++) addCls(cV, key(c, b), 'read'); for (let c = 0; c < P.d; c++) addCls(cO, key(i, c), 'write'); }
     }
     this.q.Q.paint(cQ, (r, c) => String(P.Q[0][r][c]));
     this.q.K.paint(cK, (r, c) => String(P.K[0][c][r]));
@@ -1493,13 +1493,13 @@ details.console pre { margin: 0; padding: 0.6rem 0.8rem; max-height: 16rem; over
       ['<b>Row ' + i + '</b>: its scores against every key, written to memory.', '<b>Row ' + i + '</b>: softmax needs the <b>whole row</b> — its max and its sum — so the stored scores are read back and P is written.', '<b>Row ' + i + '</b>: O = P·V, reading P back.'][ph];
     if (this.t === this.n) {
       const ok = closeTo(st.O, P.REF[0]);
-      cap = 'Done. ' + (ok ? '<span class="ok">Check: O == softmax(QKᵀ/√d)·V ✓</span>' : '<span class="tsp">O differs ✗</span>') + ' ' + P.Sq * P.Skv + ' scores were stored and read back, then the same number of probabilities: <b>' + (st.sW + st.sR + st.pW + st.pR) + '</b> numbers through memory that FlashAttention never moves.';
+      cap = 'Done. ' + (ok ? '<span class="ok">Check: O == softmax(QKᵀ/√d)·V ✓</span>' : '<span class="tsp">O differs ✗</span>') + ' ' + P.Tq * P.Tkv + ' scores were stored and read back, then the same number of probabilities: <b>' + (st.sW + st.sR + st.pW + st.pR) + '</b> numbers through memory that FlashAttention never moves.';
     }
     this.cap.innerHTML = cap;
     this.cnt.innerHTML = counters([
-      { label: 'step', value: this.t + '/' + this.n }, { label: 'multiplies', value: st.mul + '/' + 2 * P.Sq * P.Skv * P.d },
+      { label: 'step', value: this.t + '/' + this.n }, { label: 'multiplies', value: st.mul + '/' + 2 * P.Tq * P.Tkv * P.d },
       { label: 'exp()', value: st.exps }, { label: 'S written', value: st.sW, cls: 'cm' }, { label: 'S read', value: st.sR, cls: 'cm' },
-      { label: 'P written', value: st.pW, cls: 'cm' }, { label: 'P read', value: st.pR, cls: 'cm' }, { label: 'S held at once', value: st.sOn.filter((x) => x).length * P.Skv }
+      { label: 'P written', value: st.pW, cls: 'cm' }, { label: 'P read', value: st.pR, cls: 'cm' }, { label: 'S held at once', value: st.sOn.filter((x) => x).length * P.Tkv }
     ]);
   };
   NaiveView.prototype.trace = function () {
@@ -1550,7 +1550,7 @@ details.console pre { margin: 0; padding: 0.6rem 0.8rem; max-height: 16rem; over
 (function () {
   'use strict';
   const A = window.ATT;
-  // S = queries (-S), T = keys (--kv-len), d (--head-dim), heads (--heads), batch (--batch),
+  // Knob keys: S = queries Tq (-S), T = keys Tkv (--kv-len), d (--head-dim), heads (--heads), batch (--batch),
   // Br (--br), Bc (--bc), qk/pv (--stationarity, one per inner matmul here), cores, tile.
   // Chapters that teach the rescale pin a seed whose scores climb key after key (seed 16: −1, 0, 1, 2;
   // seed 28 over 8 keys), so the running max really moves; a flat row would hide the whole idea.
@@ -1560,7 +1560,7 @@ details.console pre { margin: 0; padding: 0.6rem 0.8rem; max-height: 16rem; over
   const el = (t, c, h) => { const e = document.createElement(t); if (c) e.className = c; if (h != null) e.innerHTML = h; return e; };
 
   const CH = [
-    { id: 'plain', t: 'Plain attention', set: { mode: 'naive' }, s: '<h2>The formula, done the obvious way</h2><p><code>O = softmax(Q Kᵀ / √d) V</code>. Every query row scores itself against every key (<b>S = QKᵀ/√d</b>), the scores of a row become probabilities (<b>P = softmax(S)</b>), and the output row is the probability-weighted mix of the value rows (<b>O = P V</b>).</p><p class="sizes"><b>The sizes.</b> <b>Sq</b> (queries) is how many tokens are being processed now: the whole prompt in prefill, often 2k–8k, but just 1 per step in decode. <b>Skv</b> (keys) is how many tokens they can look at — the context so far, so it grows by one with every generated token. <b>d</b> is one head\'s width, usually 64–128; a model has many heads side by side (Llama-3-8B: 32 heads × d = 128 = its width 4096), and a batch repeats all of it per sequence. Here they are tiny so every number fits on screen.</p><p>Done this way, the whole score matrix S exists at once — Sq × Skv numbers per head, 16.8 million at 4096 tokens — and goes to memory and back, and so does P.</p><p class="try">Try: press <b>Next row</b> to do one query row per click, and watch the violet memory counters.</p>' },
+    { id: 'plain', t: 'Plain attention', set: { mode: 'naive' }, s: '<h2>The formula, done the obvious way</h2><p><code>O = softmax(Q Kᵀ / √d) V</code>. Every query row scores itself against every key (<b>S = QKᵀ/√d</b>), the scores of a row become probabilities (<b>P = softmax(S)</b>), and the output row is the probability-weighted mix of the value rows (<b>O = P V</b>).</p><p class="sizes"><b>The sizes.</b> <b>Tq</b> (queries) is how many tokens are being processed now: the whole prompt in prefill, often 2k–8k, but just 1 per step in decode. <b>Tkv</b> (keys) is how many tokens they can look at — the context so far, so it grows by one with every generated token. <b>d</b> is one head\'s width, usually 64–128; a model has many heads side by side (Llama-3-8B: 32 heads × d = 128 = its width 4096), and a batch repeats all of it per sequence. Here they are tiny so every number fits on screen.</p><p>Done this way, the whole score matrix S exists at once — Tq × Tkv numbers per head, 16.8 million at 4096 tokens — and goes to memory and back, and so does P.</p><p class="try">Try: press <b>Next row</b> to do one query row per click, and watch the violet memory counters.</p>' },
     { id: 'row', t: 'Softmax needs the row', set: { mode: 'naive', S: 2, T: 6, seed: 6 }, s: '<h2>Why S gets stored</h2><p>A softmax divides every exp(score) by the <b>sum</b> of the row, and for safety subtracts the row\'s <b>max</b> first. Both need <b>every</b> score of the row before the first probability can be written. That is the only reason plain attention keeps S: it cannot finish a row until the row is complete.</p><p class="try">Try: more keys (kv-len 8) — the stored row grows with them, and so does the traffic.</p>' },
     { id: 'online', t: 'Online softmax, one row', set: { mode: 'flash', S: 1, T: 4, Br: 1, Bc: 1, seed: 16 }, s: '<h2>Online softmax: one key at a time</h2><p>Keep, for each query row, a <b>running max m</b> and a <b>running sum l</b>. When a new score arrives: the new max is <code>m′ = max(m, s)</code>; everything accumulated so far was weighted with the old max, so multiply it by <code>e^(m − m′)</code>; then add the new term. At the end divide O by l. The result is <b>exactly</b> the softmax — no score is kept.</p><p class="try">Try: step and watch m and l in the table under the code. When m grows, the rescale line lights up.</p>' },
     { id: 'kblocks', t: 'Blocks of keys (Bc)', set: { mode: 'flash', S: 1, T: 8, Br: 1, Bc: 2, seed: 28 }, s: '<h2>Blocks of keys: Bc (<code>--bc</code>)</h2><p>Take the keys <b>Bc at a time</b>. Each block is one small matmul for the scores, one softmax update, one small matmul into O. The rescale of O happens once per block after the first, so bigger blocks mean <b>fewer rescales</b> — at the price of a bigger S block on chip.</p><p class="try">Try: Bc = 1, 2, 4, 8 and compare <b>O rescaled</b>. Bc = 8 is one block: no rescale at all, but all 8 scores on chip.</p>' },
@@ -1570,7 +1570,7 @@ details.console pre { margin: 0; padding: 0.6rem 0.8rem; max-height: 16rem; over
     { id: 'flows', t: 'Inner dataflow, costed', set: { mode: 'flash', S: 4, T: 4, d: 4, Br: 2, Bc: 2, cores: 2, tile: 2, qk: 'ws', pv: 'ws' }, s: '<h2>What the inner dataflow costs</h2><p>On a unit with no accumulator to sum K in place (a GPU tensor core), ws and is leave <b>(slices − 1) · M · N</b> partial sums for the vector unit per inner matmul: d/tile slices for S = QKᵀ, Bc/tile for O += PV. os leaves none. <code>bwz attention</code> weighs exactly this for every block size and keeps the cheapest.</p><p class="try">Try: switch both flows between os, ws and is and read <b>inner partial adds</b>. Array tile 1 makes every product its own slice.</p>' },
     { id: 'heads', t: 'Heads and batch', set: { mode: 'flash', S: 2, T: 4, d: 2, heads: 2, batch: 2, Br: 2, Bc: 2, cores: 4 }, s: '<h2>Heads and batch: more programs, nothing shared</h2><p>Every (batch, head) pair has its own Q, K and V, so heads and batch simply multiply the number of programs. Unlike a projection — where a batch reuses the same weights — nothing here is reused across them: K and V bytes grow exactly with batch × heads.</p><p class="try">Try: heads 1 → 4, batch 1 → 2, and watch programs, waves and K,V read. Use <b>Show head</b> to look at another head.</p>' },
     { id: 'waves', t: 'Waves re-read K and V', set: { mode: 'flash', S: 6, T: 4, d: 2, heads: 3, Br: 2, Bc: 2, cores: 4 }, s: '<h2>When a head straddles two waves</h2><p>K and V are fetched once per <b>wave</b> and shared by every program of that head in the wave. 3 heads × 3 programs = 9 programs on 4 cores: heads 1 and 2 are split across waves, so their K and V are fetched <b>twice</b>. The magenta counter shows the re-read against the once-only figure — the same effect <code>bwz attention</code> reports on a 4-core Metis.</p><p class="try">Try: Cores = 3 or 9 — every head fits one wave and K,V read drops to the once-only figure.</p>' },
-    { id: 'never', t: 'S is never stored', set: { mode: 'flash', S: 4, T: 8, d: 2, Br: 2, Bc: 2, cores: 2 }, s: '<h2>The point: S never leaves the core</h2><p>Plain attention writes and reads back Sq × Skv scores and as many probabilities. FlashAttention writes <b>only O</b>: blocks of S live on chip for one block and are discarded (dashed). It does <b>the same multiplies and exps</b> plus a few rescales.</p><div class="tw"><table class="cmp"><tr><th></th><th>plain</th><th>FlashAttention</th></tr><tr><td>multiplies</td><td>2·Sq·Skv·d</td><td>2·Sq·Skv·d</td></tr><tr><td>exp()</td><td>Sq·Skv</td><td>Sq·Skv</td></tr><tr><td>through memory besides Q, K, V, O</td><td class="mem">4·Sq·Skv (S and P, out and back)</td><td>0</td></tr><tr><td>extra vector work</td><td>—</td><td>Sq·d per key block after the first</td></tr></table></div><p class="try">Try: switch <b>Mode</b> to Plain on the same shape and compare the counters.</p>' },
+    { id: 'never', t: 'S is never stored', set: { mode: 'flash', S: 4, T: 8, d: 2, Br: 2, Bc: 2, cores: 2 }, s: '<h2>The point: S never leaves the core</h2><p>Plain attention writes and reads back Tq × Tkv scores and as many probabilities. FlashAttention writes <b>only O</b>: blocks of S live on chip for one block and are discarded (dashed). It does <b>the same multiplies and exps</b> plus a few rescales.</p><div class="tw"><table class="cmp"><tr><th></th><th>plain</th><th>FlashAttention</th></tr><tr><td>multiplies</td><td>2·Tq·Tkv·d</td><td>2·Tq·Tkv·d</td></tr><tr><td>exp()</td><td>Tq·Tkv</td><td>Tq·Tkv</td></tr><tr><td>through memory besides Q, K, V, O</td><td class="mem">4·Tq·Tkv (S and P, out and back)</td><td>0</td></tr><tr><td>extra vector work</td><td>—</td><td>Tq·d per key block after the first</td></tr></table></div><p class="try">Try: switch <b>Mode</b> to Plain on the same shape and compare the counters.</p>' },
     { id: 'play', t: 'Playground', set: { mode: 'flash', S: 8, T: 8, d: 4, heads: 2, batch: 2, Br: 3, Bc: 3, cores: 5, tile: 2, seed: 4 }, s: '<h2>Playground</h2><p>Ragged blocks (3 does not divide 8), uneven programs and cores, several heads. Every knob is live and every run still ends with O checked against softmax(QKᵀ/√d)V. The rule box prints the <code>bwz attention</code> command with the same flags.</p>' }
   ];
 
@@ -1606,8 +1606,8 @@ details.console pre { margin: 0; padding: 0.6rem 0.8rem; max-height: 16rem; over
     const k = $('knobs'); k.innerHTML = '';
     const sec = (t) => k.appendChild(el('div', 'ksec', t));
     sec('Shape');
-    k.appendChild(slider('Queries Sq  <code>-S</code>', 'S', 1, 8, 1));
-    k.appendChild(slider('Keys Skv  <code>--kv-len</code>', 'T', 1, 8, 1));
+    k.appendChild(slider('Queries Tq  <code>-S</code>', 'S', 1, 8, 1));
+    k.appendChild(slider('Keys Tkv  <code>--kv-len</code>', 'T', 1, 8, 1));
     k.appendChild(seg('Head width d  <code>--head-dim</code>', 'd', [1, 2, 3, 4]));
     if (S.mode !== 'naive') {
       k.appendChild(seg('Heads  <code>--heads</code>', 'heads', [1, 2, 3, 4]));
@@ -1655,7 +1655,7 @@ details.console pre { margin: 0; padding: 0.6rem 0.8rem; max-height: 16rem; over
     }
     const P = A.problem(S), pl = A.flashPlan(P, S), T = A.flashTotals(P, pl, S);
     let h = '<div class="rl"><span class="rk">programs</span>' + P.HT + ' head' + (P.HT > 1 ? 's' : '') + ' × ceil(' + S.S + ' / Br=' + pl.Br + ') = <b>' + pl.programs + '</b><span class="ar">·</span><span class="rk">on</span>' + S.cores + ' core' + (S.cores > 1 ? 's' : '') + ' = <b>' + pl.W + ' wave' + (pl.W > 1 ? 's' : '') + '</b><span class="ar">·</span><span class="rk">key blocks</span>ceil(' + S.T + ' / Bc=' + pl.Bc + ') = <b>' + pl.kb + '</b></div>';
-    h += '<div class="rl"><span class="rk">K, V read</span>' + T.kvRead + (T.kvRead > T.kvOnce ? ' <b class="tsp">(' + pl.streams + ' head-streams for ' + P.HT + ' heads)</b>' : ' (each head once)') + '<span class="ar">·</span><span class="rk">O rescaled</span>' + T.rescaled + ' = heads · Sq · d · (blocks − 1)' + (S.qk !== 'os' || S.pv !== 'os' ? '<span class="ar">·</span><span class="rk">inner partial adds</span>' + T.innerAdds : '') + '</div>';
+    h += '<div class="rl"><span class="rk">K, V read</span>' + T.kvRead + (T.kvRead > T.kvOnce ? ' <b class="tsp">(' + pl.streams + ' head-streams for ' + P.HT + ' heads)</b>' : ' (each head once)') + '<span class="ar">·</span><span class="rk">O rescaled</span>' + T.rescaled + ' = heads · Tq · d · (blocks − 1)' + (S.qk !== 'os' || S.pv !== 'os' ? '<span class="ar">·</span><span class="rk">inner partial adds</span>' + T.innerAdds : '') + '</div>';
     h += '<div class="rl small"><span class="rk">same flags</span><code>' + command() + '</code></div>';
     R.innerHTML = h;
   }
