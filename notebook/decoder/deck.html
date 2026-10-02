@@ -392,6 +392,9 @@ table.cheat td, table.cheat th { padding: 0.4rem 0.6rem; }
 .k-K.stay, .k-V.stay { opacity: 0.75; }
 .dec .mat { --cell: 1.85rem; } .dec .cell { font-size: 0.66rem; }
 .k-S.s-past { background: color-mix(in oklab, var(--sp) 9%, var(--surface)); color: var(--muted); border: 1px solid color-mix(in oklab, var(--sp) 30%, transparent); }
+.dec-code { display: flex; flex-wrap: wrap; gap: 0.6rem 1.2rem; align-items: flex-start; }
+.dec-code pre.code { margin: 0; flex: 0 1 auto; }
+.dec-now { flex: 1 1 16rem; font-size: 0.88rem; max-width: 30rem; padding-top: 0.3rem; }
 </style>
 </head>
 <body>
@@ -2119,10 +2122,38 @@ table.cheat td, table.cheat th { padding: 0.4rem 0.6rem; }
     }
     this.strip = el('div', 'dec-tokens'); root.appendChild(this.strip);
     this.tok = P.ids.map((id, p) => { const b = el('span', 'dec-tok ' + (p < P.Tp ? 'prompt' : 'gen'), '<i>' + p + '</i>' + id); this.strip.appendChild(b); return b; });
+    // The pseudo-code, lit by step: the prompt block on the prefill, the loop body on every decode step
+    // (or, without a cache, the recompute-everything loop), and a last line naming this step's numbers.
+    const kw = (w) => '<span class="kw">' + w + '</span>', cm = (w) => '<span class="cm"># ' + w + '</span>';
+    this.lines = P.cache ? [
+      { v: 'pre', html: cm('prefill: the whole prompt at once') },
+      { v: 'pre', html: 'x = embed(prompt)                       ' + cm(P.Tp + ' rows') },
+      { v: 'pre', html: '<span class="ta">q</span>, <span class="tb">k</span>, <span class="tb">v</span> = norm(x) · Wq, Wk, Wv' },
+      { v: 'pre', html: '<span class="tb">K_cache</span>, <span class="tb">V_cache</span> = <span class="tb">k</span>, <span class="tb">v</span>' },
+      { v: 'pre', html: 'P = softmax(<span class="ta">q</span> <span class="tb">K_cache</span>ᵀ/√dh, mask j &gt; i)  ' + cm('lower triangle') },
+      { v: 'pre', html: '<span class="tc">out</span> = FFN(x + P <span class="tb">V_cache</span> · Wo)' },
+      { v: 'dec', html: kw('for') + ' t ' + kw('in') + ' range(' + P.Tp + ', ' + P.T + '):         ' + cm('decode: one token per step') },
+      { v: 'dec', html: '    x = embed(token[t])                 ' + cm('1 row') },
+      { v: 'dec', html: '    <span class="ta">q</span>, <span class="tb">k</span>, <span class="tb">v</span> = norm(x) · Wq, Wk, Wv     ' + cm('[1, d] × [d, d]') },
+      { v: 'dec', html: '    <span class="tb">K_cache</span>.append(<span class="tb">k</span>); <span class="tb">V_cache</span>.append(<span class="tb">v</span>)' },
+      { v: 'dec', html: '    P = softmax(<span class="ta">q</span> <span class="tb">K_cache</span>ᵀ/√dh)       ' + cm('1 row, keys 0 … t') },
+      { v: 'dec', html: '    <span class="tc">out[t]</span> = FFN(x + P <span class="tb">V_cache</span> · Wo)' }
+    ] : [
+      { v: 'all', html: kw('for') + ' t ' + kw('in') + ' range(' + (P.Tp - 1) + ', ' + P.T + '):         ' + cm('no cache: every step from scratch') },
+      { v: 'all', html: '    x = embed(tokens[0 … t])            ' + cm('t + 1 rows') },
+      { v: 'all', html: '    <span class="ta">q</span>, <span class="tb">k</span>, <span class="tb">v</span> = norm(x) · Wq, Wk, Wv     ' + cm('all rows again') },
+      { v: 'all', html: '    P = softmax(<span class="ta">q</span> <span class="tb">k</span>ᵀ/√dh, mask j &gt; i)   ' + cm('the whole triangle again') },
+      { v: 'all', html: '    <span class="tc">out</span> = FFN(x + P <span class="tb">v</span> · Wo); keep <span class="tc">out[t]</span>' }
+    ];
+    const codeRow = el('div', 'dec-code'); root.appendChild(codeRow);
+    this.codeEl = el('pre', 'code'); codeRow.appendChild(this.codeEl);
+    this.lineEls = this.lines.map((l) => { const d = el('div', 'ln', l.html); this.codeEl.appendChild(d); return d; });
+    this.nowEl = el('div', 'dec-now'); codeRow.appendChild(this.nowEl);
     const top = el('div', 'dec-row'); root.appendChild(top);
     this.S = new Mat('S', P.T, P.T, { rv: 'q', cv: 'k', title: 'P = softmax(S), head 0', dims: 'future masked ×' });
-    this.K = new Mat('K', P.T, P.dkv, { rv: 't', cv: 'c', title: 'K cache', dims: P.T + '×' + P.dkv });
-    this.V = new Mat('V', P.T, P.dkv, { rv: 't', cv: 'c', title: 'V cache', dims: P.T + '×' + P.dkv });
+    const kvTitle = (m) => (P.cache ? m + ' cache' : m + ', recomputed every step');
+    this.K = new Mat('K', P.T, P.dkv, { rv: 't', cv: 'c', title: kvTitle('K'), dims: P.T + '×' + P.dkv });
+    this.V = new Mat('V', P.T, P.dkv, { rv: 't', cv: 'c', title: kvTitle('V'), dims: P.T + '×' + P.dkv });
     this.O = new Mat('O', P.T, P.d, { rv: 't', cv: 'c', title: 'layer out', dims: P.T + '×' + P.d });
     [this.S, this.K, this.V, this.O].forEach((m) => top.appendChild(m.root));
     this.cap = el('div', 'cap'); root.appendChild(this.cap);
@@ -2156,6 +2187,12 @@ table.cheat td, table.cheat th { padding: 0.4rem 0.6rem; }
     const cO = {};
     for (let p = 0; p < L; p++) for (let c = 0; c < P.d; c++) addCls(cO, key(p, c), cur && p >= cur.p0 && p < cur.p0 + cur.n ? 'fin write' : 'fin');
     this.O.paint(cO, (r, c) => (r < L ? fmt(P.outs[r][c]) : '·'));
+    const lit = !cur ? null : P.cache ? (cur.s === 0 ? 'pre' : 'dec') : 'all';
+    this.lineEls.forEach((d, i) => d.classList.toggle('on', this.lines[i].v === lit));
+    this.nowEl.innerHTML = !cur ? 'Nothing has run yet.'
+      : cur.s === 0 && P.cache ? '<b>Now:</b> prefill — rows 0 … ' + (P.Tp - 1) + ' together; row i sees keys 0 … i. Cache: ' + P.Tp + ' rows.'
+        : P.cache ? '<b>Now:</b> t = ' + cur.last + ' — one row; its q against K_cache rows 0 … ' + cur.last + ' (' + (cur.L - 1) + ' read back, 1 new). Cache: ' + cur.L + ' rows.'
+          : '<b>Now:</b> t = ' + cur.last + ' — all ' + cur.n + ' rows recomputed (' + cur.ops + ' operations) to get one new output.';
     const opsSoFar = done.reduce((s, x) => s + x.ops, 0), kvSoFar = done.reduce((s, x) => s + x.kvRead, 0);
     let cap;
     if (!cur) cap = 'Press <b>Step</b>. The first step is the <b>prefill</b>: all ' + P.Tp + ' prompt tokens at once. Then every step adds <b>one</b> token.';

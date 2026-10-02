@@ -10,3 +10,6 @@
 .k-K.stay, .k-V.stay { opacity: 0.75; }
 .dec .mat { --cell: 1.85rem; } .dec .cell { font-size: 0.66rem; }
 .k-S.s-past { background: color-mix(in oklab, var(--sp) 9%, var(--surface)); color: var(--muted); border: 1px solid color-mix(in oklab, var(--sp) 30%, transparent); }
+.dec-code { display: flex; flex-wrap: wrap; gap: 0.6rem 1.2rem; align-items: flex-start; }
+.dec-code pre.code { margin: 0; flex: 0 1 auto; }
+.dec-now { flex: 1 1 16rem; font-size: 0.88rem; max-width: 30rem; padding-top: 0.3rem; }
