@@ -2191,7 +2191,7 @@ table.cheat td, table.cheat th { padding: 0.4rem 0.6rem; }
     const cache = cur ? { K: cur.K, V: cur.V } : { K: [], V: [] };
     const paintCache = (m, M) => {
       const cls = {};
-      M.forEach((r, p) => r.forEach((_, c) => addCls(cls, key(p, c), cur && p >= cur.p0 && p < cur.p0 + cur.n ? 'read' : 'stay')));
+      M.forEach((r, p) => r.forEach((_, c) => addCls(cls, key(p, c), cur && p >= cur.p0 && p < cur.p0 + cur.n ? 'read' : 'past')));
       m.paint(cls, (r, c) => (M[r] ? fmt(M[r][c]) : ''));
     };
     paintCache(this.K, cache.K); paintCache(this.V, cache.V);
