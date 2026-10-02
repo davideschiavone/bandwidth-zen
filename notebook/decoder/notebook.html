@@ -392,6 +392,17 @@ details.console pre { margin: 0; padding: 0.6rem 0.8rem; max-height: 16rem; over
 .cell.qgone { opacity: 0.35; border-style: dashed; }
 .dec-note { flex: 1 1 14rem; max-width: 20rem; font-size: 0.82rem; color: var(--muted); align-self: center; }
 .dec .cell.past { opacity: 0.6; }
+.cell.kvback { box-shadow: inset 0 0 0 2px var(--mem); }
+.dec-new { display: flex; flex-wrap: wrap; gap: 0.6rem 0.9rem; align-items: flex-start; }
+.dec-cache { min-width: 8rem; }
+.dec-grow { display: flex; gap: 6px; align-items: flex-end; min-height: 6rem; }
+.dec-bar { display: flex; flex-direction: column; align-items: center; gap: 2px; min-width: 3.2rem; font: 500 0.7rem var(--font-mono); color: var(--muted); }
+.dec-bar span { display: block; width: 1.6rem; border: 1.5px dashed var(--line); border-radius: 4px 4px 0 0; }
+.dec-bar b { color: var(--fg); }
+.dec-bar.done span { background: color-mix(in oklab, var(--b) 45%, var(--surface)); border: 1.5px solid var(--b); }
+.dec-bar.now span { background: var(--b); border: 1.5px solid var(--fg); }
+.dec-bar.now i { color: var(--fg); font-weight: 700; }
+.dec .mat-grid { justify-content: start; width: max-content; }
 </style>
 </head>
 <body>
@@ -2063,14 +2074,23 @@ details.console pre { margin: 0; padding: 0.6rem 0.8rem; max-height: 16rem; over
     this.N = new Mat('A', P.T, P.d, { rv: 't', cv: 'c', title: 'norm(x)', dims: P.T + '×' + P.d });
     this.Q = new Mat('Q', P.T, P.d, { rv: 't', cv: 'c', title: 'q = norm(x) · Wq', dims: P.T + '×' + P.d + (P.h > 1 ? ', ' + P.h + ' heads' : '') });
     [this.X, this.N, this.Q].forEach((m, i) => { if (i) inRow.appendChild(el('span', 'arrow', '→')); inRow.appendChild(m.root); });
-    inRow.appendChild(el('div', 'dec-note', 'k = norm(x) · Wk and v = norm(x) · Wv are made the same way, ' + P.dkv + ' columns each, and go straight into the caches below. q is used once and dropped.'));
+    // This step's new k and v rows, drawn at their positions: exactly what gets appended to the caches.
+    this.kvNew = el('div', 'dec-new'); inRow.appendChild(this.kvNew);
     const top = el('div', 'dec-row'); root.appendChild(top);
     this.S = new Mat('S', P.T, P.T, { rv: 'q', cv: 'k', title: 'P = softmax(S), head 0', dims: 'future masked ×' });
-    const kvTitle = (m) => (P.cache ? m + ' cache' : m + ', recomputed every step');
-    this.K = new Mat('K', P.T, P.dkv, { rv: 't', cv: 'c', title: kvTitle('K'), dims: P.T + '×' + P.dkv });
-    this.V = new Mat('V', P.T, P.dkv, { rv: 't', cv: 'c', title: kvTitle('V'), dims: P.T + '×' + P.dkv });
+    // The caches are rebuilt every step at their CURRENT size, so they visibly grow by one row.
+    this.K = { root: el('div', 'dec-cache') }; this.V = { root: el('div', 'dec-cache') };
     this.O = new Mat('O', P.T, P.d, { rv: 't', cv: 'c', title: 'layer out', dims: P.T + '×' + P.d });
     [this.S, this.K, this.V, this.O].forEach((m) => top.appendChild(m.root));
+    // Cache size after every step: the prompt's rows at the prefill, then one more per token.
+    root.appendChild(el('div', 'pv-lab', P.cache ? 'KV cache size after each step' : 'Rows recomputed at each step (no cache)'));
+    this.grow = el('div', 'dec-grow'); root.appendChild(this.grow);
+    this.bars = P.steps.map((st) => {
+      const b = el('div', 'dec-bar'), h = P.cache ? st.L : st.n;
+      b.innerHTML = '<b>' + h + '</b><span style="height:' + (8 + 64 * h / P.T) + 'px"></span><i>' + (st.s === 0 ? 'prefill' : 't = ' + st.last) + '</i>';
+      b.title = st.s === 0 ? 'prefill: ' + P.Tp + ' rows' : 'token ' + st.last + ': ' + (P.cache ? (st.L - 1) + ' rows kept + 1 appended' : st.n + ' rows recomputed');
+      this.grow.appendChild(b); return b;
+    });
     this.cap = el('div', 'cap'); root.appendChild(this.cap);
     const foot = el('div', 'w-foot'); root.appendChild(foot);
     this.cnt = el('div', 'counters'); foot.appendChild(this.cnt);
@@ -2093,12 +2113,33 @@ details.console pre { margin: 0; padding: 0.6rem 0.8rem; max-height: 16rem; over
     }
     this.S.paint(cS, (r, c) => sTxt[key(r, c)] || (c > r ? '×' : ''));
     const cache = cur ? { K: cur.K, V: cur.V } : { K: [], V: [] };
-    const paintCache = (m, M) => {
+    const isNew = (p) => !!cur && p >= cur.p0 && p < cur.p0 + cur.n;
+    const readBack = !!cur && P.cache && cur.s > 0;
+    const drawCache = (host, name, M) => {
+      host.innerHTML = '';
+      const rowsNow = M.length;
+      if (!rowsNow) { host.appendChild(el('div', 'mat-title', '<b>' + name + ' cache</b><span>empty</span>')); return; }
+      const m = new Mat(name, rowsNow, P.dkv, { rv: 't', cv: 'c', title: P.cache ? name + ' cache: ' + rowsNow + ' rows' : name + ', recomputed: ' + rowsNow + ' rows', dims: rowsNow + ' × ' + P.dkv + ' = ' + rowsNow * P.dkv + ' numbers' });
       const cls = {};
-      M.forEach((r, p) => r.forEach((_, c) => addCls(cls, key(p, c), cur && p >= cur.p0 && p < cur.p0 + cur.n ? 'read' : 'past')));
-      m.paint(cls, (r, c) => (M[r] ? fmt(M[r][c]) : ''));
+      M.forEach((r, p) => r.forEach((_, c) => addCls(cls, key(p, c), isNew(p) ? 'read' : readBack ? 'kvback' : 'past')));
+      m.paint(cls, (r, c) => fmt(M[r][c]));
+      host.appendChild(m.root);
     };
-    paintCache(this.K, cache.K); paintCache(this.V, cache.V);
+    drawCache(this.K.root, 'K', cache.K); drawCache(this.V.root, 'V', cache.V);
+    // the new k and v rows, at their own positions, labelled as the append
+    this.kvNew.innerHTML = '';
+    if (cur) {
+      ['K', 'V'].forEach((name) => {
+        const rowsNew = cache[name].slice(cur.p0, cur.p0 + cur.n);
+        const m = new Mat(name, rowsNew.length, P.dkv, { rv: 't', cv: 'c', title: name.toLowerCase() + ' = norm(x) · W' + name.toLowerCase(), dims: rowsNew.length + ' new row' + (rowsNew.length > 1 ? 's' : '') });
+        m.rowH.forEach((h, i) => { h.textContent = String(cur.p0 + i); });
+        const cls = {}; rowsNew.forEach((r, i) => r.forEach((_, c) => addCls(cls, key(i, c), 'read')));
+        m.paint(cls, (r, c) => fmt(rowsNew[r][c]));
+        this.kvNew.appendChild(m.root);
+      });
+      this.kvNew.appendChild(el('div', 'dec-note', P.cache ? (cur.s === 0 ? '→ these ' + cur.n + ' rows <b>are</b> the cache after the prefill.' : '→ <b>appended</b>: the cache goes from ' + (cur.L - 1) + ' to ' + cur.L + ' rows. The ' + (cur.L - 1) + ' old rows (outlined) are read back from memory, not recomputed. q is used once and dropped.') : '→ all ' + cur.n + ' rows made again this step; nothing is kept for the next one.'));
+    }
+    this.bars.forEach((b, i) => { b.classList.toggle('done', i < this.t - 1); b.classList.toggle('now', i === this.t - 1); });
     const cO = {};
     for (let p = 0; p < L; p++) for (let c = 0; c < P.d; c++) addCls(cO, key(p, c), cur && p >= cur.p0 && p < cur.p0 + cur.n ? 'fin write' : 'fin');
     this.O.paint(cO, (r, c) => (r < L ? fmt(P.outs[r][c]) : '·'));
