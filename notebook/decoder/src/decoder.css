@@ -7,9 +7,12 @@
 .dec-tok.future { opacity: 0.3; border-style: dashed; } .dec-tok.now { box-shadow: 0 0 0 2.5px var(--fg); }
 .dec-row { display: flex; flex-wrap: wrap; gap: 0.8rem 1.2rem; align-items: flex-start; }
 .k-S.mask { background: repeating-linear-gradient(45deg, var(--surface-2) 0 2px, var(--surface) 2px 5px); color: var(--muted); border: 1px solid var(--line); font-size: 0.6rem; }
-.k-K.stay, .k-V.stay { opacity: 0.75; }
+
 .dec .mat { --cell: 1.85rem; } .dec .cell { font-size: 0.66rem; }
 .k-S.s-past { background: color-mix(in oklab, var(--sp) 9%, var(--surface)); color: var(--muted); border: 1px solid color-mix(in oklab, var(--sp) 30%, transparent); }
 .dec-code { display: flex; flex-wrap: wrap; gap: 0.6rem 1.2rem; align-items: flex-start; }
 .dec-code pre.code { margin: 0; flex: 0 1 auto; }
 .dec-now { flex: 1 1 16rem; font-size: 0.88rem; max-width: 30rem; padding-top: 0.3rem; }
+.cell.qgone { opacity: 0.35; border-style: dashed; }
+.dec-note { flex: 1 1 14rem; max-width: 20rem; font-size: 0.82rem; color: var(--muted); align-self: center; }
+.dec .cell.past { opacity: 0.6; }

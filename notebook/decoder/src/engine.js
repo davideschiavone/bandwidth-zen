@@ -54,7 +54,7 @@
     const n2 = normRows(x1, P.norm), up = matmul(n2, P.W.up), gate = P.W.gate ? matmul(n2, P.W.gate) : null;
     const f = up.map((r, i) => r.map((x, j) => (gate ? (P.act === 'swiglu' ? silu(gate[i][j]) : gelu(gate[i][j])) * x : P.act === 'relu' ? Math.max(0, x) : gelu(x))));
     const out = normRows(matmul(f, P.W.down).map((r, i) => r.map((x, c) => x + x1[i][c])), P.norm);
-    return { k, v, probs, out };
+    return { xs, n1, q, k, v, probs, out };
   }
   // Operations for rows p0 … p0+n−1, by the encoder's conventions; attention over p+1 keys per row.
   function rowOps(P, p0, n) {
@@ -71,7 +71,7 @@
       const kvRead = P.cache && s > 0 ? 2 * p0 * P.dkv : 0;          // past rows come back from memory
       const r = rows(P, p0, n, cache);
       r.out.forEach((row, i) => { outs[p0 + i] = row; });
-      steps.push({ s, p0, n, last, L: last + 1, probs: r.probs, out: r.out, kvRead, kvWrite: 2 * (P.cache ? n : 0) * P.dkv,
+      steps.push({ s, p0, n, last, L: last + 1, probs: r.probs, out: r.out, x: r.xs, n1: r.n1, q: r.q, kvRead, kvWrite: 2 * (P.cache ? n : 0) * P.dkv,
         ops: rowOps(P, p0, n), K: cache.K.map((x) => x.slice()), V: cache.V.map((x) => x.slice()) });
     }
     P.outs = outs;
@@ -135,6 +135,14 @@
     this.codeEl = el('pre', 'code'); codeRow.appendChild(this.codeEl);
     this.lineEls = this.lines.map((l) => { const d = el('div', 'ln', l.html); this.codeEl.appendChild(d); return d; });
     this.nowEl = el('div', 'dec-now'); codeRow.appendChild(this.nowEl);
+    // First the inputs of attention: x, norm(x) and q for the rows this step computes. q is not kept:
+    // only K and V go to the cache, because an old query is never needed again.
+    const inRow = el('div', 'dec-row'); root.appendChild(inRow);
+    this.X = new Mat('A', P.T, P.d, { rv: 't', cv: 'c', title: 'x = embed(token)', dims: P.T + '×' + P.d });
+    this.N = new Mat('A', P.T, P.d, { rv: 't', cv: 'c', title: 'norm(x)', dims: P.T + '×' + P.d });
+    this.Q = new Mat('Q', P.T, P.d, { rv: 't', cv: 'c', title: 'q = norm(x) · Wq', dims: P.T + '×' + P.d + (P.h > 1 ? ', ' + P.h + ' heads' : '') });
+    [this.X, this.N, this.Q].forEach((m, i) => { if (i) inRow.appendChild(el('span', 'arrow', '→')); inRow.appendChild(m.root); });
+    inRow.appendChild(el('div', 'dec-note', 'k = norm(x) · Wk and v = norm(x) · Wv are made the same way, ' + P.dkv + ' columns each, and go straight into the caches below. q is used once and dropped.'));
     const top = el('div', 'dec-row'); root.appendChild(top);
     this.S = new Mat('S', P.T, P.T, { rv: 'q', cv: 'k', title: 'P = softmax(S), head 0', dims: 'future masked ×' });
     const kvTitle = (m) => (P.cache ? m + ' cache' : m + ', recomputed every step');
@@ -173,6 +181,17 @@
     const cO = {};
     for (let p = 0; p < L; p++) for (let c = 0; c < P.d; c++) addCls(cO, key(p, c), cur && p >= cur.p0 && p < cur.p0 + cur.n ? 'fin write' : 'fin');
     this.O.paint(cO, (r, c) => (r < L ? fmt(P.outs[r][c]) : '·'));
+    // x, norm(x), q: values for every row computed so far; this step's rows lit, earlier ones dimmed,
+    // and earlier q rows marked as not kept.
+    const rowsNow = (p) => !!cur && p >= cur.p0 && p < cur.p0 + cur.n;
+    const val = { x: {}, n1: {}, q: {} };
+    done.forEach((st) => ['x', 'n1', 'q'].forEach((f) => st[f].forEach((row, i) => { val[f][st.p0 + i] = row; })));
+    const paintIn = (m, f, kind) => {
+      const cls = {};
+      for (let p = 0; p < L; p++) for (let c = 0; c < P.d; c++) addCls(cls, key(p, c), rowsNow(p) ? 'read' : f === 'q' ? 'qgone' : 'past');
+      m.paint(cls, (r, c) => (val[f][r] && (rowsNow(r) || f !== 'q') ? fmt(val[f][r][c]) : r < L && f === 'q' ? '–' : ''));
+    };
+    paintIn(this.X, 'x'); paintIn(this.N, 'n1'); paintIn(this.Q, 'q');
     const lit = !cur ? null : P.cache ? (cur.s === 0 ? 'pre' : 'dec') : 'all';
     this.lineEls.forEach((d, i) => d.classList.toggle('on', this.lines[i].v === lit));
     this.nowEl.innerHTML = !cur ? 'Nothing has run yet.'
