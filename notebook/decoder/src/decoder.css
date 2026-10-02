@@ -1,0 +1,12 @@
+/* The decoder's own pieces on the shared tokens: the token strip (prompt blue, generated green, the
+   future faded), the masked future in S, and the row of S, K, V and output matrices. */
+.dec-tokens { display: flex; flex-wrap: wrap; gap: 4px; }
+.dec-tok { display: inline-flex; flex-direction: column; align-items: center; min-width: 2.1rem; padding: 0.15rem 0.3rem; border-radius: 6px; font: 600 0.8rem var(--font-mono); border: 1.5px solid var(--a); background: color-mix(in oklab, var(--a) 12%, var(--surface)); }
+.dec-tok i { font: 500 0.6rem var(--font-mono); font-style: normal; color: var(--muted); }
+.dec-tok.gen { border-color: var(--c); background: color-mix(in oklab, var(--c) 14%, var(--surface)); }
+.dec-tok.future { opacity: 0.3; border-style: dashed; } .dec-tok.now { box-shadow: 0 0 0 2.5px var(--fg); }
+.dec-row { display: flex; flex-wrap: wrap; gap: 0.8rem 1.2rem; align-items: flex-start; }
+.k-S.mask { background: repeating-linear-gradient(45deg, var(--surface-2) 0 2px, var(--surface) 2px 5px); color: var(--muted); border: 1px solid var(--line); font-size: 0.6rem; }
+.k-K.stay, .k-V.stay { opacity: 0.75; }
+.dec .mat { --cell: 1.85rem; } .dec .cell { font-size: 0.66rem; }
+.k-S.s-past { background: color-mix(in oklab, var(--sp) 9%, var(--surface)); color: var(--muted); border: 1px solid color-mix(in oklab, var(--sp) 30%, transparent); }

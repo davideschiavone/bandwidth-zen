@@ -271,11 +271,13 @@
     this.cfg = cfg; this.root = root; root.classList.add('w', 'enc');
     this.baseSpeed = 700; this.t = 0;
     const chip = CHIPS[cfg.chip];
-    this.rows = costOf(cfg, cfg.chip); this.n = this.rows.length;
+    // A caller (the decoder notebook) may price its own list of operations: cfg.rowsFn returns the
+    // rows, cfg.closedFn the totals they must add up to, cfg.capFn a closing sentence of its own.
+    this.rows = (cfg.rowsFn || costOf)(cfg, cfg.chip); this.n = this.rows.length;
     this.total = this.rows.reduce((s, r) => s + r.t, 0);
     if (cfg.title !== false) {
       const head = el('div', 'w-head'); root.appendChild(head);
-      head.innerHTML = '<span class="chip">' + (cfg.batch > 1 ? cfg.batch + ' × ' : '') + 'T = ' + cfg.S + ' tokens · d = ' + cfg.d + ' · ' + cfg.h + ' heads · ffn = ' + cfg.ffn + '</span><span class="chip">' + chip.name + ': ' + fmtN(chip.peak) + 'OP/s, ' + fmtN(chip.bw) + 'B/s → ridge ' + Math.round(chip.peak / chip.bw) + ' OP/byte</span>';
+      head.innerHTML = '<span class="chip">' + (cfg.headFn ? cfg.headFn(cfg) : (cfg.batch > 1 ? cfg.batch + ' × ' : '') + 'T = ' + cfg.S + ' tokens') + ' · d = ' + cfg.d + ' · ' + cfg.h + ' heads · ffn = ' + cfg.ffn + '</span><span class="chip">' + chip.name + ': ' + fmtN(chip.peak) + 'OP/s, ' + fmtN(chip.bw) + 'B/s → ridge ' + Math.round(chip.peak / chip.bw) + ' OP/byte</span>';
     }
     this.tableWrap = el('div', 'tw'); root.appendChild(this.tableWrap);
     this.bar = el('div', 'enc-bar'); root.appendChild(this.bar);
@@ -302,10 +304,10 @@
     const mm = shown.filter((r) => r.kind === 'matmul'), at = shown.filter((r) => r.kind === 'attention'), ew = shown.filter((r) => ['norm', 'add', 'act', 'gather'].includes(r.kind));
     let cap = this.t === 0 ? 'Press <b>Step</b> to price the layer one operation at a time: <b>t = max(operations / peak, bytes / bandwidth)</b> — an operation whose OP/byte is above the ridge point (' + Math.round(ridge) + ') is compute-bound, below it memory-bound.' : '<b>' + this.rows[this.t - 1].title + '</b>: ' + fmtN(this.rows[this.t - 1].ops) + ' operations over ' + fmtN(this.rows[this.t - 1].bytes) + 'B — ' + this.rows[this.t - 1].bound + '-bound.';
     if (this.t === this.n) {
-      const cf = closedForm(cfg), ok = sum('ops') === cf.ops && sum('params') === cf.params;
+      const cf = (cfg.closedFn || closedForm)(cfg), ok = sum('ops') === cf.ops && sum('params') === cf.params;
       const share = (L) => Math.round(100 * L.reduce((s, r) => s + r.t, 0) / this.total);
       const attnW = this.rows.filter((r) => r.group === 'attn').reduce((s, r) => s + r.params, 0), ffnW = this.rows.filter((r) => r.group === 'ffn').reduce((s, r) => s + r.params, 0);
-      cap = 'Layer: <b>' + fmtTime(this.total) + '</b> — matmuls ' + share(mm) + '%, attention ' + share(at) + '%, norms, activations and residuals ' + share(ew) + '%. Its own weights (the embedding table belongs to the whole stack): attention ' + Math.round(100 * attnW / (attnW + ffnW)) + '%, FFN ' + Math.round(100 * ffnW / (attnW + ffnW)) + '%. ' + (ok ? '<span class="ok">Check: operations and parameters equal the closed form ✓</span>' : '<span class="tsp">✗</span>');
+      cap = 'Layer: <b>' + fmtTime(this.total) + '</b> — matmuls ' + share(mm) + '%, attention ' + share(at) + '%, norms, activations and residuals ' + share(ew) + '%. Its own weights (the embedding table belongs to the whole stack): attention ' + Math.round(100 * attnW / (attnW + ffnW)) + '%, FFN ' + Math.round(100 * ffnW / (attnW + ffnW)) + '%. ' + (cfg.capFn ? cfg.capFn(this.rows, this.total) + ' ' : '') + (ok ? '<span class="ok">Check: operations and parameters equal the closed form ✓</span>' : '<span class="tsp">✗</span>');
     }
     this.cap.innerHTML = cap;
     this.cnt.innerHTML = counters([
@@ -325,6 +327,8 @@
   const build = (cfg) => (cfg.type === 'cost' ? null : problem(cfg));
   const { mount, mountAll } = global.NB.widgets({ layer: LayerView, cost: CostView }, DEFAULTS, build, LAB);
 
-  global.ENC = { problem, forward, reference, close, layerOps, closedForm, costOf, CHIPS, NORM_OPS, ACT_OPS, LayerView, CostView, mount, mountAll, DEFAULTS };
+  // Shared with the decoder notebook: the arithmetic, the formats and the chips.
+  const _ = { matmul, map2, normRows, gelu, silu, fmt, fmtN, fmtTime, NORM_OPS, ACT_OPS, GATED, SOFTMAX_OPS, lcg };
+  global.ENC = { _, problem, forward, reference, close, layerOps, closedForm, costOf, CHIPS, NORM_OPS, ACT_OPS, LayerView, CostView, mount, mountAll, DEFAULTS };
   global.MM = { mountAll };
 })(typeof window !== 'undefined' ? window : globalThis);

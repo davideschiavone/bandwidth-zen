@@ -1,0 +1,90 @@
+<section class="slide title-slide" data-sec="Start">
+  <p class="eyebrow">The layer GPT and Llama stack · growing one token at a time</p>
+  <h1>One decoder layer, generating</h1>
+  <p class="formula">prompt once → then one token at a time, attending to the KV cache</p>
+  <p class="lede">The same norm, attention and FFN as the encoder — with one rule added: a token cannot look at the future. That rule is what lets generation keep its past instead of recomputing it.</p>
+  <div class="keys">
+    <span><kbd>→</kbd> next build or animation step</span><span><kbd>↓</kbd> to the end</span><span><kbd>←</kbd> back</span>
+    <span><kbd>PgDn</kbd> / <kbd>N</kbd> next slide</span><span><kbd>P</kbd> play</span><span><kbd>E</kbd> finish animation</span>
+  </div>
+</section>
+
+<section class="slide" data-sec="Generating">
+  <h2>Prefill once, then decode one token at a time</h2>
+  <div class="points">
+    <p class="b">A decoder reads the prompt and produces text one token after another, each new token fed back in as input.</p>
+    <p class="b"><b>Prefill:</b> all prompt tokens go through together. <b>Decode:</b> every later step pushes <b>one</b> token through every layer.</p>
+    <p class="b small"><b>T</b> = tokens so far (prompt + generated), growing by one per step · <b>d</b> = model width (4096 for Llama-3-8B) · <b>h</b> query heads · <b>kvh</b> key/value heads (8 for Llama-3-8B).</p>
+  </div>
+</section>
+
+<section class="slide" data-sec="Causal mask">
+  <h2>A token cannot look at the future</h2>
+  <div class="points">
+    <p class="b">The model is trained to predict the next token, so seeing it would be cheating: token t attends only to tokens 0 … t.</p>
+    <p class="b">S becomes a <b>lower triangle</b>: the cells above the diagonal are set to −∞ before the softmax and get probability 0.</p>
+    <p class="b">A causal prefill does about <b>half</b> the attention work of an encoder on the same tokens.</p>
+  </div>
+</section>
+
+<section class="slide" data-sec="Watch it grow">
+  <h2>Watch it grow</h2>
+  <p>Step 1 is the prefill: the prompt's triangle of S. Every later step adds one row to S, one row to each cache, one output — checked against a full causal recompute.</p>
+  <div data-widget='{"type":"gen","Tp":3,"G":4}'></div>
+</section>
+
+<section class="slide" data-sec="KV cache">
+  <h2>The KV cache: why the past can be kept</h2>
+  <div class="points">
+    <p class="b">Because of the mask, a token's K, V and output depend only on itself and earlier tokens. A later token changes <b>none</b> of them.</p>
+    <p class="b">So they are computed once and kept. A decode step computes K and V for the new token only, appends them, and <b>reads the rest back</b>.</p>
+    <p class="b">In an encoder there is no such choice: every token sees every token, so a new one changes all earlier outputs.</p>
+  </div>
+</section>
+
+<section class="slide" data-sec="Without a cache">
+  <h2>Cache on or off: same outputs, different work</h2>
+  <p>Switch the cache off and every step recomputes the whole sequence. The outputs are identical — the check passes either way — but the work grows with T² instead of T.</p>
+  <div data-widget='{"type":"gen","Tp":3,"G":4,"knobs":[{"k":"cache","v":[true,false],"labels":["on","off"]}]}'></div>
+</section>
+
+<section class="slide" data-sec="GQA">
+  <h2>Fewer key/value heads: a smaller cache</h2>
+  <p>The cache holds K and V for every token, layer and KV head, so models share each K/V head among several query heads (grouped-query attention). Same arithmetic, a smaller cache.</p>
+  <div data-widget='{"type":"gen","Tp":3,"G":3,"d":8,"h":4,"kvh":4,"ffn":8,"knobs":[{"k":"kvh","v":[4,2,1]}]}'></div>
+</section>
+
+<section class="slide" data-sec="One token">
+  <h2>One decode step: everything is memory-bound</h2>
+  <p>Llama-3-8B, one new token at context 4096, on A100. Every projection is a matrix-vector product: each weight read once, used once — far below the ridge point. The time is the time to stream the weights.</p>
+  <div data-widget='{"type":"cost","d":4096,"h":32,"kvh":8,"ffn":14336,"act":"swiglu","norm":"rmsnorm","vocab":128256,"layers":32,"L":4096,"chip":"a100","knobs":[{"k":"phase","v":["decode","prefill"]}]}'></div>
+</section>
+
+<section class="slide" data-sec="Long context">
+  <h2>Longer context: the cache takes over</h2>
+  <p>Weights cost the same every step; every new token reads <b>all</b> earlier K and V. At 32k tokens the cache rivals the weights.</p>
+  <div data-widget='{"type":"cost","d":4096,"h":32,"kvh":8,"ffn":14336,"act":"swiglu","norm":"rmsnorm","vocab":128256,"layers":32,"chip":"a100","knobs":[{"k":"L","v":[1024,4096,32768,131072]}]}'></div>
+</section>
+
+<section class="slide" data-sec="Batch">
+  <h2>Batch: shared weights, private caches</h2>
+  <p>Many users at once make every projection [B, d] × [d, d]: weights read once, used B times. Each sequence keeps its own cache, so batching multiplies the cache reads instead of sharing them.</p>
+  <div data-widget='{"type":"cost","d":4096,"h":32,"kvh":8,"ffn":14336,"act":"swiglu","norm":"rmsnorm","vocab":128256,"layers":32,"L":4096,"chip":"h100","knobs":[{"k":"batch","v":[1,8,32,128]}]}'></div>
+</section>
+
+<section class="slide" data-sec="Summary">
+  <h2>Two machines in one model</h2>
+  <div class="tw"><table class="rule">
+    <tr><th></th><th>prefill</th><th>decode</th></tr>
+    <tr class="b"><td>rows per weight</td><td>the whole prompt</td><td>1 per sequence</td></tr>
+    <tr class="b"><td>attention</td><td>causal triangle, T(T+1)/2 scores</td><td>one row over the cache</td></tr>
+    <tr class="b"><td>usually</td><td>compute-bound</td><td>memory-bound</td></tr>
+    <tr class="b"><td>sets</td><td>time to the first token</td><td>time per token after it</td></tr>
+    <tr class="b"><td>helped by</td><td>more compute, lower precision</td><td>bandwidth, batching, smaller weights and cache (GQA, quantisation)</td></tr>
+  </table></div>
+</section>
+
+<section class="slide title-slide" data-sec="End">
+  <h1>Look left, keep the past</h1>
+  <p class="lede">The causal mask is what makes a KV cache legal, and the cache is what makes decode a memory problem. The notebook lets you turn every knob, on tiny numbers and on real models.</p>
+</section>

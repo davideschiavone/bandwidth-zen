@@ -69,6 +69,17 @@
     </div>
   </section>
 
+  <section class="topic">
+    <p class="eyebrow">The layer GPT and Llama stack · growing one token at a time</p>
+    <h2 class="topic">One decoder layer, generating</h2>
+    <p class="formula">prompt once → then one token at a time, attending to the KV cache</p>
+    <p>The causal mask — a token cannot look at the future — and the KV cache it makes possible: the prompt's triangle of attention, then one new row per generated token, with the cache on or off. Then one decode step of a real model on a real chip: memory-bound, the cache growing with the context, what batching and grouped-query attention change, and prefill against decode.</p>
+    <div class="cards">
+      <a class="card" href="decoder/deck.html"><b>Slide deck</b><span>12 slides with step-by-step animations.</span><em>open decoder/deck.html →</em></a>
+      <a class="card" href="decoder/notebook.html"><b>Interactive notebook</b><span>12 chapters and live knobs: prompt and generated tokens, KV cache on/off, KV heads, model, context, batch, phase, chip.</span><em>open decoder/notebook.html →</em></a>
+    </div>
+  </section>
+
   <section>
     <h2>Keys</h2>
     <ul>

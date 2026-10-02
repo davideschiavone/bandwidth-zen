@@ -1,10 +1,10 @@
 {
   "name": "bandwidth-zen-notebooks",
   "private": true,
-  "description": "Interactive notebooks and slide decks: matmul rearranged, attention as FlashAttention, and one encoder layer.",
+  "description": "Interactive notebooks and slide decks: matmul rearranged, attention as FlashAttention, one encoder layer, and one decoder layer generating.",
   "scripts": {
-    "build": "python3 matmul/src/build.py && python3 attention/src/build.py && python3 encoder/src/build.py",
-    "test": "node matmul/tests/check.js && node attention/tests/check.js && node encoder/tests/check.js"
+    "build": "python3 matmul/src/build.py && python3 attention/src/build.py && python3 encoder/src/build.py && python3 decoder/src/build.py",
+    "test": "node matmul/tests/check.js && node attention/tests/check.js && node encoder/tests/check.js && node decoder/tests/check.js"
   },
   "devDependencies": {
     "jsdom": "^24.1.0"
